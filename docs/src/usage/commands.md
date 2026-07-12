@@ -1,0 +1,988 @@
+# REPL Commands
+
+All commands start with `/`. Type `/help` inside arc to see the full list.
+
+> **Note:** A few commands are also available as shell subcommands — run them
+> directly without entering the REPL:
+>
+> | Subcommand | Description |
+> |------------|-------------|
+> | `arc help` | Show help message (same as `--help`) |
+> | `arc version` | Show version (same as `--version`) |
+> | `arc setup` | Run the interactive setup wizard |
+> | `arc init` | Generate a arc.md project context file |
+> | `arc doctor` | Diagnose arc setup (config file, API key, provider, tool availability) |
+> | `arc health` | Run project health checks (build, test, clippy, fmt — auto-detects project type) |
+> | `arc lint` | Run project linter (e.g. `arc lint --strict`, `arc lint unsafe`) |
+> | `arc test` | Run project test suite |
+> | `arc tree` | Show project directory tree |
+> | `arc map` | Show project symbol map |
+> | `arc run` | Run a shell command (e.g. `arc run cargo clippy`) |
+> | `arc diff` | Show git diff (e.g. `arc diff --staged`) |
+> | `arc commit` | Commit staged changes (e.g. `arc commit "fix typo"`) |
+> | `arc review` | AI-powered code review (non-interactive, pipeable to files/CI) |
+> | `arc blame` | Show git blame (e.g. `arc blame src/main.rs:1-20`) |
+> | `arc grep` | Search files for a pattern (e.g. `arc grep TODO src/`) |
+> | `arc find` | Find files by name (e.g. `arc find main`) |
+> | `arc index` | Build and display project index |
+> | `arc update` | Check for and install the latest arc release |
+> | `arc docs` | Look up docs.rs documentation (e.g. `arc docs serde`) |
+> | `arc watch` | Toggle watch mode (e.g. `arc watch all` for two-phase lint→test, `arc watch cargo test`). Runs only after turns that change files — skipped when a prompt changes nothing |
+> | `arc status` | Show version, git branch, and working directory |
+> | `arc undo` | Undo changes (e.g. `arc undo --last-commit`) |
+>
+> `doctor` honors `--provider` and `--model` if you want to point it at a non-default setup
+> (e.g. `arc doctor --provider openai`). Inside the REPL, the same checks are available
+> as `/doctor` and `/health`.
+
+## Navigation
+
+| Command | Description |
+|---------|-------------|
+| `/quit`, `/exit` | Exit arc |
+| `/help` | Show available commands |
+| `/help <command>` | Show detailed help for a specific command |
+| `/cd <path>` | Change the working directory (`~` expansion and relative paths supported); `/cd` alone prints the current directory |
+
+Note: `/cd` changes the directory used for subsequent commands and tool calls,
+but project context (arc.md, CLAUDE.md, etc.) loaded at startup is **not**
+reloaded — use `/context` to review what was loaded.
+
+## Conversation
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Clear conversation history and start fresh (the conversation is auto-stashed first — `/rewind` or `/stash pop` to restore it) |
+| `/rewind` | Restore the conversation auto-stashed by the last `/clear` (consuming: one rewind per clear) |
+| `/compact` | Compress conversation to save context space (see [Context Management](../features/context.md)) |
+| `/retry` | Re-send your last input — useful when a response gets cut off or you want to try again |
+| `/retry --with "..."` | Re-run with additional instructions appended (iterative refinement) |
+| `/history` | Show a summary of all messages in the conversation |
+| `/history detail` | Per-turn breakdown with tools used and token counts |
+| `/search <query>` | Search conversation history for messages containing the query (case-insensitive) |
+| `/mark <name>` | Bookmark the current conversation state |
+| `/jump <name>` | Restore conversation to a bookmark (discards messages after it) |
+| `/marks` | List all saved bookmarks |
+
+### Conversation bookmarks
+
+The `/mark` and `/jump` commands let you bookmark points in your conversation and return to them later. This is useful when exploring different approaches — bookmark a good state, try something, and jump back if it doesn't work out.
+
+```
+> /mark before-refactor
+  ✓ bookmark 'before-refactor' saved (12 messages)
+
+> ... try something risky ...
+
+> /jump before-refactor
+  ✓ jumped to bookmark 'before-refactor' (12 messages)
+
+> /marks
+  Saved bookmarks:
+    • before-refactor
+```
+
+Bookmarks are stored in memory for the current session. Overwriting a bookmark with the same name updates it. Jumping to a bookmark restores the conversation to exactly that point — any messages added after the bookmark are discarded.
+
+## Model, Provider & Thinking
+
+| Command | Description |
+|---------|-------------|
+| `/model <name\|list\|info>` | Switch, list, or inspect models |
+| `/provider <name>` | Switch provider and reset model to the provider's default |
+| `/think [level]` | Show or change thinking level: `off`, `minimal`, `low`, `medium`, `high` |
+| `/teach [on\|off]` | Toggle teach mode — arc explains its reasoning as it works |
+
+Examples:
+```
+/model claude-sonnet-4-20250514
+/model list
+/model list anthropic
+/provider openai
+/provider google
+/think high
+/think off
+```
+
+The `/model` command preserves conversation when switching models. Use `/model list` to browse all available models grouped by provider, or `/model list <provider>` to show models for a specific provider. The `/provider` command switches to a different API provider (e.g., `anthropic`, `openai`, `google`, `openrouter`, `ollama`, `xai`, `groq`, `deepseek`, `mistral`, `cerebras`, `custom`) and automatically sets the model to the provider's default. Use `/provider` without arguments to see the current provider and available options. The `/think` command adjusts the thinking level.
+
+The `/teach` command toggles teach mode on or off. When teach mode is active, arc explains *why* it's making each change before showing code, uses clear and readable patterns, adds comments on non-obvious lines, and summarizes what you should learn after completing a task. Great for learning while the agent codes. This is a session-only toggle — it resets when you exit.
+
+## Session
+
+| Command | Description |
+|---------|-------------|
+| `/save [path]` | Save conversation to a file (default: `arc-session.json`) |
+| `/load [path]` | Load conversation from a file (default: `arc-session.json`) |
+
+See [Session Persistence](../features/sessions.md) for details.
+
+## Information
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Show session dashboard: model, git branch, active modes, goal, watch command, file changes, tokens, and context usage |
+| `/tokens` | Show detailed token usage: context window fill level, per-category breakdown, session totals, and estimated cost |
+| `/cost` | Show estimated session cost |
+| `/changelog [N]` | Show recent git commit history (default: 15, max: 100) |
+| `/config` | Show all current settings |
+| `/config show` | Show loaded config file path and merged key-value pairs (secrets masked) |
+| `/config edit` | Open config file in `$EDITOR` |
+| `/hooks` | Show active hooks (pre/post tool execution) |
+| `/permissions` | Show active security and permission configuration |
+| `/version` | Show arc version |
+
+The `/tokens` command shows a visual progress bar of your active context plus a per-category breakdown of what's consuming tokens:
+
+```
+  Active context:
+    messages:    12
+    current:     45.2k / 200.0k tokens
+
+  Context breakdown:
+    system prompt       ~1.0k tokens  (2%)
+    user messages        8.1k tokens  (18%)
+    assistant           12.3k tokens  (27%)
+    tool calls           2.4k tokens  (5%)
+    tool results        21.4k tokens  (47%)
+    ──────────────────────────────────────
+    total               45.2k tokens
+```
+
+The largest category is highlighted in bold. If tool results exceed 50% of context, arc suggests using `/compact`.
+
+## Documentation
+
+| Command | Description |
+|---------|-------------|
+| `/docs <crate>` | Look up docs.rs documentation for a Rust crate |
+| `/docs <crate> <item>` | Look up a specific module/item within a crate |
+
+The `/docs` command fetches the docs.rs page for a given crate and shows a quick summary — confirming the crate exists, displaying its description, and listing the crate's API items (modules, structs, traits, enums, functions, macros). No tokens used, no AI involved.
+
+Each category is capped at 10 items with a "+N more" suffix for large crates.
+
+```
+/docs serde
+  ✓ serde
+  📦 https://docs.rs/serde/latest/serde/
+  📝 A generic serialization/deserialization framework
+
+  Modules: de, ser
+  Traits: Deserialize, Deserializer, Serialize, Serializer
+  Macros: forward_to_deserialize_any
+
+/docs tokio task
+  ✓ tokio::task
+  📦 https://docs.rs/tokio/latest/tokio/task/
+  📝 Asynchronous green-threads...
+```
+
+## Shell
+
+| Command | Description |
+|---------|-------------|
+| `/run <cmd>` | Run a shell command directly — no AI, no tokens used |
+| `!<cmd>` | Shortcut for `/run` |
+| `/bg [subcmd]` | Manage background shell processes |
+| `/web <url>` | Fetch a web page and display clean readable text content |
+
+The `/run` command (or `!` shortcut) lets you execute shell commands without going through the AI model. Useful for quick checks (e.g., `!git log --oneline -5`) without burning API tokens. If the command fails, arc shows a brief error preview and suggests asking the AI to analyze the failure or using `/fix` to auto-fix.
+
+```
+/run ls -la src/
+/run cargo test
+/run git status
+```
+
+### `/bg` — Background process management
+
+The `/bg` command lets you launch shell commands in the background, monitor their output, and kill them when done. Useful for long-running tasks like builds, test suites, or dev servers.
+
+| Subcommand | Description |
+|------------|-------------|
+| `/bg run <cmd>` | Launch a command in the background |
+| `/bg list` | Show all background jobs (default when no subcommand) |
+| `/bg output <id>` | Show last 50 lines of a job's output |
+| `/bg output <id> --all` | Show all captured output |
+| `/bg kill <id>` | Kill a running job |
+
+```
+/bg run cargo build --release
+  ⚡ Background job [1] started: cargo build --release
+
+/bg list
+  Background Jobs
+    [1]  ● running  12s  cargo build --release
+
+/bg output 1
+  ... (last 50 lines of build output)
+
+/bg kill 1
+  Killed job [1]
+```
+
+Output is capped at 256KB per job to prevent memory issues. Jobs display colored status: green for success, red for failure, yellow for running.
+
+### `/web` — Fetch and read web pages
+
+The `/web` command fetches a URL and extracts readable text content, stripping away HTML tags, scripts, styles, and navigation. This is useful for quickly pulling in documentation, error explanations, API references, or any web content without getting raw HTML.
+
+```
+/web https://doc.rust-lang.org/book/ch01-01-installation.html
+/web docs.rs/serde
+/web https://stackoverflow.com/questions/12345
+```
+
+Features:
+- **Auto-prepends `https://`** if you omit the protocol — `/web docs.rs/serde` works
+- **Strips noise** — removes `<script>`, `<style>`, `<nav>`, `<footer>`, `<header>`, and `<svg>` blocks
+- **Converts structure** — headings become prominent, list items get bullets, block elements get newlines
+- **Decodes entities** — `&amp;`, `&lt;`, `&gt;`, `&#NNN;`, `&nbsp;`, etc.
+- **Truncates** — caps output at ~5,000 characters to keep it readable
+- **No AI tokens used** — pure curl + text extraction
+
+## Subagent & Planning
+
+| Command | Description |
+|---------|-------------|
+| `/plan [on\|off\|task]` | Plan mode toggle or one-shot task plan (architect mode) |
+| `/spawn <task>` | Spawn a subagent with a fresh context to handle a task |
+| `/side <question>` | Quick question without tools — doesn't affect main conversation |
+| `/quick <question>` | Fast single-turn answer — no tools, no agent loop |
+
+### `/plan` — Architect mode & plan mode toggle
+
+The `/plan` command has two modes:
+
+**Plan mode toggle** — enter a sustained read-only mode where the agent can read, search, and analyze but won't modify files or run destructive commands:
+
+```
+> /plan on
+  📋 Plan mode ON — agent will read and think but not modify files or run commands.
+  Use /plan off to return to normal mode.
+
+main 📋 🐙 ›
+```
+
+When plan mode is on, every message you send is prefixed with a constraint telling the agent to think and analyze without writing. The REPL prompt shows a 📋 indicator. Use `/plan off` (or `/plan close`) to return to normal operation.
+
+**One-shot planning** — ask the AI to create a detailed, structured plan for a task **without executing any tools**. Each file the plan names includes an `Approach:` line stating *what* changes in that file and *how* (the function/section to touch and the nature of the edit):
+
+```
+> /plan add caching to the database layer
+
+  📋 Planning: add caching to the database layer
+
+  ## Files to examine
+  - src/db.rs — current database implementation
+  - src/config.rs — configuration for cache TTL
+
+  ## Files to modify
+  - src/db.rs — add cache layer
+    Approach: wrap `query()` in a cache lookup; add a cache field to the `Db` struct
+  - src/cache.rs — new file for cache implementation
+    Approach: add an `LruCache` struct with get/put methods
+  - tests/cache_test.rs — new tests
+
+  ## Step-by-step approach
+  1. Read src/db.rs to understand current query patterns
+  2. Create src/cache.rs with an LRU cache struct
+  3. Wrap database queries with cache lookups
+  4. Add cache invalidation on writes
+  5. Add configuration for cache size and TTL
+
+  ## Tests to write
+  - Cache hit returns cached value
+  - Cache miss falls through to database
+  - Write invalidates relevant cache entries
+
+  ## Potential risks
+  - Cache invalidation on complex queries
+  - Memory pressure with large result sets
+
+  ## Verification
+  - Run existing tests to ensure no regressions
+  - Run new cache tests
+  - Benchmark query latency before/after
+
+  💡 Review the plan above. Say "go ahead" to execute it, or refine it.
+```
+
+After reviewing the plan, you can:
+- Say **"go ahead"** to have the agent execute the plan
+- Ask the agent to **refine** specific parts ("make the cache configurable")
+- **Modify** the approach ("use Redis instead of in-memory")
+- Say **"no"** or change direction entirely
+
+This is especially useful for:
+- **Large refactors** where you want to understand the scope before committing
+- **Unfamiliar codebases** where you want the agent to map things out first
+- **Trust and transparency** — see the full plan before any files are modified
+- **Teaching moments** — the plan itself teaches you about the codebase structure
+
+### `/spawn` — Subagent
+
+The `/spawn` command creates a fresh AI agent with its own independent context window, sends it your task, runs it to completion, and injects the result back into your main conversation.
+
+This is useful for tasks that would consume a lot of context in your main session — reading large files, multi-step analysis, exploring unfamiliar code — without polluting your primary conversation history.
+
+```
+/spawn read all files in src/ and summarize the architecture
+/spawn find all TODO comments in the codebase and list them
+/spawn analyze the test coverage and suggest gaps
+```
+
+The subagent has access to the same tools (bash, file operations, etc.) and uses the same model. Its token usage counts toward your session total, but its context is completely separate from your main conversation. When it finishes, a summary of the task and result is injected into your main conversation so you have awareness of what was done.
+
+**Completion handoff — ready-to-review branches**: spawn workers run in isolated git worktrees. When a worker finishes successfully with uncommitted file changes in its worktree, those changes are automatically committed to the worktree branch (commit message `spawn: <task description>`), and the result includes a handoff line:
+
+```
+ready to review: branch spawn/3-1712345678 — 3 files changed (+42/-7)
+review with: git diff main...spawn/3-1712345678
+```
+
+The same line appears in `/spawn status` output for completed tasks. If the worker made no file changes, you'll see `no file changes to hand off`; if the commit itself fails, the failure is reported honestly and the worker's text result is still delivered without a handoff. By default nothing is pushed and no PR is opened — the branch stays local for you to review and merge.
+
+**`--pr` — opt-in draft PR on completion**: pass `--pr` to have a finished handoff pushed and opened as a draft pull request:
+
+```
+/spawn --pr fix the flaky retry test in src/prompt_retry.rs
+```
+
+When the handoff commit lands, arc runs `git push -u origin spawn/<id>` and then `gh pr create --draft` with the task as the title and the handoff summary as the body, printing the PR URL on success. This is strictly opt-in — without the flag, behavior is unchanged.
+
+Degradation is graceful and reported honestly, and the local branch always remains the result:
+
+- `gh` not on PATH → `skipped PR: gh not found` (local-branch handoff line still shown)
+- push fails (no remote, auth, network) → `push failed: <first line of stderr>`
+- PR creation fails after a successful push → the pushed branch is reported alongside the failure
+- worker made no changes (or no handoff commit) → the PR step is skipped quietly
+
+> **Automatic sub-agent delegation**: In addition to `/spawn`, the model can autonomously delegate subtasks to a built-in `sub_agent` tool. This happens transparently — the model decides when a subtask benefits from a fresh context window (e.g., researching a codebase section, running a series of tests). You'll see a 🐙 indicator when delegation occurs.
+
+## Git
+
+| Command | Description |
+|---------|-------------|
+| `/git status` | Show working tree status (`git status --short`) — quick shortcut |
+| `/git log [n]` | Show last n commits (default: 5) via `git log --oneline` |
+| `/git add <path>` | Stage files for commit |
+| `/git stash` | Stash uncommitted changes |
+| `/git stash pop` | Restore stashed changes |
+| `/git stash list` | List all stash entries with colored output |
+| `/git stash show [n]` | Show diff of stash entry (default: latest) |
+| `/git stash drop [n]` | Drop a stash entry (default: latest) |
+| `/commit [msg]` | Commit staged changes — generates a conventional commit message if no msg provided |
+| `/commit --amend [msg]` | Amend last commit — replace message, or keep existing with `--no-edit` |
+| `/diff` | Show colored file summary, change stats, and full diff of uncommitted changes |
+| `/blame <file>` | Show colorized git blame output (`/blame file:10-20` for line ranges) |
+| `/undo` | Revert all uncommitted changes (`git checkout -- .` and `git clean -fd`) |
+| `/pr [number]` | List open PRs (`gh pr list`), or view a specific PR (`gh pr view <number>`) |
+| `/pr create [--draft]` | Create a PR with an AI-generated title and description |
+| `/pr <number> diff` | Show the diff of a PR (`gh pr diff <number>`) |
+| `/pr <number> comment <text>` | Add a comment to a PR (`gh pr comment <number>`) |
+| `/pr <number> checkout` | Checkout a PR branch locally (`gh pr checkout <number>`) |
+| `/health` | Run project health checks — auto-detects project type, reports pass/fail with timing |
+| `/test` | Auto-detect and run project tests — shows output with timing |
+| `/lint` | Auto-detect and run project linter — shows output with timing, feeds failures to agent context |
+| `/lint pedantic` | Run with pedantic clippy lints (Rust only) |
+| `/lint strict` | Run with pedantic + nursery clippy lints (Rust only) |
+| `/lint fix` | Run linter and auto-send failures to AI for fixing |
+| `/lint unsafe` | Scan for unsafe code blocks and suggest safety attributes (Rust only) |
+| `/fix` | Auto-fix build/lint errors — runs health checks, sends failures to the AI agent for fixing |
+| `/loop <N\|until-pass> <prompt>` | Repeat a prompt in a polling loop — runs N times or until the last tool call succeeds |
+| `/update` | Self-update arc to the latest GitHub release — detects platform, downloads, replaces the binary |
+
+The `/git` command is a convenience wrapper for common git operations without burning AI tokens or using `/run git ...`. For example:
+
+```
+/git status          # instead of /run git status --short
+/git log 10          # instead of /run git log --oneline -10
+/git add src/main.rs # stage a file
+/git stash           # stash changes
+/git stash pop       # restore stash
+/git stash list      # see all stash entries
+/git stash show 1    # view diff of stash@{1}
+/git stash drop 0    # drop the latest stash
+```
+
+The `/commit` command helps you commit staged changes quickly:
+- `/commit` (no arguments): reads your staged diff, generates a conventional commit message (e.g., `feat(main): add changes`), and asks for confirmation — press `y` to accept, `n` to cancel, or `e` to edit
+- `/commit fix: typo in README`: commits directly with your provided message
+- `/commit --amend new message`: amend the last commit with a new message
+- `/commit --amend`: amend with staged changes — shows current message and asks to keep or edit
+- `/commit -a --amend`: auto-stage tracked files and amend the last commit
+- If nothing is staged, it reminds you to `git add` first
+
+The `/undo` command shows you what will be reverted before doing it.
+
+The `/pr` command is a quick wrapper around the [GitHub CLI](https://cli.github.com):
+
+- `/pr` — list the 10 most recent open pull requests
+- `/pr create` — create a PR with an AI-generated title and description from your branch's diff and commits
+- `/pr create --draft` — same, but as a draft PR
+- `/pr 42` — view details of PR #42
+- `/pr 42 diff` — show the diff for PR #42
+- `/pr 42 comment looks good!` — add a comment to PR #42
+- `/pr 42 checkout` — checkout PR #42's branch locally
+
+For merging or closing PRs, use `/run gh pr ...` or ask the agent directly — it has full bash access.
+
+The `/health` command auto-detects your project type by looking for marker files and runs the appropriate checks:
+
+- **Rust** (`Cargo.toml`): `cargo build`, `cargo test`, `cargo clippy`, `cargo fmt --check`
+- **Node.js** (`package.json`): `npm test`, `npx eslint .`
+- **Python** (`pyproject.toml`, `setup.py`, `setup.cfg`): `pytest`, `flake8`, `mypy`
+- **Go** (`go.mod`): `go build`, `go test`, `go vet`
+- **Makefile** (`Makefile`): `make test`
+
+If no recognized project type is found, it shows a helpful message listing the marker files it looked for.
+
+The `/test` command is a focused shortcut that only runs the test suite for your project (e.g., `cargo test`, `npm test`, `python -m pytest`, `go test ./...`, `make test`). It auto-detects the project type the same way `/health` does, but runs just the tests — with full output and timing. This is handy for a quick test run without the full suite of lint/build checks that `/health` performs.
+
+The `/lint` command is similar to `/test` but runs only the linter for your project. It auto-detects the project type and runs the appropriate linter:
+
+- **Rust**: `cargo clippy --all-targets -- -D warnings`
+- **Node.js**: `npx eslint .`
+- **Python**: `ruff check .`
+- **Go**: `golangci-lint run`
+
+For Rust projects, you can increase clippy's strictness:
+
+- `/lint pedantic` — adds `-W clippy::pedantic` for stricter style checks
+- `/lint strict` — adds `-W clippy::pedantic -W clippy::nursery` for maximum analysis
+
+Strictness levels only affect Rust projects; other languages use their default linter regardless.
+
+When lint fails, the error output is automatically fed into the agent context so you can ask the AI about the errors in your next message. For fully automated fixing, use `/lint fix` — this runs the linter and, if there are failures, sends them directly to the AI agent for correction (similar to `/fix` but lint-only).
+
+The `/fix` command goes one step further than `/health` — it runs the same health checks, but when any check fails, it sends the full error output to the AI agent with a prompt to fix the issues. The AI reads the relevant files, understands the errors, and applies fixes using its tools. After fixing, it re-runs the checks to verify. This is particularly useful for quickly resolving lint warnings, format issues, or build errors.
+
+```
+/fix
+  Detected project: Rust (Cargo)
+  Running health checks...
+  ✓ build: ok
+  ✗ clippy: FAIL
+  ✓ fmt: ok
+
+  Sending 1 failure(s) to AI for fixing...
+```
+
+### `/loop` — Repeat a prompt in a polling loop
+
+The `/loop` command runs a prompt repeatedly — either a fixed number of times or until the last tool call succeeds. This is useful for iterative fix-and-test cycles, polling checks, or any task that needs repeated attempts.
+
+```
+/loop 5 run the tests and fix any failures
+/loop until-pass run cargo test
+/loop 3 check if the server is responding
+```
+
+**Syntax:** `/loop <N|until-pass> <prompt>`
+
+- **N** (1–100): Run the prompt exactly N times, with a 1-second pause between iterations so you can Ctrl+C to stop early.
+- **until-pass**: Run repeatedly until the last tool call exits without error (e.g. a bash command that returns exit code 0). Safety-capped at 20 iterations.
+
+Each iteration prints a separator showing the current iteration number. In `until-pass` mode, the loop also shows a success message when it stops.
+
+### `/update` — Self-update to latest release
+
+The `/update` command checks GitHub for the latest release and downloads the new binary in-place.
+
+```
+/update
+  Update available: v0.1.5 → v0.2.0
+  This will download and replace the current binary.
+  Continue? [y/N] y
+  Downloading arc-x86_64-unknown-linux-gnu.tar.gz...
+  ✓ Updated to v0.2.0! Please restart arc to use the new version.
+```
+
+The command:
+- Detects your platform (Linux x86_64, macOS Intel/ARM, Windows x86_64)
+- Creates a backup of the current binary before replacing
+- Restores the backup if anything goes wrong
+- Suggests manual install instructions as a fallback
+
+If you're running a development build (from `cargo build`), it will suggest using `cargo install arc-agent` instead.
+
+## Code Review
+
+| Command | Description |
+|---------|-------------|
+| `/review` | AI-powered review of staged changes (falls back to unstaged if nothing staged) |
+| `/review <path>` | AI-powered review of a specific file |
+| `/review HEAD~3..HEAD` | Review a specific commit range |
+| `/review --pr 123` | Review a GitHub PR |
+
+The `/review` command sends your code to the AI for a thorough review covering:
+
+1. **Bugs** — logic errors, off-by-one errors, null handling, race conditions
+2. **Security** — injection vulnerabilities, unsafe operations, credential exposure
+3. **Style** — naming, idiomatic patterns, unnecessary complexity, dead code
+4. **Performance** — obvious inefficiencies, unnecessary allocations
+5. **Suggestions** — improvements, missing error handling, better approaches
+
+```
+/review              # review staged changes (or unstaged if nothing staged)
+/review src/main.rs  # review a specific file
+/review Cargo.toml   # review any file
+```
+
+### Non-interactive review (CLI subcommand)
+
+`arc review` also works as a CLI subcommand — no REPL or interactive session needed. This makes it usable in CI pipelines, git hooks, and scripts:
+
+```bash
+arc review                   # review staged/unstaged changes
+arc review HEAD~3..HEAD      # review a commit range
+arc review --pr 42           # review a GitHub PR
+arc review src/main.rs       # review a specific file
+arc review > review.md       # pipe review to a file
+```
+
+The review streams to stderr for visual feedback; the final review text goes to stdout so it can be piped or redirected. Exit code is 0 on success, 1 on error.
+
+This is one of the most common workflows for developers using coding agents — getting a second pair of eyes on your changes before committing.
+
+## Risk Analysis
+
+| Command | Description |
+|---------|-------------|
+| `/risk` | Show the top 15 riskiest files, ranked by predicted regression risk |
+| `/risk --all` | Show all scored files, not just the top 15 |
+| `/risk snapshot` | Save the current risk ranking for later validation |
+| `/risk validate` | Check the last snapshot against files that actually changed since |
+| `/risk history` | Show past snapshots and validation results |
+| `/risk predict` | Predict which files are most likely to break next |
+| `/risk accuracy` | Show prediction accuracy, per-signal breakdown, and learned weights |
+| `/risk effectiveness` | Measure whether the risk reflex is actually improving over time |
+
+The `/risk` command analyzes source files and ranks them by predicted
+regression risk using weighted signals from git history: change frequency
+(30-day churn), recent fix/bugfix commits, co-change coupling, file size,
+author churn, test coverage mapping, and revert involvement.
+
+The snapshot → validate loop measures prediction accuracy: run
+`/risk snapshot`, keep coding, then `/risk validate` to see which predictions
+were right (Precision@10) and what surprised you.
+
+### `/risk effectiveness` — Is the reflex learning?
+
+`/risk effectiveness` answers a harder question than `/risk accuracy`: not
+"how accurate are the predictions?" but "is the prediction loop *getting
+better* as validation history accumulates?"
+
+It splits your validation history chronologically into an early window (first
+half) and a recent window (second half), reports the event count and hit rate
+for each, and emits a verdict based on the delta:
+
+- Recent hit rate ≥5 points better than early → `reflex appears to be learning ↑`
+- Within ±5 points → `no measurable improvement yet — need more cycles`
+- ≥5 points worse → `reflex may be decorative ↓ — consider anticipatory signals`
+- Fewer than 6 total validation events → `insufficient data` (the split is
+  skipped until enough history accumulates)
+
+The report also surfaces the overall accuracy trend (the same signal shown by
+`/status`), so the two views always agree.
+
+```
+/risk effectiveness    # early vs recent hit rate + verdict
+```
+
+This is a read-only report over the local validation history in
+`.arc/risk_validations.jsonl`. On a repo with no validation history it
+degrades gracefully to the "insufficient data" verdict — no setup required.
+
+## Issue Revisiting
+
+| Command | Description |
+|---------|-------------|
+| `/revisit` | Scan recently closed issues for shelved candidates |
+| `/revisit scan` | Same as above (default subcommand) |
+| `/revisit check #N` | Inspect a specific closed issue and summarize why it was shelved |
+| `/revisit list` | Show issues tracked as revisit candidates |
+| `/revisit add #N <reason>` | Mark a closed issue for future review |
+| `/revisit remove #N` | Remove an issue from the revisit list |
+
+The `/revisit` command helps review closed or shelved GitHub issues that may now be feasible given new capabilities. Issues with labels like `wontfix`, `deferred`, or `too-complex` are highlighted as shelved candidates.
+
+Revisit candidates are stored in `.arc/revisit.json` and persist across sessions.
+
+```
+/revisit                    # scan recently closed issues
+/revisit check #42          # inspect why issue #42 was closed
+/revisit add #42 Now have better infrastructure
+/revisit list               # see all tracked candidates
+/revisit remove #42         # stop tracking issue #42
+```
+
+## Refactoring
+
+| Command | Description |
+|---------|-------------|
+| `/refactor` | Show all refactoring tools with examples |
+| `/rename <old> <new>` | Cross-file symbol renaming with word-boundary matching |
+| `/extract <symbol> <source> <target>` | Move a symbol (fn, struct, enum, trait, type, const, static) between files |
+| `/move <Src>::<method> [file::]<Dst>` | Move a method between impl blocks (same file or cross-file) |
+
+### `/refactor` — Refactoring tools overview
+
+The `/refactor` command is an umbrella that shows all available refactoring tools at a glance. Run it with no arguments to see a summary with examples:
+
+```
+/refactor
+```
+
+You can also use it as a dispatch to any refactoring subcommand:
+
+```
+/refactor rename MyOldStruct MyNewStruct
+/refactor extract parse_config src/lib.rs src/config.rs
+/refactor move Parser::validate Validator
+```
+
+These are equivalent to calling `/rename`, `/extract`, or `/move` directly — use whichever form you prefer.
+
+### `/rename` — Cross-file symbol renaming
+
+The `/rename` command does a smart find-and-replace across all git-tracked files, respecting word boundaries (renaming `foo` won't change `foobar` or `my_foo`). Shows a preview of all matches, then asks for confirmation.
+
+```
+/rename my_func new_func
+/rename OldStruct NewStruct
+```
+
+### `/extract` — Move symbols between files
+
+The `/extract` command moves a top-level item (function, struct, enum, impl, trait, type alias, const, or static) from one file to another. It uses brace-depth tracking to find the full block, including doc comments and attributes above the declaration.
+
+```
+/extract my_func src/lib.rs src/utils.rs
+/extract MyStruct src/main.rs src/types.rs
+/extract MyTrait src/old.rs src/new.rs
+/extract MyResult src/lib.rs src/errors.rs
+/extract MAX_SIZE src/config.rs src/constants.rs
+```
+
+The command shows a preview of the block to be moved and asks for confirmation before making changes. If the target file doesn't exist, it's created. If the symbol is public, arc notes that you may need to add a `use` import in the source file.
+
+### `/move` — Relocate methods between impl blocks
+
+The `/move` command moves a method from one `impl` block to another, within the same file or across files. It extracts the method (including doc comments and attributes), re-indents it to match the target block, and inserts it before the closing `}`. Shows a preview and asks for confirmation.
+
+```
+/move MyStruct::process TargetStruct           # same file
+/move Parser::parse_expr other.rs::Lexer       # cross-file
+/move Config::validate Settings                # same file
+```
+
+If the method uses `self.` references, arc warns you to verify that the field/method references are valid on the target type. This is a common source of bugs when relocating methods between different types.
+
+### `rename_symbol` — Agent-invocable rename tool
+
+In addition to the interactive `/rename` REPL command, arc exposes a `rename_symbol` tool that the AI agent can call directly. This means the agent can rename symbols across files in a single tool call instead of issuing multiple `edit_file` calls — faster and more reliable for large refactors.
+
+The tool accepts:
+- **`old_name`** (required) — the current symbol name
+- **`new_name`** (required) — the replacement name
+- **`path`** (optional) — limit scope to a specific file or directory
+
+Like `write_file` and `edit_file`, `rename_symbol` asks for user confirmation before making changes (unless `--yes` is passed).
+
+### `ask_user` — Let the model ask you questions
+
+The agent can ask you directed questions mid-task using the `ask_user` tool. Instead of guessing at your preferences or making assumptions, the model can pause and ask for clarification — a preference, a decision, or context that isn't available in the codebase.
+
+This tool is **only available in interactive mode** (when stdin is a terminal). In piped mode, the tool is not registered — the model works with what it has.
+
+The question appears with a ❓ prompt, and you type your response directly. If you press Enter with no text or hit EOF, the model receives a "(no response)" indicator and continues on its own.
+
+## Project Context
+
+| Command | Description |
+|---------|-------------|
+| `/add <path>` | Add file contents into the conversation — the AI sees them immediately |
+| `/explain <file>` | Read code from a file and ask the agent to explain it |
+| `/context [system\|tokens\|files]` | Show project context files, system prompt sections, token budget, or files referenced in this conversation |
+| `/find <pattern>` | Fuzzy-search project files by name — respects `.gitignore`, ranked by relevance |
+| `/grep <pattern> [path]` | Search file contents directly — no AI, no tokens, instant results |
+| `/index` | Build a lightweight index of all project source files — shows path, line count, and first-line summary |
+| `/init` | Scan the project and generate a arc.md context file with detected build commands, key files, and project structure |
+| `/tree [depth]` | Show project directory tree (default depth: 3, respects `.gitignore`) |
+
+### `/add` — Inject file contents into conversation
+
+The `/add` command reads files and injects their contents directly into the conversation as a user message. The AI sees the file immediately without needing to call `read_file` — similar to Claude Code's `@file` feature.
+
+```
+/add src/main.rs
+  📎 added src/main.rs (truncated: 200 head + 100 tail of 2286 lines)
+     use /add src/main.rs:START-END to add specific sections
+  (1 file added to conversation)
+
+/add src/main.rs:1-50
+  ✓ added src/main.rs (lines 1-50) (50 lines)
+  (1 file added to conversation)
+
+/add src/*.rs
+  ✓ added src/cli.rs (400 lines)
+  ✓ added src/commands.rs (3000 lines)
+  ✓ added src/main.rs (850 lines)
+  (3 files added to conversation)
+
+/add Cargo.toml README.md
+  ✓ added Cargo.toml (28 lines, ~350 tokens)
+  ✓ added README.md (50 lines, ~480 tokens)
+  (2 files added to conversation)
+```
+
+Features:
+- **Line ranges** — `/add path:start-end` injects only the specified lines
+- **Token estimates** — each added file shows an approximate token count (`~N tokens`) so you can track context usage
+- **Smart truncation** — files over 500 lines are automatically truncated, preserving the head (200 lines) and tail (100 lines) with a clear omission marker. Use `/add path:start-end` to inject specific sections of large files without truncation
+- **Glob patterns** — `/add src/*.rs` expands to all matching files
+- **Multiple files** — `/add file1 file2` adds both in one message
+- **Syntax highlighting** — content is wrapped in fenced code blocks with language detection
+- **No AI tokens used for reading** — the file is read locally and injected directly
+
+This is the fastest way to give the AI context about specific files without waiting for it to call tools.
+
+The `/find` command does fuzzy substring matching across all tracked files in your project (via `git ls-files`, falling back to a directory walk if not in a git repo). Results are ranked by relevance — filename matches score higher than directory matches, and matches at the start of the filename rank highest.
+
+```
+/find main
+  3 files matching 'main':
+    src/main.rs
+    site/book/index.html
+    scripts/main_helper.sh
+
+/find .toml
+  2 files matching '.toml':
+    Cargo.toml
+    docs/book.toml
+```
+
+### `/grep` — Search file contents directly
+
+The `/grep` command searches file contents without using the AI — no tokens, no API call, instant results. This is one of the fastest ways to find code in your project.
+
+```
+/grep TODO
+  src/main.rs:42: // TODO: handle edge case
+  src/cli.rs:15: // TODO: add validation
+  
+  2 matches
+
+/grep "fn main" src/
+  src/main.rs:10: fn main() {
+  
+  1 match
+
+/grep -s MyStruct src/lib.rs
+  src/lib.rs:5: pub struct MyStruct {
+  src/lib.rs:20: impl MyStruct {
+  
+  2 matches
+```
+
+Features:
+- **Case-insensitive by default** — use `-s` or `--case` for case-sensitive search
+- **Git-aware** — uses `git grep` in git repos (faster, respects `.gitignore`), falls back to `grep -rn`
+- **Colored output** — filenames in green, line numbers in cyan, matches highlighted in yellow
+- **Truncated results** — shows up to 50 matches with a "narrow your search" hint
+- **Optional path** — `/grep pattern src/` restricts search to a specific file or directory
+
+The `/tree` command uses `git ls-files` to show tracked files in a visual tree structure, automatically respecting your `.gitignore`. You can specify a depth limit:
+
+```
+/tree        # default: 3 levels deep
+/tree 1      # just top-level directories and their files
+/tree 5      # deeper view
+```
+
+Example output:
+```
+src/
+  cli.rs
+  format.rs
+  main.rs
+  prompt.rs
+Cargo.toml
+README.md
+```
+
+### `/index` — Codebase indexing
+
+The `/index` command builds a lightweight in-memory index of your project's source files. For each text file tracked by git (or found via directory walk), it shows:
+
+- **Path** — the file path relative to the project root
+- **Lines** — the total line count
+- **Summary** — the first meaningful line (skipping blank lines), which is typically a doc comment, module declaration, or import statement
+
+Binary files (images, fonts, archives, etc.) are automatically skipped.
+
+```
+/index
+  Building project index...
+  Path                Lines  Summary
+  ──────────────────  ─────  ────────────────────────────────────────
+  Cargo.toml             18  [package]
+  src/cli.rs            400  //! CLI argument parsing and configuration.
+  src/commands.rs      4500  //! REPL command handlers for arc.
+  src/main.rs           850  //! arc — a coding agent that evolves itself.
+  README.md              50  # arc
+
+  5 files, 5818 total lines
+```
+
+This gives you a quick bird's-eye view of the entire codebase without needing to run `find`, `list_files`, or `wc -l` manually.
+
+### `/map` — Structural codebase map
+
+The `/map` command generates a structural summary of your codebase, extracting function signatures, struct/class/trait/enum definitions, constants, and other symbols from source files. This is like a "table of contents" for your entire project.
+
+```
+/map
+  Building repo map...
+
+src/main.rs (850 lines)
+  pub fn main
+  pub struct AgentConfig
+  impl AgentConfig
+
+src/cli.rs (400 lines)
+  pub fn parse_args
+  pub struct Config
+  pub const SYSTEM_PROMPT
+  ...
+
+  45 symbols across 8 files (using ast-grep)
+```
+
+**Usage:**
+
+| Command | Description |
+|---------|-------------|
+| `/map` | Map entire project (public symbols only) |
+| `/map src/` | Map only files under a specific directory |
+| `/map --all` | Include private/non-exported symbols |
+| `/map --all src/` | All symbols under a specific directory |
+| `/map --regex` | Force regex backend (skip ast-grep) |
+
+**Supported languages:** Rust, Python, JavaScript, TypeScript, Go, Java, C, C++, Ruby, Shell.
+
+**ast-grep integration:** When [ast-grep](https://ast-grep.github.io/) (`sg`) is installed, `/map` uses it for more accurate AST-based symbol extraction. When ast-grep is not available, it falls back to built-in regex extractors. The output footer shows which backend was used. Use `--regex` to force the regex backend for comparison or debugging.
+
+**Automatic system prompt integration:** The repo map is automatically included in the system prompt at the start of every session, giving the AI structural awareness of your codebase without you needing to manually add files. This is similar to Aider's repo-map feature. The system prompt version is limited to public symbols and capped at ~16K characters to avoid bloating context.
+
+## Project Onboarding with `/init`
+
+The `/init` command scans your project and generates a `arc.md` context file automatically. It:
+
+1. **Detects the project type** — Rust, Node.js, Python, Go, or Makefile-based projects
+2. **Finds the project name** — from `Cargo.toml`, `package.json`, `README.md` title, or directory name
+3. **Lists important files** — README, config files, CI configs, lock files, etc.
+4. **Lists key directories** — `src/`, `tests/`, `docs/`, `scripts/`, etc.
+5. **Generates build commands** — `cargo build`, `npm test`, `go test ./...`, etc. based on project type
+
+```
+/init
+  Scanning project...
+  Detected: Rust
+  ✓ Created arc.md (32 lines) — edit it to add project context.
+```
+
+If `arc.md` or `CLAUDE.md` already exists, `/init` won't overwrite it. The generated file is a starting point — edit it to add your project's specific conventions and instructions.
+
+If the project already has instruction files from other AI tools (`.cursorrules`, `AGENTS.md`, `.github/copilot-instructions.md`, `CLAUDE.md`), `/init` will:
+- Print a notice: "Found existing AI configs: .cursorrules — arc reads these automatically"
+- Add an "Other AI Tool Configs" section to the generated arc.md listing the found files
+
+arc reads these files automatically for additional project context, so there's no need to duplicate their content.
+
+## Project Memory
+
+| Command | Description |
+|---------|-------------|
+| `/remember <note>` | Save a project-specific note that persists across sessions |
+| `/memories [query]` | List all memories, or search by keyword |
+| `/forget <number>` | Remove a memory by its number |
+
+Project memories let you teach arc things about your project that it should always know — build quirks, team conventions, infrastructure requirements. Memories are stored in `.arc/memory.json` in your project root and are automatically injected into the system prompt at the start of every session.
+
+### Example workflow
+
+```
+> /remember this project uses sqlx for database access
+  ✓ Remembered: "this project uses sqlx for database access" (1 total memories)
+
+> /remember tests require docker running
+  ✓ Remembered: "tests require docker running" (2 total memories)
+
+> /memories
+  Project memories (2):
+    [0] this project uses sqlx for database access (2026-03-15 08:32)
+    [1] tests require docker running (2026-03-15 08:33)
+
+> /forget 0
+  ✓ Forgot: "this project uses sqlx for database access" (1 memories remaining)
+
+> /memories docker
+  Found 1 memory matching 'docker':
+    [1] tests require docker running (2026-03-15 08:33)
+```
+
+Use `/memories <query>` to filter by keyword when you have many memories. The search is case-insensitive.
+
+Use `/remember` any time you find yourself repeating the same instruction to the agent. The memory will be there next time you start a session in this project directory.
+
+## Custom Slash Commands
+
+You can define your own slash commands by placing `.md` files in a commands directory. arc looks in two locations:
+
+| Location | Scope | Priority |
+|----------|-------|----------|
+| `.arc/commands/` | Project-local | Higher (overrides global) |
+| `~/.arc/commands/` | Global (all projects) | Lower |
+
+The filename (without `.md`) becomes the command name. For example, creating `.arc/commands/review.md` registers a `/review` custom command. When you type `/review`, the file's content is sent as the user message to the agent.
+
+### Example
+
+Create a custom `/summarize` command:
+
+```bash
+mkdir -p .arc/commands
+cat > .arc/commands/summarize.md << 'EOF'
+Read the current codebase and provide a high-level summary of:
+1. What this project does
+2. Key architectural decisions
+3. Main dependencies
+4. Areas that could use improvement
+EOF
+```
+
+Now typing `/summarize` in the REPL sends that prompt to the agent.
+
+### Tips
+
+- **Project-local commands** (`.arc/commands/`) override global ones (`~/.arc/commands/`) with the same name
+- **Share with your team** — commit `.arc/commands/` to version control so everyone gets the same custom commands
+- **Global commands** are great for personal workflows you use across all projects (e.g., `/standup`, `/changelog-draft`)
+- Custom commands appear alongside built-in commands — if a custom command has the same name as a built-in, the built-in takes precedence
+- Custom commands show up in `/help` under a "Custom" section, and `/help <custom-cmd>` displays the full `.md` file content
+- Tab-completing `/help ` includes custom command names
+
+## Unknown commands
+
+If you type a `/command` that arc doesn't recognize, it will tell you:
+
+```
+  unknown command: /foo
+  type /help for available commands
+```
+
+Note: lines starting with `/` that contain spaces (like `/model name`) are treated as command arguments, not unknown commands.

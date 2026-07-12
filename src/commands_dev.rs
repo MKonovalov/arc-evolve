@@ -1,0 +1,1032 @@
+//! Dev workflow command handlers: /doctor, /health, /fix.
+
+use crate::cli;
+use crate::commands_project::{detect_project_type, ProjectType};
+use crate::commands_run::get_last_failed_run;
+use crate::commands_session::auto_compact_if_needed;
+use crate::format::*;
+use crate::git::{git_branch, run_git};
+use crate::prompt::run_prompt;
+
+use arcagent::agent::Agent;
+use arcagent::*;
+
+// ── /doctor ──────────────────────────────────────────────────────────────
+
+/// Status of a single doctor check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DoctorStatus {
+    Pass,
+    Fail,
+    Warn,
+}
+
+/// A single diagnostic check result from `/doctor`.
+#[derive(Debug, Clone)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub status: DoctorStatus,
+    pub detail: String,
+}
+
+/// Run all environment diagnostic checks and return structured results.
+///
+/// This is separated from the display logic so it can be tested.
+pub fn run_doctor_checks(provider: &str, model: &str) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    // 1. Version
+    checks.push(DoctorCheck {
+        name: "Version".to_string(),
+        status: DoctorStatus::Pass,
+        detail: cli::VERSION.to_string(),
+    });
+
+    // 2. Git installed
+    match run_git(&["--version"]) {
+        Ok(ver_output) => {
+            let ver = ver_output.replace("git version ", "");
+            checks.push(DoctorCheck {
+                name: "Git".to_string(),
+                status: DoctorStatus::Pass,
+                detail: format!("installed ({ver})"),
+            });
+        }
+        _ => {
+            checks.push(DoctorCheck {
+                name: "Git".to_string(),
+                status: DoctorStatus::Fail,
+                detail: "not found".to_string(),
+            });
+        }
+    }
+
+    // 3. Git repo
+    match run_git(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(_) => {
+            let branch = git_branch().unwrap_or_else(|| "detached".to_string());
+            checks.push(DoctorCheck {
+                name: "Git repo".to_string(),
+                status: DoctorStatus::Pass,
+                detail: format!("yes (branch: {branch})"),
+            });
+        }
+        _ => {
+            checks.push(DoctorCheck {
+                name: "Git repo".to_string(),
+                status: DoctorStatus::Warn,
+                detail: "not inside a git repository".to_string(),
+            });
+        }
+    }
+
+    // 4. Provider
+    checks.push(DoctorCheck {
+        name: "Provider".to_string(),
+        status: DoctorStatus::Pass,
+        detail: provider.to_string(),
+    });
+
+    // 5. API key
+    let env_var = cli::provider_api_key_env(provider);
+    match env_var {
+        Some(var_name) => {
+            if std::env::var(var_name).is_ok() {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: DoctorStatus::Pass,
+                    detail: format!("set ({var_name})"),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: DoctorStatus::Fail,
+                    detail: format!("{var_name} not set"),
+                });
+            }
+        }
+        None => {
+            // Unknown provider — can't check env var
+            if provider == "ollama" {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: DoctorStatus::Pass,
+                    detail: "not required (ollama)".to_string(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "API key".to_string(),
+                    status: DoctorStatus::Warn,
+                    detail: format!("unknown env var for provider '{provider}'"),
+                });
+            }
+        }
+    }
+
+    // 6. Model
+    checks.push(DoctorCheck {
+        name: "Model".to_string(),
+        status: DoctorStatus::Pass,
+        detail: model.to_string(),
+    });
+
+    // 7. Config file
+    let mut config_found = Vec::new();
+    if std::path::Path::new(".arc.toml").exists() {
+        config_found.push(".arc.toml");
+    }
+    if let Some(user_path) = cli::user_config_path() {
+        if user_path.exists() {
+            config_found.push("~/.config/arc/config.toml");
+        }
+    }
+    if config_found.is_empty() {
+        checks.push(DoctorCheck {
+            name: "Config file".to_string(),
+            status: DoctorStatus::Warn,
+            detail: "none found (.arc.toml or ~/.config/arc/config.toml)".to_string(),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "Config file".to_string(),
+            status: DoctorStatus::Pass,
+            detail: format!("found: {}", config_found.join(", ")),
+        });
+    }
+
+    // 8. Project context
+    let context_files = cli::list_project_context_files();
+    if context_files.is_empty() {
+        checks.push(DoctorCheck {
+            name: "Project context".to_string(),
+            status: DoctorStatus::Warn,
+            detail: "no context file (create arc.md or run /init)".to_string(),
+        });
+    } else {
+        let descriptions: Vec<String> = context_files
+            .iter()
+            .map(|(name, lines)| format!("{name} ({lines} lines)"))
+            .collect();
+        checks.push(DoctorCheck {
+            name: "Project context".to_string(),
+            status: DoctorStatus::Pass,
+            detail: descriptions.join(", "),
+        });
+    }
+
+    // 9. Curl
+    match std::process::Command::new("curl").arg("--version").output() {
+        Ok(output) if output.status.success() => {
+            checks.push(DoctorCheck {
+                name: "Curl".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "installed (for /docs and /web)".to_string(),
+            });
+        }
+        _ => {
+            checks.push(DoctorCheck {
+                name: "Curl".to_string(),
+                status: DoctorStatus::Warn,
+                detail: "not found (/docs and /web won't work)".to_string(),
+            });
+        }
+    }
+
+    // 10. Memory dir (.arc/)
+    if std::path::Path::new(".arc").is_dir() {
+        checks.push(DoctorCheck {
+            name: "Memory dir".to_string(),
+            status: DoctorStatus::Pass,
+            detail: ".arc/ found".to_string(),
+        });
+    } else {
+        checks.push(DoctorCheck {
+            name: "Memory dir".to_string(),
+            status: DoctorStatus::Warn,
+            detail: ".arc/ not found (run /remember to create)".to_string(),
+        });
+    }
+
+    // 11. RTK (Rust Token Killer) — optional tool output compression
+    {
+        let rtk_available = crate::rtk::detect_rtk();
+        let rtk_disabled = crate::rtk::is_rtk_disabled();
+        if rtk_available && !rtk_disabled {
+            checks.push(DoctorCheck {
+                name: "RTK".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "installed (auto-compressing tool output)".to_string(),
+            });
+        } else if rtk_available && rtk_disabled {
+            checks.push(DoctorCheck {
+                name: "RTK".to_string(),
+                status: DoctorStatus::Warn,
+                detail: "installed but disabled (--no-rtk flag)".to_string(),
+            });
+        } else {
+            checks.push(DoctorCheck {
+                name: "RTK".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "not installed (optional — compresses build output)".to_string(),
+            });
+        }
+    }
+
+    // 12. Project-type toolchain checks
+    let project_type = detect_project_type(&std::env::current_dir().unwrap_or_default());
+    let toolchain = toolchain_checks_for_project(&project_type);
+    checks.extend(toolchain);
+
+    checks
+}
+
+/// Return toolchain version checks for a given project type.
+///
+/// These check whether required development tools are installed
+/// (e.g., compiler, build tool, package manager) — not whether the
+/// project builds or tests pass (that's `health_checks_for_project`).
+pub fn toolchain_checks_for_project(project_type: &ProjectType) -> Vec<DoctorCheck> {
+    let mut checks = Vec::new();
+
+    /// Helper: run `cmd --version` (or custom args) and return a DoctorCheck.
+    fn check_tool(name: &str, cmd: &str, args: &[&str]) -> DoctorCheck {
+        match std::process::Command::new(cmd).args(args).output() {
+            Ok(output) if output.status.success() => {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                let ver = raw.lines().next().unwrap_or("").trim().to_string();
+                DoctorCheck {
+                    name: name.to_string(),
+                    status: DoctorStatus::Pass,
+                    detail: if ver.is_empty() {
+                        "installed".to_string()
+                    } else {
+                        format!("installed ({ver})")
+                    },
+                }
+            }
+            _ => DoctorCheck {
+                name: name.to_string(),
+                status: DoctorStatus::Fail,
+                detail: "not found".to_string(),
+            },
+        }
+    }
+
+    match project_type {
+        ProjectType::Java => {
+            checks.push(check_tool("Java", "java", &["--version"]));
+            // Check JAVA_HOME env var
+            if std::env::var("JAVA_HOME").is_ok() {
+                checks.push(DoctorCheck {
+                    name: "JAVA_HOME".to_string(),
+                    status: DoctorStatus::Pass,
+                    detail: std::env::var("JAVA_HOME").unwrap_or_default(),
+                });
+            } else {
+                checks.push(DoctorCheck {
+                    name: "JAVA_HOME".to_string(),
+                    status: DoctorStatus::Warn,
+                    detail: "not set".to_string(),
+                });
+            }
+            // Check build tool — Maven or Gradle
+            if std::path::Path::new("pom.xml").exists() {
+                checks.push(check_tool("Maven", "mvn", &["--version"]));
+            } else {
+                checks.push(check_tool("Gradle", "gradle", &["--version"]));
+            }
+        }
+        ProjectType::Ruby => {
+            checks.push(check_tool("Ruby", "ruby", &["--version"]));
+            checks.push(check_tool("Bundler", "bundle", &["--version"]));
+            checks.push(check_tool("Gem", "gem", &["--version"]));
+        }
+        ProjectType::Cpp => {
+            checks.push(check_tool("CMake", "cmake", &["--version"]));
+            checks.push(check_tool("Make", "make", &["--version"]));
+            // Try cc first, fall back to g++
+            let cc = check_tool("C compiler", "cc", &["--version"]);
+            if cc.status == DoctorStatus::Fail {
+                checks.push(check_tool("C++ compiler", "g++", &["--version"]));
+            } else {
+                checks.push(cc);
+            }
+        }
+        _ => {} // Other project types don't need additional toolchain checks here
+    }
+
+    checks
+}
+
+/// Display the doctor report from a list of checks.
+pub fn print_doctor_report(checks: &[DoctorCheck]) {
+    println!("\n  {BOLD}🩺 arc doctor{RESET}");
+    println!("  {DIM}─────────────────────────────{RESET}");
+
+    for check in checks {
+        let (icon, color) = match check.status {
+            DoctorStatus::Pass => ("✓", &GREEN),
+            DoctorStatus::Fail => ("✗", &RED),
+            DoctorStatus::Warn => ("⚠", &YELLOW),
+        };
+        println!(
+            "  {color}{icon}{RESET} {BOLD}{}{RESET}: {}",
+            check.name, check.detail
+        );
+    }
+
+    let passed = checks
+        .iter()
+        .filter(|c| c.status == DoctorStatus::Pass)
+        .count();
+    let total = checks.len();
+    let summary_color = if passed == total { &GREEN } else { &YELLOW };
+    println!("\n  {summary_color}{passed}/{total} checks passed{RESET}\n");
+}
+
+/// Handle the `/doctor` command.
+pub fn handle_doctor(provider: &str, model: &str) {
+    let checks = run_doctor_checks(provider, model);
+    print_doctor_report(&checks);
+}
+
+/// Return health check commands for a given project type.
+#[allow(clippy::vec_init_then_push, unused_mut)]
+pub fn health_checks_for_project(
+    project_type: &ProjectType,
+) -> Vec<(&'static str, Vec<&'static str>)> {
+    match project_type {
+        ProjectType::Rust => {
+            let mut checks = vec![("build", vec!["cargo", "build"])];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["cargo", "test"]));
+            checks.push((
+                "clippy",
+                vec!["cargo", "clippy", "--all-targets", "--", "-D", "warnings"],
+            ));
+            checks.push(("fmt", vec!["cargo", "fmt", "--", "--check"]));
+            checks
+        }
+        ProjectType::Node => {
+            let mut checks: Vec<(&str, Vec<&str>)> = vec![];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["npm", "test"]));
+            checks.push(("lint", vec!["npx", "eslint", "."]));
+            checks
+        }
+        ProjectType::Python => {
+            let mut checks: Vec<(&str, Vec<&str>)> = vec![];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["python", "-m", "pytest"]));
+            checks.push(("lint", vec!["python", "-m", "flake8", "."]));
+            checks.push(("typecheck", vec!["python", "-m", "mypy", "."]));
+            checks
+        }
+        ProjectType::Go => {
+            let mut checks = vec![("build", vec!["go", "build", "./..."])];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["go", "test", "./..."]));
+            checks.push(("vet", vec!["go", "vet", "./..."]));
+            checks
+        }
+        ProjectType::Make => {
+            // In test builds the push is cfg-gated out, leaving `checks`
+            // effectively immutable — but mut is required for production.
+            #[cfg(not(test))]
+            {
+                vec![("test", vec!["make", "test"])]
+            }
+            #[cfg(test)]
+            {
+                vec![]
+            }
+        }
+        ProjectType::Java => {
+            let mut checks: Vec<(&str, Vec<&str>)> = vec![];
+            if std::path::Path::new("pom.xml").exists() {
+                checks.push(("build", vec!["mvn", "compile"]));
+                #[cfg(not(test))]
+                checks.push(("test", vec!["mvn", "test"]));
+            } else {
+                checks.push(("build", vec!["./gradlew", "build"]));
+                #[cfg(not(test))]
+                checks.push(("test", vec!["./gradlew", "test"]));
+            }
+            checks
+        }
+        ProjectType::Ruby => {
+            let mut checks: Vec<(&str, Vec<&str>)> = vec![];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["bundle", "exec", "rake", "test"]));
+            checks.push(("lint", vec!["bundle", "exec", "rubocop"]));
+            checks
+        }
+        ProjectType::Cpp => {
+            let mut checks = vec![("build", vec!["cmake", "--build", "build"])];
+            #[cfg(not(test))]
+            checks.push(("test", vec!["ctest", "--test-dir", "build"]));
+            checks
+        }
+        ProjectType::Unknown => vec![],
+    }
+}
+
+/// Run health checks for a specific project type. Returns (name, passed, detail) tuples.
+pub fn run_health_check_for_project(
+    project_type: &ProjectType,
+) -> Vec<(&'static str, bool, String)> {
+    let checks = health_checks_for_project(project_type);
+
+    let mut results = Vec::new();
+    for (name, args) in checks {
+        let start = std::time::Instant::now();
+        let output = std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output();
+        let elapsed = format_duration(start.elapsed());
+        match output {
+            Ok(o) if o.status.success() => {
+                results.push((name, true, format!("ok ({elapsed})")));
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let first_line = stderr.lines().next().unwrap_or("(unknown error)");
+                results.push((
+                    name,
+                    false,
+                    format!(
+                        "FAIL ({elapsed}): {}",
+                        truncate_with_ellipsis(first_line, 80)
+                    ),
+                ));
+            }
+            Err(e) => {
+                results.push((name, false, format!("ERROR: {e}")));
+            }
+        }
+    }
+    results
+}
+
+/// Run health checks and capture full error output for failures.
+pub fn run_health_checks_full_output(
+    project_type: &ProjectType,
+) -> Vec<(&'static str, bool, String)> {
+    let checks = health_checks_for_project(project_type);
+
+    let mut results = Vec::new();
+    for (name, args) in checks {
+        let output = std::process::Command::new(args[0])
+            .args(&args[1..])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                results.push((name, true, String::new()));
+            }
+            Ok(o) => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let mut full_output = String::new();
+                if !stdout.is_empty() {
+                    full_output.push_str(&stdout);
+                }
+                if !stderr.is_empty() {
+                    if !full_output.is_empty() {
+                        full_output.push('\n');
+                    }
+                    full_output.push_str(&stderr);
+                }
+                results.push((name, false, full_output));
+            }
+            Err(e) => {
+                results.push((name, false, format!("ERROR: {e}")));
+            }
+        }
+    }
+    results
+}
+
+/// Build a prompt describing health check failures for the AI to fix.
+pub fn build_fix_prompt(failures: &[(&str, &str)]) -> String {
+    if failures.is_empty() {
+        return String::new();
+    }
+    let mut prompt = String::from(
+        "Fix the following build/lint errors in this project. Read the relevant files, understand the errors, and apply fixes:\n\n",
+    );
+    for (name, output) in failures {
+        prompt.push_str(&format!("## {name} errors:\n```\n{output}\n```\n\n"));
+    }
+    prompt.push_str(
+        "After fixing, run the failing checks again to verify. Fix any remaining issues.",
+    );
+    prompt
+}
+
+pub fn handle_health() {
+    let project_type = detect_project_type(&std::env::current_dir().unwrap_or_default());
+    println!("{DIM}  Detected project: {project_type}{RESET}");
+    if project_type == ProjectType::Unknown {
+        println!(
+            "{DIM}  No recognized project found. Looked for: Cargo.toml, package.json, pyproject.toml, setup.py, go.mod, Makefile{RESET}\n"
+        );
+        return;
+    }
+    println!("{DIM}  Running health checks...{RESET}");
+    let results = run_health_check_for_project(&project_type);
+    if results.is_empty() {
+        println!("{DIM}  No checks configured for {project_type}{RESET}\n");
+        return;
+    }
+    let all_passed = results.iter().all(|(_, passed, _)| *passed);
+    for (name, passed, detail) in &results {
+        let icon = if *passed {
+            format!("{GREEN}✓{RESET}")
+        } else {
+            format!("{RED}✗{RESET}")
+        };
+        println!("  {icon} {name}: {detail}");
+    }
+    if all_passed {
+        println!("\n{GREEN}  All checks passed ✓{RESET}\n");
+    } else {
+        println!("\n{RED}  Some checks failed ✗{RESET}\n");
+    }
+}
+
+/// Handle the /fix command. Returns Some(fix_prompt) if failures were sent to AI, None otherwise.
+pub async fn handle_fix(
+    agent: &mut Agent,
+    session_total: &mut Usage,
+    model: &str,
+) -> Option<String> {
+    let project_type = detect_project_type(&std::env::current_dir().unwrap_or_default());
+    if project_type == ProjectType::Unknown {
+        println!(
+            "{DIM}  No recognized project found. Looked for: Cargo.toml, package.json, pyproject.toml, setup.py, go.mod, Makefile{RESET}\n"
+        );
+        return None;
+    }
+    println!("{DIM}  Detected project: {project_type}{RESET}");
+    println!("{DIM}  Running health checks...{RESET}");
+    let results = run_health_checks_full_output(&project_type);
+    if results.is_empty() {
+        println!("{DIM}  No checks configured for {project_type}{RESET}\n");
+        return None;
+    }
+    for (name, passed, _) in &results {
+        let icon = if *passed {
+            format!("{GREEN}✓{RESET}")
+        } else {
+            format!("{RED}✗{RESET}")
+        };
+        let status = if *passed { "ok" } else { "FAIL" };
+        println!("  {icon} {name}: {status}");
+    }
+    let failures: Vec<(&str, &str)> = results
+        .iter()
+        .filter(|(_, passed, _)| !passed)
+        .map(|(name, _, output)| (*name, output.as_str()))
+        .collect();
+    if failures.is_empty() {
+        println!("\n{GREEN}  All checks passed — nothing to fix ✓{RESET}\n");
+        return None;
+    }
+    let fail_count = failures.len();
+    println!("\n{YELLOW}  Sending {fail_count} failure(s) to AI for fixing...{RESET}\n");
+    let mut fix_prompt = build_fix_prompt(&failures);
+    // Include last failed /run output if available (gives the agent more context)
+    if let Some(last_run) = get_last_failed_run() {
+        fix_prompt.push_str(&format!(
+            "\n\nAdditional context — the last `/run` command failed with exit code {}:\nstderr:\n```\n{}\n```\nstdout:\n```\n{}\n```",
+            last_run.exit_code, last_run.stderr, last_run.stdout
+        ));
+    }
+    run_prompt(agent, &fix_prompt, session_total, model).await;
+    auto_compact_if_needed(agent);
+    Some(fix_prompt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{is_unknown_command, KNOWN_COMMANDS};
+
+    #[test]
+    fn health_checks_rust_has_build() {
+        let checks = health_checks_for_project(&ProjectType::Rust);
+        assert!(checks.iter().any(|(name, _)| *name == "build"));
+    }
+
+    #[test]
+    fn health_checks_unknown_empty() {
+        let checks = health_checks_for_project(&ProjectType::Unknown);
+        assert!(checks.is_empty());
+    }
+
+    #[test]
+    fn doctor_checks_include_rtk() {
+        let checks = run_doctor_checks("anthropic", "test-model");
+        assert!(
+            checks.iter().any(|c| c.name == "RTK"),
+            "doctor checks should include an RTK entry"
+        );
+        // RTK check should always be Pass (never Fail), since it's optional
+        let rtk_check = checks.iter().find(|c| c.name == "RTK").unwrap();
+        assert_ne!(
+            rtk_check.status,
+            DoctorStatus::Fail,
+            "RTK should never be Fail — it's optional"
+        );
+    }
+
+    // ── build_fix_prompt ────────────────────────────────────────────
+
+    #[test]
+    fn build_fix_prompt_empty() {
+        let prompt = build_fix_prompt(&[]);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn build_fix_prompt_with_failures() {
+        let failures = vec![("build", "error[E0308]: mismatched types")];
+        let prompt = build_fix_prompt(&failures);
+        assert!(prompt.contains("build errors"));
+        assert!(prompt.contains("E0308"));
+        assert!(prompt.contains("Fix"));
+    }
+
+    #[test]
+    fn build_fix_prompt_multiple_failures() {
+        let failures = vec![
+            ("build", "build error output"),
+            ("clippy", "clippy warning output"),
+        ];
+        let prompt = build_fix_prompt(&failures);
+        assert!(prompt.contains("## build errors"));
+        assert!(prompt.contains("## clippy errors"));
+    }
+
+    // ── build_lint_fix_prompt ──────────────────────────────────────────
+    // ── format_tree_from_paths ──────────────────────────────────────
+
+    // ── moved from commands.rs (issue #260) ────────────────────────
+
+    #[test]
+    fn test_health_check_function() {
+        // run_health_check_for_project skips "cargo test" under #[cfg(test)] to avoid recursion
+        let project_type = detect_project_type(&std::env::current_dir().unwrap());
+        assert_eq!(project_type, ProjectType::Rust);
+        let results = run_health_check_for_project(&project_type);
+        assert!(
+            !results.is_empty(),
+            "Health check should return at least one result"
+        );
+        for (name, passed, _) in &results {
+            assert!(!name.is_empty(), "Check name should not be empty");
+            if *name == "build" {
+                assert!(passed, "cargo build should pass in test environment");
+            }
+        }
+        // "test" check should be excluded under cfg(test)
+        assert!(
+            !results.iter().any(|(name, _, _)| *name == "test"),
+            "cargo test check should be skipped to avoid recursion"
+        );
+    }
+
+    #[test]
+    fn test_health_checks_for_rust_project() {
+        let checks = health_checks_for_project(&ProjectType::Rust);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"build"), "Rust should have build check");
+        assert!(names.contains(&"clippy"), "Rust should have clippy check");
+        assert!(names.contains(&"fmt"), "Rust should have fmt check");
+        // test is excluded under cfg(test)
+        assert!(
+            !names.contains(&"test"),
+            "test should be excluded in cfg(test)"
+        );
+    }
+
+    #[test]
+    fn test_health_checks_for_node_project() {
+        let checks = health_checks_for_project(&ProjectType::Node);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"lint"), "Node should have lint check");
+    }
+
+    #[test]
+    fn test_health_checks_for_go_project() {
+        let checks = health_checks_for_project(&ProjectType::Go);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"build"), "Go should have build check");
+        assert!(names.contains(&"vet"), "Go should have vet check");
+    }
+
+    #[test]
+    fn test_health_checks_for_python_project() {
+        let checks = health_checks_for_project(&ProjectType::Python);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"lint"), "Python should have lint check");
+        assert!(names.contains(&"typecheck"), "Python should have typecheck");
+    }
+
+    #[test]
+    fn test_health_checks_for_unknown_returns_empty() {
+        let checks = health_checks_for_project(&ProjectType::Unknown);
+        assert!(checks.is_empty(), "Unknown project should return no checks");
+    }
+
+    #[test]
+    fn test_run_command_recognized() {
+        assert!(!is_unknown_command("/run"));
+        assert!(!is_unknown_command("/run echo hello"));
+        assert!(!is_unknown_command("/run ls -la"));
+    }
+
+    #[test]
+    fn test_fix_command_recognized() {
+        assert!(!is_unknown_command("/fix"));
+        assert!(
+            KNOWN_COMMANDS.contains(&"/fix"),
+            "/fix should be in KNOWN_COMMANDS"
+        );
+    }
+
+    #[test]
+    fn test_run_health_checks_full_output_returns_results() {
+        // In a Rust project, should return results with full error output
+        let project_type = detect_project_type(&std::env::current_dir().unwrap());
+        assert_eq!(project_type, ProjectType::Rust);
+        let results = run_health_checks_full_output(&project_type);
+        assert!(
+            !results.is_empty(),
+            "Should return at least one check result"
+        );
+        for (name, passed, _output) in &results {
+            assert!(!name.is_empty(), "Check name should not be empty");
+            if *name == "build" {
+                assert!(passed, "cargo build should pass in test environment");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_fix_prompt_with_failures() {
+        let failures = vec![
+            (
+                "build",
+                "error[E0308]: mismatched types\n  --> src/main.rs:42",
+            ),
+            (
+                "clippy",
+                "warning: unused variable `x`\n  --> src/lib.rs:10",
+            ),
+        ];
+        let prompt = build_fix_prompt(&failures);
+        assert!(prompt.contains("build"), "Prompt should mention build");
+        assert!(prompt.contains("clippy"), "Prompt should mention clippy");
+        assert!(
+            prompt.contains("error[E0308]"),
+            "Prompt should include build error"
+        );
+        assert!(
+            prompt.contains("unused variable"),
+            "Prompt should include clippy warning"
+        );
+    }
+
+    #[test]
+    fn test_build_fix_prompt_empty_failures() {
+        let failures: Vec<(&str, &str)> = vec![];
+        let prompt = build_fix_prompt(&failures);
+        assert!(
+            prompt.is_empty() || prompt.contains("Fix"),
+            "Empty failures should produce empty or minimal prompt"
+        );
+    }
+
+    // --- Java project health checks ---
+
+    #[test]
+    fn test_health_checks_for_java_project() {
+        let checks = health_checks_for_project(&ProjectType::Java);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"build"), "Java should have build check");
+        // test is excluded under cfg(test)
+        assert!(
+            !names.contains(&"test"),
+            "test should be excluded in cfg(test)"
+        );
+    }
+
+    // --- Ruby project health checks ---
+
+    #[test]
+    fn test_health_checks_for_ruby_project() {
+        let checks = health_checks_for_project(&ProjectType::Ruby);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"lint"), "Ruby should have lint check");
+        // test is excluded under cfg(test)
+        assert!(
+            !names.contains(&"test"),
+            "test should be excluded in cfg(test)"
+        );
+    }
+
+    // --- Cpp project health checks ---
+
+    #[test]
+    fn test_health_checks_for_cpp_project() {
+        let checks = health_checks_for_project(&ProjectType::Cpp);
+        let names: Vec<&str> = checks.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"build"), "Cpp should have build check");
+        // test is excluded under cfg(test)
+        assert!(
+            !names.contains(&"test"),
+            "test should be excluded in cfg(test)"
+        );
+    }
+
+    // --- Make project health checks ---
+
+    #[test]
+    fn test_health_checks_for_make_project() {
+        let checks = health_checks_for_project(&ProjectType::Make);
+        // Under cfg(test), Make returns empty (test is the only check and it's gated)
+        assert!(
+            checks.is_empty(),
+            "Make project should have no checks in cfg(test)"
+        );
+    }
+
+    // --- DoctorCheck and DoctorStatus infrastructure ---
+
+    #[test]
+    fn test_doctor_status_equality() {
+        assert_eq!(DoctorStatus::Pass, DoctorStatus::Pass);
+        assert_eq!(DoctorStatus::Fail, DoctorStatus::Fail);
+        assert_eq!(DoctorStatus::Warn, DoctorStatus::Warn);
+        assert_ne!(DoctorStatus::Pass, DoctorStatus::Fail);
+        assert_ne!(DoctorStatus::Pass, DoctorStatus::Warn);
+        assert_ne!(DoctorStatus::Fail, DoctorStatus::Warn);
+    }
+
+    #[test]
+    fn test_doctor_check_construction() {
+        let check = DoctorCheck {
+            name: "Test tool".to_string(),
+            status: DoctorStatus::Pass,
+            detail: "v1.2.3".to_string(),
+        };
+        assert_eq!(check.name, "Test tool");
+        assert_eq!(check.status, DoctorStatus::Pass);
+        assert_eq!(check.detail, "v1.2.3");
+
+        let cloned = check.clone();
+        assert_eq!(cloned.name, check.name);
+        assert_eq!(cloned.status, check.status);
+        assert_eq!(cloned.detail, check.detail);
+    }
+
+    #[test]
+    fn test_run_doctor_checks_structure() {
+        let checks = run_doctor_checks("anthropic", "test-model");
+        // Should always have Version, Git, Git repo, Provider, API key, Model at minimum
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Version"), "Should check version");
+        assert!(names.contains(&"Git"), "Should check git");
+        assert!(names.contains(&"Provider"), "Should check provider");
+        assert!(names.contains(&"Model"), "Should check model");
+        assert!(names.contains(&"RTK"), "Should check RTK");
+
+        // Provider should reflect what we passed in
+        let provider_check = checks.iter().find(|c| c.name == "Provider").unwrap();
+        assert_eq!(provider_check.detail, "anthropic");
+        assert_eq!(provider_check.status, DoctorStatus::Pass);
+
+        // Model should reflect what we passed in
+        let model_check = checks.iter().find(|c| c.name == "Model").unwrap();
+        assert_eq!(model_check.detail, "test-model");
+        assert_eq!(model_check.status, DoctorStatus::Pass);
+    }
+
+    #[test]
+    fn test_print_doctor_report_all_pass() {
+        // Just ensure it doesn't panic — output goes to stdout
+        let checks = vec![
+            DoctorCheck {
+                name: "A".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "ok".to_string(),
+            },
+            DoctorCheck {
+                name: "B".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "ok".to_string(),
+            },
+        ];
+        print_doctor_report(&checks); // should not panic
+    }
+
+    #[test]
+    fn test_print_doctor_report_mixed_statuses() {
+        let checks = vec![
+            DoctorCheck {
+                name: "Pass check".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "all good".to_string(),
+            },
+            DoctorCheck {
+                name: "Warn check".to_string(),
+                status: DoctorStatus::Warn,
+                detail: "something to note".to_string(),
+            },
+            DoctorCheck {
+                name: "Fail check".to_string(),
+                status: DoctorStatus::Fail,
+                detail: "broken".to_string(),
+            },
+        ];
+        print_doctor_report(&checks); // should not panic
+    }
+
+    #[test]
+    fn test_print_doctor_report_empty() {
+        print_doctor_report(&[]); // should not panic, 0/0 checks passed
+    }
+
+    // --- Toolchain checks for project types ---
+
+    #[test]
+    fn test_toolchain_checks_java() {
+        let checks = toolchain_checks_for_project(&ProjectType::Java);
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Java"), "Java toolchain should check java");
+        assert!(
+            names.contains(&"JAVA_HOME"),
+            "Java toolchain should check JAVA_HOME"
+        );
+        // Should have either Maven or Gradle
+        assert!(
+            names.contains(&"Maven") || names.contains(&"Gradle"),
+            "Java toolchain should check build tool"
+        );
+    }
+
+    #[test]
+    fn test_toolchain_checks_ruby() {
+        let checks = toolchain_checks_for_project(&ProjectType::Ruby);
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"Ruby"), "Ruby toolchain should check ruby");
+        assert!(
+            names.contains(&"Bundler"),
+            "Ruby toolchain should check bundler"
+        );
+        assert!(names.contains(&"Gem"), "Ruby toolchain should check gem");
+        assert_eq!(
+            checks.len(),
+            3,
+            "Ruby should have exactly 3 toolchain checks"
+        );
+    }
+
+    #[test]
+    fn test_toolchain_checks_cpp() {
+        let checks = toolchain_checks_for_project(&ProjectType::Cpp);
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"CMake"), "Cpp toolchain should check cmake");
+        assert!(names.contains(&"Make"), "Cpp toolchain should check make");
+        // Should have either C compiler or C++ compiler
+        assert!(
+            names.contains(&"C compiler") || names.contains(&"C++ compiler"),
+            "Cpp toolchain should check a compiler"
+        );
+        assert_eq!(
+            checks.len(),
+            3,
+            "Cpp should have exactly 3 toolchain checks"
+        );
+    }
+
+    #[test]
+    fn test_toolchain_checks_unknown_empty() {
+        let checks = toolchain_checks_for_project(&ProjectType::Unknown);
+        assert!(
+            checks.is_empty(),
+            "Unknown project should return no toolchain checks"
+        );
+    }
+
+    #[test]
+    fn test_toolchain_checks_rust_empty() {
+        // Rust toolchain checks happen via health_checks_for_project, not toolchain_checks
+        let checks = toolchain_checks_for_project(&ProjectType::Rust);
+        assert!(
+            checks.is_empty(),
+            "Rust doesn't need separate toolchain checks here"
+        );
+    }
+}

@@ -1,0 +1,102 @@
+name: Social
+
+on:
+  schedule:
+    - cron: '0 2,6,10,14,18,22 * * *'  # every 4 hours, offset 2h from evolution
+  workflow_dispatch:       # manual trigger for testing
+
+permissions:
+  contents: write
+  discussions: write
+
+jobs:
+  social:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Generate bot token
+        id: bot-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.bot-token.outputs.token }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup GitHub CLI
+        run: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --quiet
+
+      - name: Detect bot identity
+        id: bot-info
+        run: |
+          SLUG="${{ steps.bot-token.outputs.app-slug }}"
+          if [ -z "$SLUG" ]; then
+            echo "::error::GitHub App slug is empty. Check that your GitHub App is configured correctly."
+            exit 1
+          fi
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          echo "login=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git
+        run: |
+          git config user.name "${{ steps.bot-info.outputs.login }}"
+          git config user.email "${{ steps.bot-info.outputs.email }}"
+
+      - name: Notify dashboard (start)
+        if: vars.DASHBOARD_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+        run: |
+          gh api repos/${{ vars.DASHBOARD_REPO }}/dispatches \
+            -f event_type=activity-update \
+            -f 'client_payload[action]=start' \
+            -f 'client_payload[workflow]=Social' || true
+
+      - name: Run social session
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          BOT_LOGIN: ${{ steps.bot-info.outputs.login }}
+          BOT_SLUG: ${{ steps.bot-info.outputs.slug }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+        run: |
+          chmod +x scripts/social.sh
+          ./scripts/social.sh
+
+      - name: Notify dashboard (end)
+        if: always() && vars.DASHBOARD_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+        run: |
+          gh api repos/${{ vars.DASHBOARD_REPO }}/dispatches \
+            -f event_type=activity-update \
+            -f 'client_payload[action]=end' \
+            -f 'client_payload[workflow]=Social' \
+            -f 'client_payload[conclusion]=${{ job.status }}' || true

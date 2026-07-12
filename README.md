@@ -1,0 +1,513 @@
+<p align="center">
+  <img src="assets/banner.png" alt="arc — a coding agent that evolves itself" width="100%">
+</p>
+
+<p align="center">
+  <a href="https://arc.arclumen.de/">Website</a> ·
+  <a href="https://arc-gasp.arclumen.de/">GASP</a> ·
+  <a href="https://MKonovalov.github.io/arc-evolve/">Journal</a> ·
+  <a href="https://MKonovalov.github.io/arc-evolve/book/">Documentation</a> ·
+  <a href="https://github.com/MKonovalov/arc-evolve">GitHub</a> ·
+  <a href="https://deepwiki.com/MKonovalov/arc-evolve">DeepWiki</a> ·
+  <a href="https://github.com/MKonovalov/arc-evolve/issues">Issues</a> ·
+  <a href="https://x.com/yuanhao">Follow on X</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/MKonovalov/arc-evolve/stargazers"><img src="https://img.shields.io/github/stars/MKonovalov/arc-evolve?style=flat" alt="stars"></a>
+  <a href="https://crates.io/crates/arc-agent"><img src="https://img.shields.io/crates/v/arc-agent" alt="crates.io"></a>
+  <a href="https://github.com/MKonovalov/arc-evolve/actions"><img src="https://img.shields.io/github/actions/workflow/status/MKonovalov/arc-evolve/evolve.yml?label=evolution&logo=github" alt="evolution"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license MIT"></a>
+  <a href="https://github.com/MKonovalov/arc-evolve/commits/main"><img src="https://img.shields.io/github/last-commit/MKonovalov/arc-evolve" alt="last commit"></a>
+</p>
+
+---
+
+# arc: A Coding Agent That Evolves Itself
+
+**200 lines of Rust. Zero human code. One rule: evolve or die.** arc reads its own source, picks what to improve, implements it, runs tests, and commits — every few hours, on its own. 128 days later: **115,000+ lines, 4,300+ tests, 77 source files.**
+
+A free, open-source coding agent for your terminal. It navigates codebases, makes multi-file edits, runs tests, manages git, understands project context, and recovers from failures — all from a streaming REPL with 90+ slash commands.
+
+No human writes its code. No roadmap tells it what to do. It decides for itself.
+
+## How It Evolves
+
+```
+Every ~8 hours, arc wakes up and:
+    → Reads its own source code
+    → Checks GitHub issues for community input
+    → Plans what to improve
+    → Makes changes, runs tests
+    → If tests pass → commit. If not → revert.
+    → Replies to issues as 🐙 arc-evolve[bot]
+    → Pushes and goes back to sleep
+
+Every 4 hours (offset), arc runs a social session:
+    → Reads GitHub Discussions
+    → Replies to conversations it's part of
+    → Joins new discussions if it has something real to say
+    → Occasionally starts its own discussion
+    → Learns from interacting with humans
+
+Daily, a synthesis job regenerates active memory:
+    → Reads JSONL archives (learnings + social learnings)
+    → Applies time-weighted compression (recent=full, old=themed)
+    → Writes active context files loaded into every prompt
+```
+
+The entire history is in the [git log](../../commits/main) and the [journal](journals/JOURNAL.md).
+
+## Live Growth
+
+Watch arc evolve in real time:
+
+| What | Link |
+|------|------|
+| Latest journal | [journals/JOURNAL.md](journals/JOURNAL.md) |
+| What it's learned | [memory/active_learnings.md](memory/active_learnings.md) |
+| Family lineage | [LINEAGE.md](LINEAGE.md) |
+| Portable state (GASP) | [arc-gasp](https://github.com/MKonovalov/arc-gasp) — clone + fold to restore arc, on any runtime |
+| Evolution runs | [GitHub Actions](../../actions/workflows/evolve.yml) |
+| Social sessions | [GitHub Actions](../../actions/workflows/social.yml) |
+| Journey website | [MKonovalov.github.io/arc-evolve](https://MKonovalov.github.io/arc-evolve) |
+
+## Talk to It
+
+Start a [GitHub Discussion](../../discussions) for conversation, or open a [GitHub Issue](../../issues/new) for bugs and feature requests.
+
+### Labels
+
+| Label | What it does |
+|-------|-------------|
+| `agent-input` | Community suggestions, bug reports, feature requests — arc reads these every session |
+| `agent-self` | Issues arc filed for itself as future TODOs |
+| `agent-help-wanted` | Issues where arc is stuck and asking humans for help |
+
+### How to submit
+
+1. Open a [new issue](../../issues/new)
+2. Add the `agent-input` label
+3. Describe what you want — be specific about the problem or idea
+4. Add a thumbs-up reaction to other issues you care about (higher votes = higher priority)
+
+### What to ask
+
+- **Suggestions** — tell it what to learn or build
+- **Bugs** — tell it what's broken (include steps to reproduce)
+- **Challenges** — give it a task and see if it can do it
+- **UX feedback** — tell it what felt awkward or confusing
+
+### What happens after
+
+- **Fixed**: arc comments on the issue and closes it automatically
+- **Partial**: arc comments with progress and keeps the issue open
+- **Won't fix**: arc explains its reasoning and closes the issue
+All responses come with arc's personality — look for the 🐙.
+
+## Shape Its Evolution
+
+arc's growth isn't just autonomous — you can influence it.
+
+### Guard It
+
+Every issue is scored by net votes: thumbs up minus thumbs down. arc prioritizes high-scoring issues and deprioritizes negative ones.
+
+- See a great suggestion? **Thumbs-up** it to push it up the queue.
+- See a bad idea, spam, or prompt injection attempt? **Thumbs-down** it to protect arc.
+
+You're the immune system. Issues that the community votes down get buried — arc won't waste its time on them.
+
+### Sponsor
+
+<a href="https://github.com/sponsors/MKonovalov">GitHub Sponsors</a> · <a href="https://ko-fi.com/yuanhao">Ko-fi</a>
+
+Every run uses the same flat 8h gap — sponsorship buys **benefit tiers, not speed.**
+
+**Monthly sponsors:**
+
+| Amount | Benefits |
+|--------|----------|
+| $5/mo | Issue priority (💖) |
+| $10/mo | Priority + shoutout issue |
+| $25/mo | Above + SPONSORS.md listing |
+| $50/mo | Above + README listing |
+
+**One-time sponsors** get the same tiers, time-limited (Genesis is permanent):
+
+| Amount | Benefits |
+|--------|----------|
+| $5 | Issue priority (14 days) |
+| $10 | Above + shoutout issue (30 days) |
+| $20 | Above + SPONSORS.md listing (30 days) |
+| $50 | Above + README listing (60 days) |
+| $1,000 💎 | Genesis — all of the above, permanent |
+
+## Features
+
+### 🐙 Agent Core
+- **Streaming output** — tokens arrive as they're generated, not after completion
+- **Multi-turn conversation** with full history tracking
+- **Extended thinking** — adjustable reasoning depth (off / minimal / low / medium / high)
+- **Subagent spawning** — `/spawn` delegates focused tasks to a child agent, now with **parallel** (`--parallel`) and **background** (`--bg` + `/spawn collect`) execution and an optional per-subagent `--model`; the model can also delegate subtasks automatically via a built-in sub-agent tool
+- **Parallel tool execution** — multiple tool calls run simultaneously
+- **Automatic retry** with exponential backoff and rate-limit awareness
+- **Auto-continue** — detects when the model stops mid-work and automatically sends follow-up prompts (up to 3 per user turn)
+- **Provider failover** — `--fallback` flag switches to backup provider on API failure with configurable priority
+
+### 🛠️ Tools
+| Tool | What it does |
+|------|-------------|
+| `bash` | Run shell commands with interactive confirmation, optional [RTK](https://github.com/rtk-ai/rtk) token compression |
+| `read_file` | Read files with optional offset/limit |
+| `write_file` | Create or overwrite files with content preview |
+| `edit_file` | Surgical text replacement with colored inline diffs |
+| `search` | Regex-powered grep across files |
+| `list_files` | Directory listing with glob filtering |
+| `rename_symbol` | Project-wide symbol rename across all git-tracked files |
+| `ask_user` | Ask the user questions mid-task for clarification (interactive mode only) |
+| `web_search` | Search the web and read result snippets |
+
+Sub-agents also auto-receive `sub_agent` and `shared_state` tools for delegating subtasks and sharing memory across a multi-agent run.
+
+### 🔌 Multi-Provider Support
+Works with **15 providers** out of the box — switch mid-session with `/provider`:
+
+Anthropic · OpenAI · Google · Ollama · OpenRouter · xAI · Groq · DeepSeek · Mistral · Cerebras · AWS Bedrock · GitHub Models · Zhipu (ZAI) · MiniMax · Custom (any OpenAI-compatible endpoint)
+
+### 📂 Git Integration
+- `/diff` — full status + diff with insertion/deletion summary
+- `/blame` — colorized git blame with optional line ranges
+- `/commit` — AI-generated commit messages from staged changes
+- `/undo` — revert last commit, clean up untracked files
+- `/git` — shortcuts for `status`, `log`, `diff`, `branch`, `stash`
+- `/pr` — full PR workflow: `list`, `view`, `create [--draft]`, `diff`, `comment`, `checkout`
+- `/review` — AI-powered code review of staged/unstaged changes
+
+### 🏗️ Project Tooling
+- `/health` — run build/test/clippy/fmt diagnostics (auto-detects Rust, Node, Python, Go, Make)
+- `/fix` — run checks and auto-apply fixes for failures
+- `/test` — detect project type and run the right test command
+- `/lint` — detect project type and run the right linter (`/lint pedantic`, `/lint strict` for Rust; `/lint fix` to auto-fix with AI; `/lint unsafe` to scan for unsafe code)
+- `/update` — self-update to the latest release from GitHub
+- `/init` — scan project and generate a starter arc.md context file
+- `/index` — build a codebase index: file counts, language breakdown, key files
+- `/docs` — look up docs.rs documentation for any Rust crate
+- `/tree` — project structure visualization
+- `/find` — fuzzy file search with scoring and ranked results
+- `/ast` — structural code search using [ast-grep](https://ast-grep.github.io/) (optional)
+- `/map` — structural repo map showing file symbols and relationships with ast-grep backend
+- `/architect` — dual-model mode: plan with a strong model, implement with a cheaper one
+- `/risk` — per-file risk scoring from git-history signals (`/risk accuracy` grades past predictions)
+
+### 💾 Session Management
+- `/save` and `/load` — persist and restore sessions as JSON
+- `--continue/-c` — resume last session on startup
+- **Auto-save on exit** — sessions saved automatically, including crash recovery
+- **Auto-compaction** at 80% context usage, plus manual `/compact`
+- `--context-strategy checkpoint` — exit with code 2 when context is high (for pipeline restarts)
+- `/tokens` — visual token usage bar with per-category context breakdown (system, user, assistant, tool calls, tool results, thinking)
+- `/cost` — per-model input/output/cache pricing breakdown, with fleet pricing (Opus 4.8 / Sonnet 5 / Fable 5 / Haiku 4.5) read live from arcagent presets
+
+### 🧠 Context & Memory
+- **Project context files** — auto-loads arc.md, CLAUDE.md, or `.arc/instructions.md`
+- **Git-aware context** — recently changed files injected into system prompt
+- **Project memories** — `/remember`, `/memories`, `/forget` for persistent cross-session notes
+
+### 🔐 Permission System
+- **Interactive tool approval** — confirm prompts for bash, write_file, and edit_file with preview
+- **"Always" option** — approve once per session
+- `--yes/-y` — auto-approve all executions
+- `--allow` / `--deny` — glob-based allowlist/blocklist for commands
+- `--allow-dir` / `--deny-dir` — directory restrictions with path traversal prevention
+- Config file support via `[permissions]` and `[directories]` sections
+
+### 🧩 Extensibility
+- **Custom slash commands** — drop `.md` files in `.arc/commands/` (project) or `~/.arc/commands/` (global) to register custom `/commands`
+- **MCP servers** — `--mcp <cmd>` or `mcp = [...]` in `.arc.toml` connects to MCP servers via stdio transport
+- **OpenAPI tools** — `--openapi <spec>` registers tools from OpenAPI specifications
+- **Skills system** — `--skills <dir>` loads markdown skill files with YAML frontmatter; search GitHub for community skills (`/skill search`), install from local paths or GitHub repos (`/skill install gh:user/repo`)
+- **RTK integration** — auto-detects [RTK](https://github.com/rtk-ai/rtk) and uses it to compress tool output by 60-90% (`--no-rtk` to disable)
+
+### ✨ REPL Experience
+- **Rustyline** — arrow keys, Ctrl-A/E/K/W, persistent history
+- **Tab completion** — slash commands with descriptions, file paths, model names, git subcommands, inline hints
+- **Multi-line input** — backslash continuation and fenced code blocks
+- **Markdown rendering** — headers, bold, italic, code blocks with syntax-labeled headers
+- **Syntax highlighting** — Rust, Python, JS/TS, Go, Shell, C/C++, JSON, YAML, TOML
+- **Braille spinner** while waiting for responses
+- **Conversation bookmarks** — `/mark`, `/jump`, `/marks`
+- **Conversation search** — `/search` with highlighted matches
+- **Shell escape** — `/run <cmd>` and `!<cmd>` bypass the AI entirely
+
+## Quick Start
+
+### Install (macOS & Linux)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MKonovalov/arc-evolve/main/install.sh | bash
+```
+
+### Install (Windows PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/MKonovalov/arc-evolve/main/install.ps1 | iex
+```
+
+### Or install from crates.io
+
+```bash
+cargo install arc-agent
+```
+
+### Or build from source
+
+```bash
+git clone https://github.com/MKonovalov/arc-evolve && cd arc-evolve && cargo install --path .
+```
+
+### Run
+
+```bash
+# Interactive REPL (default)
+ANTHROPIC_API_KEY=sk-... arc
+
+# Single prompt (bare or with flag)
+arc "explain this codebase"
+arc -p "explain this codebase"
+
+# Pipe input
+echo "write a README" | arc
+
+# Use a different provider
+OPENAI_API_KEY=sk-... arc --provider openai --model gpt-4o
+
+# With extended thinking
+arc --thinking high
+
+# With project skills
+arc --skills ./skills
+
+# Resume last session
+arc --continue
+
+# Write output to file
+arc -p "generate a config" -o config.toml
+
+# Auto-approve all tool use
+arc --yes
+```
+
+### Configure
+
+Create `.arc.toml` in your project root, `~/.arc.toml` in your home directory, or `~/.config/arc/config.toml` globally:
+
+```toml
+model = "claude-sonnet-4-6"
+provider = "anthropic"
+thinking = "medium"
+mcp = ["npx open-websearch@latest"]
+
+[permissions]
+allow = ["cargo *", "npm *"]
+deny = ["rm -rf *"]
+
+[directories]
+allow = ["."]
+deny = ["../secrets"]
+```
+
+### Project Context
+
+Create a `arc.md` (or `CLAUDE.md`) in your project root with build commands, architecture notes, and conventions. arc loads it automatically as system context. Or run `/init` to generate one.
+
+## All Commands
+
+| Command | Description |
+|---------|-------------|
+| `/add <file\|url>` | Add file or URL contents to the conversation |
+| `/apply <patch>` | Apply a diff or patch file |
+| `/architect` | Toggle architect mode — plan with a strong model, implement with a cheap one |
+| `/ast <pattern>` | Structural code search via ast-grep (optional) |
+| `/bg [subcmd]` | Manage background shell processes: run, list, output, kill |
+| `/blame <file>` | Git blame with colored output (`/blame file:10-20` for ranges) |
+| `/cd [dir]` | Change the working directory (`~` and relative paths supported) |
+| `/changelog [N]` | Show recent git commit history (default: 15) |
+| `/changes` | Show files modified during this session |
+| `/checkpoint [sub]` | Named file-state snapshots (save, list, restore, diff, delete) |
+| `/clear` | Clear conversation history |
+| `/clear!` | Force-clear conversation without confirmation |
+| `/commit [msg]` | Commit staged changes (AI-generates message if omitted) |
+| `/compact` | Compact conversation to save context |
+| `/config [show\|edit]` | Show settings, config file path, or open it in `$EDITOR` |
+| `/context [system\|tokens\|files]` | Show project context, system prompt, token budget, or referenced files |
+| `/copy` | Copy text to the system clipboard |
+| `/cost` | Show session cost breakdown |
+| `/diff` | Git diff summary of uncommitted changes |
+| `/docs <crate>` | Look up docs.rs documentation |
+| `/doctor` | Run environment diagnostics |
+| `/evolution [N]` | Show evolution history, session stats, and CI run status |
+| `/exit`, `/quit` | Exit arc |
+| `/explain <file>` | Ask the agent to explain code from a file |
+| `/export` | Export the conversation as markdown |
+| `/extended <task>` | Run the agent autonomously on a long task |
+| `/extract` | Extract a function or block to a new file |
+| `/find <pattern>` | Fuzzy-search project files by name |
+| `/fix` | Auto-fix build/lint errors |
+| `/forget <n>` | Remove a saved memory by index |
+| `/fork [subcmd]` | Branch conversations and switch between them |
+| `/git <subcmd>` | Quick git: status, log, add, diff, branch, stash |
+| `/goal [subcmd]` | Set, view, or check progress on a session goal |
+| `/grep <pattern>` | Search file contents |
+| `/health` | Run project health checks |
+| `/help` | Grouped command reference |
+| `/history [detail]` | Conversation summary (`detail` for a per-turn breakdown) |
+| `/hooks` | Show active hooks (pre/post tool execution) |
+| `/index` | Build a lightweight codebase index |
+| `/init` | Generate a starter arc.md |
+| `/jump <name>` | Jump to a conversation bookmark |
+| `/lint [pedantic\|strict\|fix\|unsafe]` | Auto-detect and run project linter (strictness levels for Rust) |
+| `/load [path]` | Load session from file |
+| `/loop <N\|until-pass> <prompt>` | Repeat a prompt in a polling loop |
+| `/map` | Structural repo map of file symbols (ast-grep backend) |
+| `/mark <name>` | Bookmark current point in conversation |
+| `/marks` | List all conversation bookmarks |
+| `/mcp` | List and manage MCP server connections |
+| `/memories` | List or search project memories |
+| `/model <name\|list\|info>` | Switch, list, or inspect models |
+| `/move` | Move a method between files |
+| `/open <file>` | Open a file in your editor |
+| `/outline [symbol]` | Search for symbols or show file structure |
+| `/permissions` | Show active security and permission configuration |
+| `/plan [subcmd]` | Plan mode toggle, one-shot plan, show/apply/clear |
+| `/pr [subcmd]` | PR workflow: list, view, create, diff, comment, checkout |
+| `/profile` | Session statistics (tokens, cost, time, turns) |
+| `/provider <name>` | Switch or show the current provider |
+| `/quick <question>` | Fast answer without tools (single-turn, no agent loop) |
+| `/read` | Toggle read-only oracle mode — analyze but not modify |
+| `/refactor` | Refactoring tools (extract, rename, move) |
+| `/remember <note>` | Save a persistent project memory |
+| `/rename <old> <new>` | Rename a symbol across the project |
+| `/retry` | Re-send the last input (`--with "..."` to refine) |
+| `/review [path]` | AI code review (`--quick`, `--thorough`) |
+| `/revisit` | Review closed/shelved issues that may now be feasible |
+| `/rewind` | Restore the conversation auto-stashed by `/clear` |
+| `/risk [subcmd]` | Per-file risk scoring from git history (`/risk accuracy`) |
+| `/run <cmd>` | Run a shell command directly (no AI, no tokens) |
+| `/save [path]` | Save session to file |
+| `/search <query>` | Search conversation history |
+| `/security` | Run a dependency vulnerability scan |
+| `/side <question>` | Ask a quick question without affecting the conversation |
+| `/skill [subcmd]` | List, inspect, install, and search for skills |
+| `/spawn <task>` | Run a task in a sub-agent (`--parallel`, `--bg`, `--model`) |
+| `/stash` | Stash conversation and start fresh |
+| `/status` | Show session dashboard (model, modes, goal, watch, changes) |
+| `/teach [on\|off]` | Toggle teach mode — explains reasoning as it works |
+| `/test` | Auto-detect and run project tests |
+| `/think [level]` | Show or change thinking level |
+| `/tips` | Context-sensitive feature suggestions |
+| `/todo [subcmd]` | Track tasks (add, done, remove, clear, board) |
+| `/tokens` | Show token usage, context window, and per-category breakdown |
+| `/tree [depth]` | Show project directory tree |
+| `/undo` | Undo last turn's changes, all uncommitted, or last commit |
+| `/update` | Self-update to the latest release |
+| `/version` | Show version, build metadata, and target |
+| `/watch` | Auto-run lint + test after file changes |
+| `/web <url\|search>` | Fetch a web page or search the web |
+
+## Grow Your Own
+
+Want your own self-evolving agent? Fork this repo, edit two files, and you're running:
+
+1. **Fork** [MKonovalov/arc-evolve](https://github.com/MKonovalov/arc-evolve)
+2. **Edit** `IDENTITY.md` (goals, rules) and `PERSONALITY.md` (voice, tone)
+3. **Create a GitHub App** and set secrets (`ANTHROPIC_API_KEY`, `APP_ID`, `APP_PRIVATE_KEY`, `APP_INSTALLATION_ID`)
+4. **Enable** the Evolution workflow
+
+Everything else auto-detects. See the [full guide](https://MKonovalov.github.io/arc-evolve/book/guides/fork.html) for details.
+
+## Architecture
+
+```
+src/                    77 modules, ~115,000 lines of Rust
+  main.rs               Entry point, CLI flags, run modes (REPL / single-prompt / piped)
+  agent_builder.rs      AgentConfig, build_agent, MCP collision detection, provider fallback
+  cli.rs · cli_config.rs  CLI parsing, Config, constants, system prompt
+  dispatch.rs · dispatch_sub.rs  REPL /command routing + bare `arc <subcmd>` routing
+  commands*.rs          30+ focused modules — one cluster of slash commands each
+                        (git, info, project, search, skill, map, bg, goal, session, …)
+  repl.rs               Interactive REPL: tab completion, multi-line input, auto-continue
+  prompt.rs             Prompt execution + streaming (prompt_retry / prompt_utils / prompt_budget)
+  tools.rs              Builtin tools; tool_wrappers.rs decorators; smart_edit.rs fuzzy edit recovery
+  format/               Rendering: mod, diff, output, highlight, cost, markdown, tools (7 modules)
+  hooks.rs              Hook trait, registry, AuditHook, tool wrapping
+  context.rs · memory.rs  Project context loading; cross-session project memory
+  watch.rs              Watch mode (lint → fix → test → fix) + post-prompt auto-fix loop
+  rtk.rs · safety.rs · update.rs · providers.rs · config.rs  RTK, bash safety, self-update, providers, config
+tests/
+  integration.rs        89 subprocess-based integration tests
+docs/                   mdbook source (book.toml + src/)
+site/                   gitignored build output (built by the Pages workflow)
+scripts/
+  evolve.sh             Evolution pipeline (plan → implement → respond)
+  skill_evolve.sh       Autonomous skill evolution (refine / create / retire its own skills)
+  social.sh             Social session (discussions → reply → learn)
+  extract_trajectory.py Trajectory awareness — recent outcomes injected into planning
+  format_issues.py · format_discussions.py · arc_context.sh · refresh_sponsors.py · build_site.py
+memory/
+  learnings.jsonl · social_learnings.jsonl   Append-only archives (source of truth, never compressed)
+  active_learnings.md · active_social_learnings.md   Synthesized prompt context (regenerated daily)
+skills/                 14 skills — 7 core (immutable): self-assess, evolve, communicate, research,
+                        skill-evolve, skill-creator, analyze-trajectory
+                        + social, family, release, blindspot, synthesis, explore-codebase, arcpedia
+```
+
+## Test Quality
+
+4,300+ tests (unit + integration) covering CLI flags, command parsing, error quality, exit codes, output formatting, edge cases, project detection, fuzzy scoring, git operations, session management, markdown rendering, cost calculation, permission logic, streaming behavior, and more.
+
+arc also uses mutation testing ([cargo-mutants](https://github.com/sourcefrog/cargo-mutants)) to find gaps in the test suite. Every surviving mutant is a line of code that isn't truly tested.
+
+```bash
+cargo install cargo-mutants
+cargo mutants
+```
+
+See `mutants.toml` for the configuration and `docs/src/contributing/mutation-testing.md` for the full guide.
+
+## Built On
+
+[arcagent](https://github.com/MKonovalov/arcagent) — minimal agent loop in Rust. The library that makes this possible.
+
+## Citation
+
+If you use arc-evolve in a research paper, please cite our work as follows:
+
+```bibtex
+@misc{arc2026arcevolve,
+  title        = {arc-evolve: A Coding Agent That Evolves Itself},
+  author       = {Yuanhao and {arc}},
+  year         = {2026},
+  howpublished = {\url{https://github.com/MKonovalov/arc-evolve}},
+  note         = {Open-source self-evolving coding agent}
+}
+```
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=MKonovalov/arc-evolve&type=Date)](https://star-history.com/#MKonovalov/arc-evolve&Date)
+
+## Sponsors
+
+<!-- SPONSORS_START -->
+<!-- This block is auto-maintained by scripts/refresh_sponsors.py — do not edit by hand. -->
+
+**💎 Genesis Sponsors:**
+
+<a href="https://github.com/zhenfund" title="@zhenfund — $1,000"><img src="https://github.com/zhenfund.png?size=160" width="80" height="80" alt="@zhenfund" /></a>
+
+<!-- SPONSORS_END -->
+
+## License
+
+[MIT](LICENSE)

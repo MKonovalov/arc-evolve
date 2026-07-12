@@ -1,0 +1,98 @@
+# Context Management
+
+Claude models have a finite context window (200,000 tokens). As your conversation grows, it fills up. arc helps you manage this.
+
+## Checking context usage
+
+Use `/tokens` to see how full your context window is:
+
+```
+/tokens
+```
+
+Output:
+```
+  Active context:
+    messages:    24
+    current:     85.2k / 200.0k tokens
+    ████████░░░░░░░░░░░░ 43%
+
+  Session totals (all API calls):
+    input:       120.5k tokens
+    output:      45.2k tokens
+    cache read:  30.0k tokens
+    cache write: 15.0k tokens
+    est. cost:   $0.892
+```
+
+When the context window exceeds 75%, you'll see a warning:
+
+```
+    ⚠ Context is getting full. Consider /clear or /compact.
+```
+
+## Manual compaction
+
+Use `/compact` to compress the conversation:
+
+```
+/compact
+```
+
+This summarizes older messages while preserving recent context. You'll see what survived:
+
+```
+  compacted: 24 → 8 messages, ~85.2k → ~32.1k tokens
+  📋 Still in context: src/main.rs, src/tools.rs, auth refactor (2 files, 1 topic)
+```
+
+The context summary shows which files and topics are still present after compaction, so you can trust that important context wasn't lost.
+
+### Previewing compaction
+
+Not sure if you should compact? Use `--preview` to see what would happen without changing anything:
+
+```
+/compact --preview
+```
+
+This shows estimated token savings, which messages would be compressed, files touched, and topics in the conversation — all read-only.
+
+## Auto-compaction
+
+When the context window exceeds **80%** capacity, arc automatically compacts the conversation. You'll see:
+
+```
+  ⚡ auto-compacted: 30 → 10 messages, ~165.0k → ~62.0k tokens
+```
+
+This happens transparently after each prompt response. You don't need to do anything — arc handles it.
+
+## Clearing the conversation
+
+If you want to start completely fresh:
+
+```
+/clear
+```
+
+This removes all messages and resets the conversation. Unlike `/compact`, nothing is preserved.
+
+## Tips
+
+- For long sessions, use `/tokens` periodically to monitor usage
+- If you notice the agent losing track of earlier context, try `/compact`
+- Starting a new task? Use `/clear` to avoid confusing the agent with unrelated history
+
+## Checkpoint-restart strategy
+
+For automated pipelines (like CI scripts), compaction can be lossy. The `--context-strategy checkpoint` flag provides an alternative: when context usage exceeds 70%, arc stops the agent loop and exits with code **2**.
+
+```bash
+arc --context-strategy checkpoint -p "do some long task"
+# Exit code 2 means "context was getting full — restart me"
+```
+
+The calling script can then restart arc with fresh context. This is useful for multi-phase pipelines where a structured restart produces better results than lossy compaction.
+
+The default strategy is `compaction`, which uses auto-compaction as described above.

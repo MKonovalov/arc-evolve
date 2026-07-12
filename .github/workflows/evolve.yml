@@ -1,0 +1,218 @@
+name: Evolution
+
+on:
+  schedule:
+    - cron: '0 */8 * * *'  # every 8h (cadence moved here from the retired in-script sponsor gate)
+  workflow_dispatch:       # manual trigger for testing
+
+concurrency:
+  group: evolution
+  cancel-in-progress: false  # queue new runs, don't cancel in-progress ones
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  evolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: Generate bot token
+        id: bot-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ steps.bot-token.outputs.token }}
+          fetch-depth: 50
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Setup GitHub CLI
+        run: gh auth status
+        env:
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Install RTK (Rust Token Killer — github.com/rtk-ai/rtk) for CLI output
+      # compression. arc's `maybe_prefix_rtk()` auto-prefixes supported
+      # commands when `rtk` is on PATH; falls back to native compressor in
+      # `src/format/output.rs` if absent. Especially leveraged by
+      # analyze-trajectory which fetches large `gh run view --log-failed`
+      # artifacts. Fail-soft: install failure does not block the session.
+      - name: Install RTK (output compression)
+        continue-on-error: true
+        run: |
+          if ! command -v rtk &>/dev/null; then
+            curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/refs/heads/master/install.sh | sh || true
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          # Verify (non-fatal — agent has a native fallback)
+          export PATH="$HOME/.local/bin:$PATH"
+          rtk --version || echo "RTK install failed; agent will use native compressor"
+
+      # Install xurl for the x-research skill. Token (X_BEARER_TOKEN) is wired
+      # into the agent run step's env block, where the skill actually executes.
+      # Fail-soft: install failure leaves the skill unavailable but does not
+      # block the session. The skill body falls back to "auth not configured;
+      # skill unavailable this session" when neither xurl+~/.xurl nor
+      # X_BEARER_TOKEN are present.
+      - name: Install xurl (x-research skill)
+        continue-on-error: true
+        run: |
+          if ! command -v xurl &>/dev/null; then
+            cargo install xurl
+          fi
+          xurl --version || echo "::warning::xurl install failed; x-research skill will be unavailable"
+
+      - name: Detect bot identity
+        id: bot-info
+        run: |
+          SLUG="${{ steps.bot-token.outputs.app-slug }}"
+          if [ -z "$SLUG" ]; then
+            echo "::error::GitHub App slug is empty. Check that your GitHub App is configured correctly."
+            exit 1
+          fi
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          echo "login=${SLUG}[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=${SLUG}[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git
+        run: |
+          git config user.name "${{ steps.bot-info.outputs.login }}"
+          git config user.email "${{ steps.bot-info.outputs.email }}"
+
+      - name: Notify dashboard (start)
+        if: vars.DASHBOARD_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+        run: |
+          gh api repos/${{ vars.DASHBOARD_REPO }}/dispatches \
+            -f event_type=activity-update \
+            -f 'client_payload[action]=start' \
+            -f 'client_payload[workflow]=Evolution' || true
+
+      - name: Lint evolve.sh heredocs
+        run: python3 scripts/lint_evolve_heredocs.py
+
+      - name: Run evolution session
+        id: attempt1
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || '' }}
+          FALLBACK_PROVIDER: zai
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          APP_INSTALLATION_ID: ${{ secrets.APP_INSTALLATION_ID }}
+          BOT_LOGIN: ${{ steps.bot-info.outputs.login }}
+          BOT_SLUG: ${{ steps.bot-info.outputs.slug }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          arcpedia_AGENT_TOKEN: ${{ secrets.arcpedia_AGENT_TOKEN }}
+          arcpedia_VAULT_ID: ${{ secrets.arcpedia_EVOLVE_VAULT_ID }}
+        run: |
+          chmod +x scripts/evolve.sh
+          ./scripts/evolve.sh
+
+      - name: Retry after 15min
+        id: attempt2
+        if: steps.attempt1.outcome == 'failure'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || '' }}
+          FALLBACK_PROVIDER: zai
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          APP_INSTALLATION_ID: ${{ secrets.APP_INSTALLATION_ID }}
+          BOT_LOGIN: ${{ steps.bot-info.outputs.login }}
+          BOT_SLUG: ${{ steps.bot-info.outputs.slug }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          arcpedia_AGENT_TOKEN: ${{ secrets.arcpedia_AGENT_TOKEN }}
+          arcpedia_VAULT_ID: ${{ secrets.arcpedia_EVOLVE_VAULT_ID }}
+        run: |
+          echo "Waiting 15 minutes before retry..."
+          sleep 900
+          ./scripts/evolve.sh
+
+      - name: Retry after 45min
+        id: attempt3
+        if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ steps.bot-token.outputs.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && 'true' || '' }}
+          FALLBACK_PROVIDER: zai
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+          APP_INSTALLATION_ID: ${{ secrets.APP_INSTALLATION_ID }}
+          BOT_LOGIN: ${{ steps.bot-info.outputs.login }}
+          BOT_SLUG: ${{ steps.bot-info.outputs.slug }}
+          X_BEARER_TOKEN: ${{ secrets.X_BEARER_TOKEN }}
+          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
+          FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}
+          arcpedia_AGENT_TOKEN: ${{ secrets.arcpedia_AGENT_TOKEN }}
+          arcpedia_VAULT_ID: ${{ secrets.arcpedia_EVOLVE_VAULT_ID }}
+        run: |
+          echo "Waiting 45 minutes before retry..."
+          sleep 2700
+          ./scripts/evolve.sh
+
+      - name: Check for clippy warnings
+        if: always()
+        run: cargo clippy --quiet --all-targets 2>&1 || true
+
+      - name: Notify dashboard (end)
+        if: always() && vars.DASHBOARD_REPO != ''
+        env:
+          GH_TOKEN: ${{ secrets.DASHBOARD_TOKEN }}
+        run: |
+          gh api repos/${{ vars.DASHBOARD_REPO }}/dispatches \
+            -f event_type=activity-update \
+            -f 'client_payload[action]=end' \
+            -f 'client_payload[workflow]=Evolution' \
+            -f 'client_payload[conclusion]=${{ job.status }}' || true
+          gh api repos/${{ vars.DASHBOARD_REPO }}/dispatches \
+            -f event_type=dashboard-update || true

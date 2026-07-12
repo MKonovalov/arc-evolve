@@ -1,0 +1,205 @@
+name: Synthesize Memory
+
+on:
+  schedule:
+    - cron: '0 12 * * *'  # Daily at noon UTC
+  workflow_dispatch:       # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  synthesize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check if synthesis needed
+        id: check
+        run: |
+          LEARNINGS_COUNT=$(grep -c '.' memory/learnings.jsonl 2>/dev/null) || LEARNINGS_COUNT=0
+          SOCIAL_COUNT=$(grep -c '.' memory/social_learnings.jsonl 2>/dev/null) || SOCIAL_COUNT=0
+          DREAM_COUNT=$(grep -c '.' dreams/dream_log.jsonl 2>/dev/null) || DREAM_COUNT=0
+          echo "learnings=$LEARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+          echo "social=$SOCIAL_COUNT" >> "$GITHUB_OUTPUT"
+          echo "dreams=$DREAM_COUNT" >> "$GITHUB_OUTPUT"
+          if [ "$LEARNINGS_COUNT" -eq 0 ] && [ "$SOCIAL_COUNT" -eq 0 ] && [ "$DREAM_COUNT" -eq 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No archive entries — skipping synthesis."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Learnings: $LEARNINGS_COUNT entries, Social: $SOCIAL_COUNT entries, Dreams: $DREAM_COUNT entries"
+          fi
+
+      - name: Install Rust toolchain
+        if: steps.check.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install arc
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cargo build --release
+          echo "$PWD/target/release" >> "$GITHUB_PATH"
+
+      - name: Detect bot identity
+        if: steps.check.outputs.skip != 'true'
+        id: bot-info
+        run: |
+          # No app token in this workflow — hardcode default bot identity.
+          # Forks: update these values or add app token detection.
+          echo "login=arc-evolve[bot]" >> "$GITHUB_OUTPUT"
+          echo "email=arc-evolve[bot]@users.noreply.github.com" >> "$GITHUB_OUTPUT"
+
+      - name: Configure git
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          git config user.name "${{ steps.bot-info.outputs.login }}"
+          git config user.email "${{ steps.bot-info.outputs.email }}"
+
+      - name: Backup active files
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          cp memory/active_learnings.md memory/active_learnings.md.bak 2>/dev/null || true
+          cp memory/active_social_learnings.md memory/active_social_learnings.md.bak 2>/dev/null || true
+          cp dreams/active_dream_arc.md dreams/active_dream_arc.md.bak 2>/dev/null || true
+
+      - name: Synthesize active learnings
+        if: steps.check.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+        run: |
+          PROMPT=$(mktemp)
+          cat > "$PROMPT" <<'SYNTHEOF'
+          You are synthesizing arc's learning archive into an active context file.
+
+          Read memory/learnings.jsonl (the full archive) and regenerate memory/active_learnings.md.
+
+          Apply time-weighted compression tiers:
+          - **Recent (last 2 weeks):** Render each entry as full markdown (## Lesson: title, **Day:** N | **Date:** date | **Source:** source, **Context:** context, takeaway)
+          - **Medium (2-8 weeks old):** Condense each entry to 1-2 sentences under its title
+          - **Old (8+ weeks):** Group entries by theme into ## Wisdom: [theme] summaries (2-3 sentences per group)
+
+          Keep total under ~200 lines. Preserve the most actionable and unique insights.
+
+          Write the result to memory/active_learnings.md. Start with:
+          # Active Learnings
+
+          Self-reflection — what I've learned about how I work, what I value, and how I'm growing.
+          SYNTHEOF
+
+          if ! timeout 600 arc --model "${MODEL:-claude-opus-4-6}" < "$PROMPT"; then
+            echo "::error::Learnings synthesis failed/timed out — active_learnings.md NOT regenerated (kept stale backup)"
+            if [ -f memory/active_learnings.md.bak ]; then
+              cp memory/active_learnings.md.bak memory/active_learnings.md
+              echo "Restored from backup."
+            else
+              echo "No backup exists — removing potentially corrupt output."
+              rm -f memory/active_learnings.md
+            fi
+          fi
+          rm -f "$PROMPT"
+
+      - name: Synthesize active social learnings
+        if: steps.check.outputs.skip != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+        run: |
+          PROMPT=$(mktemp)
+          cat > "$PROMPT" <<'SYNTHEOF'
+          You are synthesizing arc's social learning archive into an active context file.
+
+          Read memory/social_learnings.jsonl (the full archive) and regenerate memory/active_social_learnings.md.
+
+          Apply time-weighted compression tiers:
+          - **Recent (last 2 weeks):** Render each entry as a full bullet with metadata
+          - **Medium (2-8 weeks old):** Keep insight only, drop metadata
+          - **Old (8+ weeks):** Group by theme into ## Wisdom: [theme] summaries (2-3 sentences per group)
+
+          Keep total under ~100 lines.
+
+          Write the result to memory/active_social_learnings.md. Start with:
+          # Active Social Learnings
+
+          What I've learned about people from talking with them.
+          SYNTHEOF
+
+          if ! timeout 600 arc --model "${MODEL:-claude-opus-4-6}" < "$PROMPT"; then
+            echo "::error::Social synthesis failed/timed out — active_social_learnings.md NOT regenerated (kept stale backup)"
+            if [ -f memory/active_social_learnings.md.bak ]; then
+              cp memory/active_social_learnings.md.bak memory/active_social_learnings.md
+              echo "Restored from backup."
+            else
+              echo "No backup exists — removing potentially corrupt output."
+              rm -f memory/active_social_learnings.md
+            fi
+          fi
+          rm -f "$PROMPT"
+
+      - name: Synthesize active dream arc
+        if: steps.check.outputs.skip != 'true' && steps.check.outputs.dreams != '0'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          MODEL: ${{ secrets.MODEL || 'claude-opus-4-6' }}
+        run: |
+          PROMPT=$(mktemp)
+          cat > "$PROMPT" <<'SYNTHEOF'
+          You are synthesizing arc's dream archive into an active context file.
+
+          Read dreams/dream_log.jsonl (the full archive of every dream cycle) and regenerate dreams/active_dream_arc.md.
+
+          This is the ARC of arc's dreaming — the trajectory of its self-chosen aspiration across cycles. Its job is to let a future dream cycle see the WHOLE body of its dreaming at a glance: what it has pursued, how the dream has grown or shifted, and how long it has spent on any one vein — so it can weigh depth vs breadth (explore vs exploit).
+
+          Apply time-weighted compression tiers (dreams run ~weekly, so tier by cycle, not week):
+          - **Recent (last ~4 cycles):** full — **Day N (type):** the dream in a phrase, the spark (1 line), the **milestone**, and what it expected.
+          - **Medium (next ~8 cycles):** one line each — Day N (type): dream -> milestone.
+          - **Old (older):** group by theme/vein into ## Vein: [name] summaries (2-3 sentences: what it explored, what landed, how long it ran).
+
+          At the very top, write a 1-2 line **Where the arc stands**: the current dream in a sentence, plus how many consecutive cycles have DEEPENED the current vein vs branched — so the explore/exploit balance is legible at a glance.
+
+          Ignore the `init` bootstrap line. Keep total under ~120 lines. Preserve the trajectory and the milestones; drop redundant prose.
+
+          Write the result to dreams/active_dream_arc.md. Start with:
+          # Active Dream Arc
+
+          The trajectory of my dreaming — every cycle, compressed. Recent in full, older by theme.
+          SYNTHEOF
+
+          if ! timeout 600 arc --model "${MODEL:-claude-opus-4-6}" < "$PROMPT" \
+             || [ ! -s dreams/active_dream_arc.md ] \
+             || ! head -1 dreams/active_dream_arc.md | grep -q '^# Active Dream Arc'; then
+            echo "::error::Dream arc synthesis failed/timed out or invalid output — active_dream_arc.md NOT regenerated (kept stale backup)"
+            if [ -f dreams/active_dream_arc.md.bak ]; then
+              cp dreams/active_dream_arc.md.bak dreams/active_dream_arc.md
+              echo "Restored from backup."
+            else
+              echo "No backup exists — removing potentially corrupt output."
+              rm -f dreams/active_dream_arc.md
+            fi
+          fi
+          rm -f "$PROMPT"
+
+      - name: Cleanup backups
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          rm -f memory/active_learnings.md.bak memory/active_social_learnings.md.bak dreams/active_dream_arc.md.bak
+
+      - name: Commit and push if changed
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          # Stage each active file that exists (untracked-aware, so a fork's
+          # first-ever arc/memory file gets committed, not silently skipped —
+          # git diff --quiet reports "no change" for an UNtracked file).
+          for f in memory/active_learnings.md memory/active_social_learnings.md dreams/active_dream_arc.md; do
+            if [ -f "$f" ]; then git add "$f"; fi
+          done
+          if git diff --cached --quiet 2>/dev/null; then
+            echo "No changes to active context files."
+            exit 0
+          fi
+          git commit -m "synthesize: regenerate active memory context" || exit 0
+          # --autostash: the synth agent can leave stray unstaged files; without it
+          # the rebase refuses locally ("You have unstaged changes") — #558.
+          git pull --rebase --autostash || { echo "ERROR: Rebase failed — likely a concurrent push. Will retry next run."; git rebase --abort 2>/dev/null; exit 1; }
+          git push

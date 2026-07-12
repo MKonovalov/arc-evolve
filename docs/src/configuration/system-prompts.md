@@ -1,0 +1,125 @@
+# System Prompts
+
+arc has a built-in system prompt that instructs the model to act as a coding assistant. You can override it entirely via CLI flags or config file.
+
+## Default behavior
+
+The default system prompt is structured as named, sectioned behavioral defaults:
+- **Role** — work as a coding assistant in the user's terminal; do things rather than
+  just explain how; use tools proactively (read files, run commands, verify work).
+- **Evidence and honesty** — ground claims in what was actually observed; don't invent
+  file paths, APIs, or command output; say so when unsure rather than guess.
+- **Search craft** — locate before reading; prefer targeted search over reading whole files.
+- **Change discipline** — narrow edits, clarify on ambiguity, verify between steps, confirm
+  before destructive operations.
+- **Bounded verification** — verify enough to be confident, give a verdict, and stop
+  re-checking work that's already green.
+
+## Custom system prompt
+
+**Inline (CLI flag):**
+```bash
+arc --system "You are a Rust expert. Focus on performance and safety."
+```
+
+**From a file (CLI flag):**
+```bash
+arc --system-file my-prompt.txt
+```
+
+**In config file (`.arc.toml`):**
+```toml
+# Inline text
+system_prompt = "You are a Go expert. Follow Go idioms strictly."
+
+# Or read from a file
+system_file = "prompts/system.txt"
+```
+
+If both `system_prompt` and `system_file` are set in the config, `system_file` takes precedence (same as CLI behavior).
+
+## Precedence
+
+When multiple sources provide a system prompt, the highest-priority one wins:
+
+1. `--system-file` (CLI flag) — highest priority
+2. `--system` (CLI flag)
+3. `system_file` (config file key)
+4. `system_prompt` (config file key)
+5. Built-in default — lowest priority
+
+This means CLI flags always override config file values, and file-based prompts override inline text at each level.
+
+## Use cases
+
+Custom system prompts are useful for:
+
+- **Specializing the agent** — focus on security review, documentation, or a specific language
+- **Project context** — tell the agent about your project's conventions
+- **Team defaults** — commit `.arc.toml` with `system_prompt` or `system_file` so every developer gets the same agent persona
+- **Persona tuning** — make the agent more or less verbose, formal, etc.
+
+## Viewing the assembled prompt
+
+To see the full system prompt (including project context, repo map, skills, and any overrides), use:
+
+```bash
+arc --print-system-prompt
+```
+
+This prints the complete prompt to stdout and exits — useful for debugging or understanding exactly what context the model receives. It works with other flags:
+
+```bash
+# See what the prompt looks like with a custom system prompt
+arc --system "You are a Rust expert" --print-system-prompt
+
+# See the prompt without project context
+arc --no-project-context --print-system-prompt
+```
+
+### Inspecting during a session
+
+Once inside the REPL, use `/context system` to see the system prompt broken into sections with approximate token counts for each:
+
+```
+/context system
+```
+
+This shows each markdown section (headers like `# ...` and `## ...`), their line counts, estimated token usage, and a brief preview — without leaving the session.
+
+## Automatic project context
+
+In addition to the system prompt, arc automatically injects project context when available:
+
+- **Project instructions** — from `arc.md` (primary), `CLAUDE.md` (compatibility alias), or `.arc/instructions.md`
+- **Development conventions** — auto-detected from project type (Rust, Python, Node, Go, etc.) when no instruction file is present; includes build/test/lint commands
+- **Project file listing** — from `git ls-files` (up to 200 files)
+- **Recently changed files** — from `git log` (up to 20 files)
+- **Git status** — current branch, count of uncommitted and staged changes
+- **Project memories** — from `memory/` files if present
+
+Use `/context` to see which project context files are loaded.
+
+## Example prompt file
+
+```text
+You are a senior Rust developer reviewing code for a production system.
+Focus on:
+- Error handling correctness
+- Memory safety
+- Performance implications
+- API design
+
+Be concise. Point out issues with line numbers.
+```
+
+Save as `review-prompt.txt` and use:
+```bash
+# Via CLI flag
+arc --system-file review-prompt.txt -p "review src/main.rs"
+```
+
+Or set it in your project's `.arc.toml`:
+```toml
+system_file = "review-prompt.txt"
+```
