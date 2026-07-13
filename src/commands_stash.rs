@@ -3,8 +3,8 @@
 
 use crate::format::*;
 
-use std::sync::RwLock;
 use arcagent::agent::Agent;
+use std::sync::RwLock;
 
 /// Acquire a read-guard, recovering from a poisoned RwLock instead of panicking.
 fn rw_read_or_recover<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {

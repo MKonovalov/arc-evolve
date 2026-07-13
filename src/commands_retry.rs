@@ -16,9 +16,9 @@ use crate::prompt_retry::build_retry_prompt;
 use crate::session::{format_changes, ChangeKind, FileChange, SessionChanges};
 use crate::AgentConfig;
 
-use std::time::Instant;
 use arcagent::agent::Agent;
 use arcagent::*;
+use std::time::Instant;
 
 /// Known tool names that can appear in error messages from failed tool executions.
 /// Order matters: longer names first to avoid partial matches (e.g., "edit_file"

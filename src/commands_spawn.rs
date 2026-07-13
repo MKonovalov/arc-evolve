@@ -9,10 +9,10 @@ use crate::prompt::run_prompt;
 use crate::prompt_utils::summarize_message;
 use crate::sync_util::lock_or_recover;
 
+use arcagent::types::{AgentMessage, Usage};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use arcagent::types::{AgentMessage, Usage};
 
 // ── /spawn ────────────────────────────────────────────────────────────────
 

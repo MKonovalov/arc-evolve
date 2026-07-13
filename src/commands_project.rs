@@ -81,8 +81,8 @@ impl FileAction {
 fn extract_context_files(
     messages: &[arcagent::types::AgentMessage],
 ) -> std::collections::BTreeMap<FileAction, std::collections::BTreeSet<String>> {
-    use std::collections::{BTreeMap, BTreeSet};
     use arcagent::types::{AgentMessage, Content, Message};
+    use std::collections::{BTreeMap, BTreeSet};
 
     let mut result: BTreeMap<FileAction, BTreeSet<String>> = BTreeMap::new();
 

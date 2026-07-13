@@ -9,10 +9,10 @@ use crate::format::{
     format_token_count, truncate_with_ellipsis, BOLD, DIM, GREEN, RED, RESET, YELLOW,
 };
 use crate::git::git_branch;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use arcagent::agent::Agent;
 use arcagent::ThinkingLevel;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 // ── Teach mode state ──────────────────────────────────────────────────────
 // Session toggle: when enabled, a teaching instruction is prepended to

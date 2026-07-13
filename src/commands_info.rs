@@ -14,10 +14,10 @@ use crate::commands::thinking_level_name;
 use crate::format::*;
 use crate::git::*;
 
-use std::sync::OnceLock;
 use arcagent::agent::Agent;
 use arcagent::context::{estimate_tokens, total_tokens};
 use arcagent::*;
+use std::sync::OnceLock;
 
 /// Session-level cache for self-written percentage so repeated calls
 /// don't re-run git blame.

@@ -798,9 +798,11 @@ impl AgentTool for RecoveryHintTool {
                         arcagent::types::ToolError::InvalidArgs(format!("{msg}{suffix}")),
                     ),
                     // Cancelled carries no message — convert to Failed to attach the hint
-                    arcagent::types::ToolError::Cancelled => Err(arcagent::types::ToolError::Failed(
-                        format!("Tool call was cancelled.{suffix}"),
-                    )),
+                    arcagent::types::ToolError::Cancelled => {
+                        Err(arcagent::types::ToolError::Failed(format!(
+                            "Tool call was cancelled.{suffix}"
+                        )))
+                    }
                     // Exhaustive: ToolError::Failed is already handled above
                     e => Err(e),
                 }

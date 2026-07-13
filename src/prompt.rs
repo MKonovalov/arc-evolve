@@ -2,12 +2,12 @@
 
 use crate::cli::is_verbose;
 use crate::format::*;
-use std::collections::HashMap;
-use std::io::{self, IsTerminal, Write};
-use std::time::Instant;
 use arcagent::agent::Agent;
 use arcagent::context::total_tokens;
 use arcagent::*;
+use std::collections::HashMap;
+use std::io::{self, IsTerminal, Write};
+use std::time::Instant;
 
 use crate::prompt_budget::{audit_log_tool_call, session_budget_exhausted};
 use crate::session::{ChangeKind, SessionChanges};

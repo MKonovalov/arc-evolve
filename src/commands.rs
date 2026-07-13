@@ -697,9 +697,9 @@ pub fn custom_command_names() -> Vec<String> {
 mod tests {
     use super::*;
     use crate::commands_config::format_config_output;
+    use arcagent::ThinkingLevel;
     use std::collections::HashMap;
     use std::path::PathBuf;
-    use arcagent::ThinkingLevel;
 
     // ── /config show tests ────────────────────────────────────────────
     // Runtime config introspection — see `format_config_output` and

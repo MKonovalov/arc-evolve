@@ -16,10 +16,10 @@ use crate::prompt::run_prompt_auto_retry;
 use crate::prompt_budget::session_budget_exhausted;
 use crate::session::SessionChanges;
 use crate::sync_util::{rw_read_or_recover, rw_write_or_recover};
-use std::io::{self, IsTerminal, Write};
-use std::sync::RwLock;
 use arcagent::agent::Agent;
 use arcagent::*;
+use std::io::{self, IsTerminal, Write};
+use std::sync::RwLock;
 
 // Global state for `/watch` — auto-run a test command after agent edits.
 

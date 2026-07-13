@@ -4,10 +4,10 @@ use crate::commands::auto_compact_if_needed;
 use crate::format::*;
 use crate::prompt::run_prompt;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
 use arcagent::agent::Agent;
 use arcagent::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
 // Plan mode — a session toggle that restricts the agent to read-only operations.

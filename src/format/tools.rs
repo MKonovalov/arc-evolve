@@ -1,10 +1,10 @@
 //! Spinner, ToolProgressTimer, ThinkBlockFilter.
 
 use super::*;
+use arcagent::types::{Content, ToolResult};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use arcagent::types::{Content, ToolResult};
 
 pub const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 

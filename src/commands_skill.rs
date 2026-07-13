@@ -308,7 +308,9 @@ fn handle_skill_search(query: Option<&str>) {
     if results.is_empty() {
         let q = query.unwrap_or("(all)");
         eprintln!("{YELLOW}  no skills found for: {q}{RESET}");
-        eprintln!("{DIM}  try a different query, or browse: https://github.com/topics/arc-skill{RESET}\n");
+        eprintln!(
+            "{DIM}  try a different query, or browse: https://github.com/topics/arc-skill{RESET}\n"
+        );
         return;
     }
 

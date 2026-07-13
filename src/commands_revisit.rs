@@ -64,8 +64,7 @@ pub fn load_revisit_list() -> Vec<RevisitCandidate> {
 fn save_revisit_list(candidates: &[RevisitCandidate]) -> Result<(), String> {
     let path = Path::new(REVISIT_FILE);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
     }
     let json = serde_json::to_string_pretty(candidates)
         .map_err(|e| format!("Failed to serialize revisit list: {e}"))?;

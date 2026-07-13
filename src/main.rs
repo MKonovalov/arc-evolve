@@ -120,11 +120,11 @@ use watch::{get_watch_command, run_watch_after_prompt};
 use agent_builder::try_fallback_prompt;
 pub(crate) use agent_builder::{connect_external_servers, AgentConfig, FallbackRetry};
 
+use arcagent::agent::Agent;
+use arcagent::*;
 use std::io::{self, IsTerminal, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use arcagent::agent::Agent;
-use arcagent::*;
 
 /// Global flag: set to `true` when checkpoint mode's `on_before_turn` fires.
 /// Checked at the end of `main()` to exit with code 2.

@@ -5,8 +5,8 @@
 //! diagnosis. They have no dependency on the prompt execution machinery itself.
 
 use crate::format::safe_truncate;
-use std::time::Duration;
 use arcagent::StopReason;
+use std::time::Duration;
 
 /// How the prompt event loop should handle a terminal `stop_reason` at
 /// AgentEnd (Day 127, #568).

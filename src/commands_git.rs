@@ -8,10 +8,10 @@ use crate::prompt::run_prompt;
 use crate::session::TurnHistory;
 use crate::symbols::{self, SymbolKind};
 
-use std::collections::HashMap;
-use std::io::{self, Write};
 use arcagent::agent::Agent;
 use arcagent::*;
+use std::collections::HashMap;
+use std::io::{self, Write};
 
 // PR subcommand handling lives in commands_git_pr.rs; re-exported here so
 // all call sites (dispatch.rs, commands.rs, help completions) are unchanged.
