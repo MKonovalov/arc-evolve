@@ -35,6 +35,12 @@
 //!   /pr [number]    List open PRs, view/diff/comment/checkout a PR, or create one
 //!   /retry          Re-send the last user input
 
+// arcgent 0.12 deprecated Agent::new / with_model / with_model_config (removed in
+// 1.0). arc-evolve still targets that construction API; allow the deprecation
+// warnings crate-wide so `clippy -D warnings` passes. TODO: migrate to
+// Agent::from_config / from_provider and remove this allow.
+#![allow(deprecated)]
+
 mod agent_builder;
 mod banner;
 mod cli;
