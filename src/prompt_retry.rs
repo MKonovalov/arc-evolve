@@ -535,6 +535,29 @@ pub fn diagnose_api_error(error: &str, model: &str) -> Option<String> {
         );
     }
 
+    // Server errors / overload — transient, auto-retried, but give context
+    if lower.contains("500")
+        || lower.contains("502")
+        || lower.contains("503")
+        || lower.contains("529")
+        || lower.contains("overloaded")
+        || lower.contains("overload")
+        || lower.contains("internal server error")
+        || lower.contains("server error")
+        || lower.contains("bad gateway")
+        || lower.contains("service unavailable")
+    {
+        return Some(format!(
+            "API server error from provider '{provider}'.\n\
+             This is a transient server-side issue — arc will auto-retry \
+             with exponential backoff (up to {MAX_RETRIES} attempts).\n\
+             If it persists:\n\
+             \x20   • Check {provider}'s status page for outages\n\
+             \x20   • Try a different model: /model <name>\n\
+             \x20   • Switch provider: /provider <name>"
+        ));
+    }
+
     None
 }
 
@@ -1602,6 +1625,51 @@ mod tests {
         assert!(diag.is_some());
         let msg = diag.unwrap();
         assert!(msg.contains("Access forbidden"));
+    }
+
+    // ---------------------------------------------------------------
+    // diagnose_api_error tests — server error / overload branch
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_diagnose_server_error_503() {
+        let diag = diagnose_api_error("503 Service Unavailable", "claude-sonnet-4-20250514");
+        assert!(diag.is_some());
+        let msg = diag.unwrap();
+        assert!(msg.contains("server error"), "should mention server error");
+        assert!(msg.contains("transient"), "should say transient");
+        assert!(msg.contains("auto-retry"), "should mention auto-retry");
+    }
+
+    #[test]
+    fn test_diagnose_server_error_500() {
+        let diag = diagnose_api_error("500 Internal Server Error", "gpt-4o");
+        assert!(diag.is_some());
+        let msg = diag.unwrap();
+        assert!(msg.contains("server error"));
+    }
+
+    #[test]
+    fn test_diagnose_server_overloaded() {
+        let diag = diagnose_api_error("the server is overloaded", "claude-sonnet-4-20250514");
+        assert!(diag.is_some());
+        let msg = diag.unwrap();
+        assert!(msg.contains("server error") || msg.contains("overloaded"));
+        assert!(msg.contains("auto-retry"));
+    }
+
+    #[test]
+    fn test_diagnose_server_error_529() {
+        let diag = diagnose_api_error("529 Overloaded", "claude-sonnet-4-20250514");
+        assert!(diag.is_some());
+        let msg = diag.unwrap();
+        assert!(msg.contains("auto-retry"));
+    }
+
+    #[test]
+    fn test_diagnose_server_error_502() {
+        let diag = diagnose_api_error("502 Bad Gateway", "claude-sonnet-4-20250514");
+        assert!(diag.is_some());
     }
 
     // ---------------------------------------------------------------
