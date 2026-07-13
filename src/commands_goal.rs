@@ -38,8 +38,7 @@ pub fn load_goal() -> Option<String> {
 fn save_goal(goal: &str) -> Result<(), String> {
     let path = Path::new(GOAL_FILE);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
     }
     fs::write(path, format!("{goal}\n")).map_err(|e| format!("Failed to write goal file: {e}"))?;
     Ok(())
@@ -60,8 +59,7 @@ fn clear_goal() -> Result<(), String> {
 fn save_verify_command(cmd: &str) -> Result<(), String> {
     let path = Path::new(VERIFY_FILE);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create .arc/ directory: {e}"))?;
     }
     fs::write(path, format!("{cmd}\n")).map_err(|e| format!("Failed to write verify file: {e}"))?;
     Ok(())

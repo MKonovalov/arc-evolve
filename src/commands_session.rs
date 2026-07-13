@@ -6,11 +6,11 @@ use crate::prompt_utils::{
     format_context_summary, search_messages, summarize_context_topics, summarize_message,
 };
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 use arcagent::agent::Agent;
 use arcagent::context::{compact_messages, total_tokens, ContextConfig};
 use arcagent::types::{AgentMessage, Content, Message};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::cli::{
     AUTO_COMPACT_THRESHOLD, AUTO_SAVE_SESSION_PATH, DEFAULT_SESSION_PATH,

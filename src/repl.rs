@@ -25,6 +25,7 @@ pub struct ReplConfig {
     pub mcp_server_configs: Vec<McpServerConfig>,
 }
 
+use arcagent::*;
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
@@ -32,9 +33,9 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::Editor;
-use arcagent::*;
 
 /// Rustyline helper that provides tab-completion for `/` slash commands.
+#[allow(non_camel_case_types)]
 pub struct arcHelper;
 
 impl Completer for arcHelper {

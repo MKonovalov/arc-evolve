@@ -35,6 +35,12 @@
 //!   /pr [number]    List open PRs, view/diff/comment/checkout a PR, or create one
 //!   /retry          Re-send the last user input
 
+// arcgent 0.12 deprecated Agent::new / with_model / with_model_config (removed in
+// 1.0). arc-evolve still targets that construction API; allow the deprecation
+// warnings crate-wide so `clippy -D warnings` passes. TODO: migrate to
+// Agent::from_config / from_provider and remove this allow.
+#![allow(deprecated)]
+
 mod agent_builder;
 mod banner;
 mod cli;
@@ -120,11 +126,11 @@ use watch::{get_watch_command, run_watch_after_prompt};
 use agent_builder::try_fallback_prompt;
 pub(crate) use agent_builder::{connect_external_servers, AgentConfig, FallbackRetry};
 
+use arcagent::agent::Agent;
+use arcagent::*;
 use std::io::{self, IsTerminal, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use arcagent::agent::Agent;
-use arcagent::*;
 
 /// Global flag: set to `true` when checkpoint mode's `on_before_turn` fires.
 /// Checked at the end of `main()` to exit with code 2.

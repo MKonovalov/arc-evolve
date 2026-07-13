@@ -2,10 +2,10 @@
 
 use crate::dispatch_sub::{flag_value, require_flag_value, FlagValueCheck};
 use crate::format::*;
-use std::collections::HashMap;
-use std::io::IsTerminal;
 use arcagent::skills::SkillSet;
 use arcagent::ThinkingLevel;
+use std::collections::HashMap;
+use std::io::IsTerminal;
 
 // Constants, Config struct, enums — extracted to cli_config.rs for readability.
 pub use crate::cli_config::*;
@@ -1322,11 +1322,7 @@ mod tests {
 
     #[test]
     fn test_output_flag_parsing() {
-        let args = [
-            "arc".to_string(),
-            "-o".to_string(),
-            "output.md".to_string(),
-        ];
+        let args = ["arc".to_string(), "-o".to_string(), "output.md".to_string()];
         let output = args
             .iter()
             .position(|a| a == "--output" || a == "-o")
@@ -1584,11 +1580,7 @@ mod tests {
             &flags_needing_values,
         );
         warn_unknown_flags(
-            &[
-                "arc".to_string(),
-                "--model".to_string(),
-                "test".to_string(),
-            ],
+            &["arc".to_string(), "--model".to_string(), "test".to_string()],
             &flags_needing_values,
         );
         warn_unknown_flags(&["arc".to_string()], &flags_needing_values);

@@ -177,8 +177,8 @@ impl AgentTool for StreamingBashTool {
         params: serde_json::Value,
         ctx: arcagent::types::ToolContext,
     ) -> Result<arcagent::types::ToolResult, arcagent::types::ToolError> {
-        use tokio::io::AsyncBufReadExt;
         use arcagent::types::{Content, ToolError, ToolResult as TR};
+        use tokio::io::AsyncBufReadExt;
 
         let cancel = ctx.cancel.clone();
         let command = params["command"]
@@ -1166,7 +1166,9 @@ fn build_sub_agent_tool_at_depth(
 fn sub_agent_child_tool_names(config: &AgentConfig, depth: usize) -> Vec<String> {
     let restrictions = &config.dir_restrictions;
     let mut names: Vec<String> = vec![
-        arcagent::tools::bash::BashTool::default().name().to_string(),
+        arcagent::tools::bash::BashTool::default()
+            .name()
+            .to_string(),
         maybe_guard_arc(Arc::new(ReadFileTool::default()), restrictions)
             .name()
             .to_string(),
@@ -1193,9 +1195,9 @@ fn sub_agent_child_tool_names(config: &AgentConfig, depth: usize) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arcagent::ThinkingLevel;
     use serial_test::serial;
     use std::time::Duration;
-    use arcagent::ThinkingLevel;
 
     /// Helper to create a default AgentConfig for tests, varying only the provider.
     fn test_agent_config(provider: &str, model: &str) -> AgentConfig {

@@ -7,10 +7,10 @@ use crate::prompt::run_prompt_auto_retry;
 use crate::session::SessionChanges;
 use crate::sync_util::lock_or_recover;
 
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 use arcagent::agent::Agent;
 use arcagent::*;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// Result of running a shell command via `/run` or `!`.
 #[derive(Debug, Clone)]

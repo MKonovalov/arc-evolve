@@ -628,10 +628,7 @@ pub fn cli_help_text() -> String {
         s,
         "  arc_NO_UPDATE_CHECK  Set to 1 to skip startup update check"
     );
-    let _ = writeln!(
-        s,
-        "  arc_AUDIT            Set to 1 to enable audit logging"
-    );
+    let _ = writeln!(s, "  arc_AUDIT            Set to 1 to enable audit logging");
     let _ = writeln!(
         s,
         "  arc_SESSION_BUDGET_SECS  Soft wall-clock budget in seconds; retry loops bail"
