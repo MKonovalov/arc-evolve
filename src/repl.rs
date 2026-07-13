@@ -35,6 +35,7 @@ use rustyline::Editor;
 use arcagent::*;
 
 /// Rustyline helper that provides tab-completion for `/` slash commands.
+#[allow(non_camel_case_types)]
 pub struct arcHelper;
 
 impl Completer for arcHelper {

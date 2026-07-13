@@ -36,6 +36,7 @@ pub struct ProjectMemory {
 }
 
 /// The directory name for arc project data.
+#[allow(non_upper_case_globals)]
 const arc_DIR: &str = ".arc";
 
 /// The filename for the memory store within `.arc/`.
