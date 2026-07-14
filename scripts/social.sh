@@ -26,6 +26,12 @@ fi
 source "$(dirname "$0")/common.sh"
 
 MODEL="${MODEL:-claude-opus-4-6}"
+# When the model is OpenRouter-prefixed (openrouter/<name>), tell arc explicitly
+# which provider to use. Keeps Anthropic as the default for all other models.
+PROVIDER_FLAG=""
+if [[ "$MODEL" == openrouter/* ]]; then
+  PROVIDER_FLAG="--provider openrouter"
+fi
 TIMEOUT="${TIMEOUT:-600}"
 BOT_USERNAME="${BOT_USERNAME:-${BOT_LOGIN}}"
 DATE=$(date +%Y-%m-%d)
@@ -354,6 +360,7 @@ AGENT_LOG=$(mktemp)
 set +o errexit
 ${TIMEOUT_CMD:+$TIMEOUT_CMD "$TIMEOUT"} "$arc_BIN" \
     --model "$MODEL" \
+    $PROVIDER_FLAG \
     --skills ./skills \
     < "$PROMPT" 2>&1 | tee "$AGENT_LOG"
 AGENT_EXIT=${PIPESTATUS[0]}
