@@ -23,7 +23,8 @@ set -euo pipefail
 # Auto-detect REPO, BOT_LOGIN, BIRTH_DATE (fork-friendly)
 source "$(dirname "$0")/common.sh"
 
-MODEL="${MODEL:-claude-opus-4-6}"
+MODEL="${MODEL:-openrouter/tencent/hy3:free}"
+PROVIDER="${PROVIDER:-openrouter}"
 TIMEOUT="${TIMEOUT:-1200}"
 FALLBACK_PROVIDER="${FALLBACK_PROVIDER:-}"
 DATE=$(date +%Y-%m-%d)
@@ -268,7 +269,11 @@ refresh_gh_token() {
 arc_SKILL_FLAGS=(--skills ./skills)
 
 setup_external_skills() {
-    local specs="${arc_EXTERNAL_SKILLS:-arc-operator-skill|https://github.com/MKonovalov/arc-operator-skill.git|main}"
+    # Default: no external skill. The hardcoded prior default pointed at
+    # github.com/MKonovalov/arc-operator-skill which does not exist, so every
+    # session emitted a misleading "could not fetch external skill" warning.
+    # Set arc_EXTERNAL_SKILLS=name|url|ref to enable a real one.
+    local specs="${arc_EXTERNAL_SKILLS:-}"
     local base_dir="${arc_EXTERNAL_SKILLS_DIR:-.arc/external-skills}"
 
     if [ "${arc_EXTERNAL_SKILLS_DISABLED:-}" = "1" ]; then
@@ -349,6 +354,7 @@ run_agent_with_fallback() {
     # shellcheck disable=SC2086
     if [ -n "$stage_path" ]; then
         ${TIMEOUT_CMD:+$TIMEOUT_CMD "$timeout_val"} "$arc_BIN" \
+            --provider "$PROVIDER" \
             --model "$MODEL" \
             "${arc_SKILL_FLAGS[@]}" \
             $fallback_flag \
@@ -356,6 +362,7 @@ run_agent_with_fallback() {
             < "$prompt_file" 2>&1 | tee "$log_file" "$stage_path" || exit_code=$?
     else
         ${TIMEOUT_CMD:+$TIMEOUT_CMD "$timeout_val"} "$arc_BIN" \
+            --provider "$PROVIDER" \
             --model "$MODEL" \
             "${arc_SKILL_FLAGS[@]}" \
             $fallback_flag \

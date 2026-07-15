@@ -47,6 +47,37 @@ _gasp_scrub() {
     printf '%s' "$text"
 }
 
+# Mint a short-lived GitHub App installation token (same mechanism as
+# evolve.sh's refresh_gh_token). Used to authenticate the GASP state-repo clone
+# when GH_PAT is unset/stale. Requires APP_ID, APP_PRIVATE_KEY, APP_INSTALLATION_ID.
+# Prints the token on stdout; on failure prints nothing and returns 1.
+_gasp_mint_app_token() {
+    [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ] && [ -n "${APP_INSTALLATION_ID:-}" ] || return 1
+    local pem token http_code body
+    pem="${APP_PRIVATE_KEY//\\n/$'\n'}"
+    local now iat exp
+    now=$(date +%s)
+    iat=$((now - 60)); exp=$((now + 600))
+    b64url() { openssl base64 | tr -d '=' | tr '/+' '_-' | tr -d '\n'; }
+    local header payload pem_file signature jwt
+    header=$(echo -n '{"typ":"JWT","alg":"RS256"}' | b64url)
+    payload=$(echo -n "{\"iat\":${iat},\"exp\":${exp},\"iss\":\"${APP_ID}\"}" | b64url)
+    pem_file=$(mktemp); trap "rm -f '$pem_file'" EXIT
+    printf '%s\n' "$pem" > "$pem_file"
+    signature=$(echo -n "${header}.${payload}" | openssl dgst -sha256 -sign "$pem_file" | b64url)
+    jwt="${header}.${payload}.${signature}"
+    local response
+    response=$(curl --silent --show-error --write-out "\n%{http_code}" --request POST \
+        --url "https://api.github.com/app/installations/${APP_INSTALLATION_ID}/access_tokens" \
+        --header "Accept: application/vnd.github+json" \
+        --header "Authorization: Bearer ${jwt}" \
+        --header "X-GitHub-Api-Version: 2022-11-28")
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+    [ "$http_code" = "201" ] || { echo "  [gasp] App token mint failed: HTTP $http_code — $body" >&2; return 1; }
+    echo "$body" | python3 -c "import sys,json; print(json.load(sys.stdin)['token'])"
+}
+
 # Consecutive-failure escalation (mirrors evolve.sh's audit_push_failures).
 _gasp_note_failure() {
     local n
@@ -96,16 +127,27 @@ gasp_session_start() {
         return 0
     fi
 
-    # 2. clone the state repo (authenticated when GH_PAT is available).
+    # 2. clone the state repo (authenticated when a token is available).
     # GASP_STATE_REPO may be owner/name (default), a full URL, or a local path.
-    local clean_url
+    # Rely on the arcpedia-bot GitHub App installation token (arc-gasp is in its
+    # repo list) — minted by _gasp_mint_app_token. Fall back to GH_PAT only if
+    # the App creds are absent. Without a token the clone falls back to the
+    # anonymous https://github.com/... URL and fails with 403 (no write access).
+    # See gh run 29384984924.
+    local clean_url auth_token=""
     case "$GASP_STATE_REPO" in
         *://*|/*)
             GASP_PUSH_URL="$GASP_STATE_REPO"; clean_url="$GASP_STATE_REPO" ;;
         *)
             clean_url="https://${GASP_STATE_REPO}.git"
             GASP_PUSH_URL="$clean_url"
-            [ -n "${GH_PAT:-}" ] && GASP_PUSH_URL="https://x-access-token:${GH_PAT}@${GASP_STATE_REPO}.git" ;;
+            if [ -n "${APP_ID:-}" ] && [ -n "${APP_PRIVATE_KEY:-}" ] && [ -n "${APP_INSTALLATION_ID:-}" ]; then
+                auth_token=$(_gasp_mint_app_token) || auth_token=""
+                [ -n "$auth_token" ] && GASP_PUSH_URL="https://x-access-token:${auth_token}@${GASP_STATE_REPO}.git"
+            fi
+            if [ -z "$auth_token" ] && [ -n "${GH_PAT:-}" ]; then
+                GASP_PUSH_URL="https://x-access-token:${GH_PAT}@${GASP_STATE_REPO}.git"
+            fi ;;
     esac
     rm -rf "$GASP_STATE_DIR" 2>/dev/null || true
     if ! out=$(git clone --quiet "$GASP_PUSH_URL" "$GASP_STATE_DIR" 2>&1); then
