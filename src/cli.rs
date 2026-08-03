@@ -13,7 +13,8 @@ pub use crate::cli_config::*;
 /// Known provider names for the --provider flag.
 // Re-exported from providers module so existing `use crate::cli::` imports keep working.
 pub use crate::providers::{
-    default_model_for_provider, known_models_for_provider, provider_api_key_env, KNOWN_PROVIDERS,
+    default_model_for_provider, known_models_for_provider, provider_api_key_env,
+    provider_config_api_key, KNOWN_PROVIDERS,
 };
 
 // Re-exported from config module so existing `use crate::cli::` imports keep working.
@@ -472,35 +473,49 @@ fn parse_model_config(
             let from_provider_env = provider_env_var
                 .and_then(|var| std::env::var(var).ok())
                 .filter(|k| !k.is_empty());
+            // Provider-specific .arc.toml key (e.g. nous_api_key,
+            // opencode_api_key) — lets users keep multiple provider keys in one
+            // config file without clobbering each other.
+            let from_config_key = provider_config_api_key(&provider)
+                .and_then(|cfg_key| file_config.get(cfg_key))
+                .filter(|k| !k.is_empty())
+                .cloned();
             match from_provider_env {
                 Some(key) => key,
-                None => {
-                    // Fallback chain: ANTHROPIC_API_KEY > API_KEY > config file
-                    match std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY")) {
-                        Ok(key) if !key.is_empty() => key,
-                        _ => match file_config.get("api_key").cloned() {
-                            Some(key) if !key.is_empty() => key,
-                            _ => {
-                                // For local/ollama providers, API key is optional
-                                if provider == "ollama" || provider == "custom" {
-                                    "not-needed".to_string()
-                                } else if std::io::stdin().is_terminal() && prompt_arg.is_none() {
-                                    // Interactive REPL with no API key: needs_setup() will
-                                    // be checked in main() and the wizard run there
-                                    String::new()
-                                } else {
-                                    // Piped/single-shot mode: terse error for scripts
-                                    let env_hint = provider_env_var.unwrap_or("ANTHROPIC_API_KEY");
-                                    eprintln!("{RED}error:{RESET} No API key found.");
-                                    eprintln!(
-                                        "Set {env_hint} env var, use --api-key <key>, or add api_key to .arc.toml."
-                                    );
-                                    std::process::exit(1);
+                None => match from_config_key {
+                    Some(key) => key,
+                    None => {
+                        // Fallback chain: ANTHROPIC_API_KEY > API_KEY > config file
+                        match std::env::var("ANTHROPIC_API_KEY")
+                            .or_else(|_| std::env::var("API_KEY"))
+                        {
+                            Ok(key) if !key.is_empty() => key,
+                            _ => match file_config.get("api_key").cloned() {
+                                Some(key) if !key.is_empty() => key,
+                                _ => {
+                                    // For local/ollama providers, API key is optional
+                                    if provider == "ollama" || provider == "custom" {
+                                        "not-needed".to_string()
+                                    } else if std::io::stdin().is_terminal() && prompt_arg.is_none()
+                                    {
+                                        // Interactive REPL with no API key: needs_setup() will
+                                        // be checked in main() and the wizard run there
+                                        String::new()
+                                    } else {
+                                        // Piped/single-shot mode: terse error for scripts
+                                        let env_hint =
+                                            provider_env_var.unwrap_or("ANTHROPIC_API_KEY");
+                                        eprintln!("{RED}error:{RESET} No API key found.");
+                                        eprintln!(
+                                            "Set {env_hint} env var, use --api-key <key>, or add api_key to .arc.toml."
+                                        );
+                                        std::process::exit(1);
+                                    }
                                 }
-                            }
-                        },
+                            },
+                        }
                     }
-                }
+                },
             }
         }
     };
