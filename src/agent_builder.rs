@@ -450,6 +450,44 @@ pub fn create_model_config(provider: &str, model: &str, base_url: Option<&str>) 
             config.compat = Some(OpenAiCompat::openai());
             config
         }
+        "nousresearch" => {
+            // Nous Research inference API — OpenAI-compatible chat completions at
+            // https://inference-api.nousresearch.com/v1. Model names use the
+            // publisher/model namespace (e.g. "deepseek/deepseek-v4-flash").
+            // Auth via NOUS_API_KEY bearer token. Verified endpoint/base URL
+            // from portal.nousresearch.com/api-docs.
+            let mut config = ModelConfig::openai(model, model);
+            config.provider = "nousresearch".into();
+            config.base_url = base_url
+                .unwrap_or("https://inference-api.nousresearch.com/v1")
+                .to_string();
+            config.compat = Some(OpenAiCompat::openai());
+            config
+        }
+        "opencode-zen" => {
+            // OpenCode Zen — curated, pay-as-you-go OpenAI-compatible inference
+            // at https://opencode.ai/zen/v1/chat/completions. Auth via
+            // OPENCODE_API_KEY bearer token. Model IDs are slash-less
+            // (e.g. "deepseek-v4-flash", "glm-5.2", "claude-sonnet-4-6").
+            let mut config = ModelConfig::openai(model, model);
+            config.provider = "opencode-zen".into();
+            config.base_url = base_url.unwrap_or("https://opencode.ai/zen/v1").to_string();
+            config.compat = Some(OpenAiCompat::openai());
+            config
+        }
+        "opencode-go" => {
+            // OpenCode Go — low-cost OpenAI-compatible inference for open coding
+            // models at https://opencode.ai/zen/go/v1/chat/completions. Same
+            // OPENCODE_API_KEY auth as Zen. Model IDs like "hy3",
+            // "deepseek-v4-flash", "kimi-k2.7-code".
+            let mut config = ModelConfig::openai(model, model);
+            config.provider = "opencode-go".into();
+            config.base_url = base_url
+                .unwrap_or("https://opencode.ai/zen/go/v1")
+                .to_string();
+            config.compat = Some(OpenAiCompat::openai());
+            config
+        }
         "custom" => {
             let url = base_url.unwrap_or("http://localhost:8080/v1");
             ModelConfig::local(url, model)

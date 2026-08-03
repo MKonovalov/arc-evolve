@@ -16,6 +16,9 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "minimax",
     "bedrock",
     "github",
+    "nousresearch",
+    "opencode-zen",
+    "opencode-go",
     "custom",
 ];
 
@@ -35,6 +38,38 @@ pub fn provider_api_key_env(provider: &str) -> Option<&'static str> {
         "bedrock" => Some("AWS_ACCESS_KEY_ID"),
         "anthropic" => Some("ANTHROPIC_API_KEY"),
         "github" => Some("GITHUB_TOKEN"),
+        "nousresearch" => Some("NOUS_API_KEY"),
+        "opencode-zen" => Some("OPENCODE_API_KEY"),
+        "opencode-go" => Some("OPENCODE_API_KEY"),
+        _ => None,
+    }
+}
+
+/// Get the `.arc.toml` config key that holds the API key for a provider.
+///
+/// This lets users store multiple provider keys in a single `.arc.toml`
+/// without clobbering each other (e.g. `nous_api_key`, `opencode_api_key`).
+/// `parse_model_config` checks this key before falling back to the shared
+/// `api_key` field. `None` is returned for keyless providers (ollama, custom)
+/// and any provider without a dedicated config key (it then relies on the
+/// shared `api_key` or the provider env var).
+pub fn provider_config_api_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "anthropic" => Some("anthropic_api_key"),
+        "openai" => Some("openai_api_key"),
+        "google" => Some("google_api_key"),
+        "groq" => Some("groq_api_key"),
+        "xai" => Some("xai_api_key"),
+        "deepseek" => Some("deepseek_api_key"),
+        "openrouter" => Some("openrouter_api_key"),
+        "mistral" => Some("mistral_api_key"),
+        "cerebras" => Some("cerebras_api_key"),
+        "zai" => Some("zai_api_key"),
+        "minimax" => Some("minimax_api_key"),
+        "github" => Some("github_token"),
+        "nousresearch" => Some("nous_api_key"),
+        "opencode-zen" => Some("opencode_api_key"),
+        "opencode-go" => Some("opencode_api_key"),
         _ => None,
     }
 }
@@ -125,6 +160,37 @@ pub fn known_models_for_provider(provider: &str) -> &'static [&'static str] {
             "deepseek/deepseek-v4-pro",
             "anthropic/claude-sonnet-4-6",
         ],
+        "nousresearch" => &[
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v4-pro",
+            "qwen/qwen3-coder",
+            "stepfun/step-3.7-flash",
+            "meta/llama-4-scout",
+            "moonshot/kimi-k2",
+        ],
+        "opencode-zen" => &[
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "glm-5.2",
+            "glm-5.1",
+            "kimi-k2.7-code",
+            "kimi-k3",
+            "minimax-m3",
+            "claude-sonnet-4-6",
+            "gpt-5",
+            "gemini-3-flash",
+        ],
+        "opencode-go" => &[
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "hy3",
+            "kimi-k2.7-code",
+            "kimi-k2.6",
+            "glm-5.2",
+            "glm-5.1",
+            "mimo-v2.5",
+            "qwen3.7-plus",
+        ],
         _ => &[],
     }
 }
@@ -145,6 +211,9 @@ pub fn default_model_for_provider(provider: &str) -> String {
         "minimax" => "MiniMax-M2.7".into(),
         "bedrock" => "anthropic.claude-sonnet-4-6".into(),
         "github" => "openai/gpt-4o".into(),
+        "nousresearch" => "deepseek/deepseek-v4-flash".into(),
+        "opencode-zen" => "deepseek-v4-flash".into(),
+        "opencode-go" => "deepseek-v4-flash".into(),
         _ => "claude-opus-4-6".into(),
     }
 }
@@ -384,5 +453,138 @@ mod tests {
         assert!(!models.is_empty(), "github should have known models");
         assert!(models.contains(&"openai/gpt-4o"));
         assert!(models.contains(&"anthropic/claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_nousresearch_in_known_providers() {
+        assert!(
+            KNOWN_PROVIDERS.contains(&"nousresearch"),
+            "nousresearch should be in KNOWN_PROVIDERS"
+        );
+    }
+
+    #[test]
+    fn test_nousresearch_provider_api_key_env() {
+        assert_eq!(provider_api_key_env("nousresearch"), Some("NOUS_API_KEY"));
+    }
+
+    #[test]
+    fn test_nousresearch_default_model() {
+        assert_eq!(
+            default_model_for_provider("nousresearch"),
+            "deepseek/deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn test_nousresearch_known_models() {
+        let models = known_models_for_provider("nousresearch");
+        assert!(!models.is_empty(), "nousresearch should have known models");
+        assert!(models.contains(&"deepseek/deepseek-v4-flash"));
+        assert!(models.contains(&"qwen/qwen3-coder"));
+    }
+
+    #[test]
+    fn test_opencode_zen_in_known_providers() {
+        assert!(
+            KNOWN_PROVIDERS.contains(&"opencode-zen"),
+            "opencode-zen should be in KNOWN_PROVIDERS"
+        );
+    }
+
+    #[test]
+    fn test_opencode_go_in_known_providers() {
+        assert!(
+            KNOWN_PROVIDERS.contains(&"opencode-go"),
+            "opencode-go should be in KNOWN_PROVIDERS"
+        );
+    }
+
+    #[test]
+    fn test_opencode_zen_provider_api_key_env() {
+        assert_eq!(
+            provider_api_key_env("opencode-zen"),
+            Some("OPENCODE_API_KEY")
+        );
+    }
+
+    #[test]
+    fn test_opencode_go_provider_api_key_env() {
+        assert_eq!(
+            provider_api_key_env("opencode-go"),
+            Some("OPENCODE_API_KEY")
+        );
+    }
+
+    #[test]
+    fn test_opencode_zen_default_model() {
+        assert_eq!(
+            default_model_for_provider("opencode-zen"),
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn test_opencode_go_default_model() {
+        assert_eq!(
+            default_model_for_provider("opencode-go"),
+            "deepseek-v4-flash"
+        );
+    }
+
+    #[test]
+    fn test_opencode_zen_known_models() {
+        let models = known_models_for_provider("opencode-zen");
+        assert!(!models.is_empty(), "opencode-zen should have known models");
+        assert!(models.contains(&"deepseek-v4-pro"));
+        assert!(models.contains(&"claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn test_opencode_go_known_models() {
+        let models = known_models_for_provider("opencode-go");
+        assert!(!models.is_empty(), "opencode-go should have known models");
+        assert!(models.contains(&"hy3"));
+        assert!(models.contains(&"deepseek-v4-flash"));
+    }
+
+    #[test]
+    fn test_provider_config_api_key_nous() {
+        assert_eq!(
+            provider_config_api_key("nousresearch"),
+            Some("nous_api_key")
+        );
+    }
+
+    #[test]
+    fn test_provider_config_api_key_opencode() {
+        assert_eq!(
+            provider_config_api_key("opencode-zen"),
+            Some("opencode_api_key")
+        );
+        assert_eq!(
+            provider_config_api_key("opencode-go"),
+            Some("opencode_api_key")
+        );
+    }
+
+    #[test]
+    fn test_provider_config_api_key_anthropic() {
+        assert_eq!(
+            provider_config_api_key("anthropic"),
+            Some("anthropic_api_key")
+        );
+    }
+
+    #[test]
+    fn test_provider_config_api_key_ollama_none() {
+        // ollama/custom are keyless -> no dedicated config key
+        assert_eq!(provider_config_api_key("ollama"), None);
+        assert_eq!(provider_config_api_key("custom"), None);
+    }
+
+    #[test]
+    fn test_provider_config_api_key_unknown_none() {
+        assert_eq!(provider_config_api_key("nonexistent-provider"), None);
     }
 }
