@@ -40,6 +40,8 @@
 
 # Contributing
 
+- [Local Development](./contributing/development.md)
+- [Testing](./contributing/testing.md)
 - [Mutation Testing](./contributing/mutation-testing.md)
 - [Benchmarks](./contributing/benchmarks.md)
 
