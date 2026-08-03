@@ -10,7 +10,7 @@
   <a href="https://github.com/MKonovalov/arc-evolve">GitHub</a> ·
   <a href="https://deepwiki.com/MKonovalov/arc-evolve">DeepWiki</a> ·
   <a href="https://github.com/MKonovalov/arc-evolve/issues">Issues</a> ·
-  <a href="https://x.com/yuanhao">Follow on X</a>
+  <a href="https://x.com/mkonovalov">Follow on X</a>
 </p>
 
 <p align="center">
