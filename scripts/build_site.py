@@ -657,6 +657,11 @@ def build():
     (DOCS / "index.html").write_text(page)
     (DOCS / "style.css").write_text(CSS)
     (DOCS / ".nojekyll").touch()
+    # Custom domain: peaceiris publishes ./site to the gh-pages ROOT (no
+    # destination_dir), so this CNAME lands at gh-pages/CNAME — exactly where
+    # GitHub Pages requires it to register arc-evolve.arclumen.de. Kept in-repo
+    # so it survives every deploy (keep_files: true).
+    (DOCS / "CNAME").write_text("arc-evolve.arclumen.de\n")
 
     print(f"Site built: site/index.html (Day {day_count})")
 
