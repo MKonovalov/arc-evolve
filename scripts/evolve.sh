@@ -2166,8 +2166,12 @@ PYEOF
             # commit (each session writes to its own day-N-<ts>/ subdir, so
             # rebase conflicts are essentially impossible — both touched only
             # disjoint paths). 2>/dev/null because failure is non-fatal here.
+            # Explicit refspec (audit-log:refs/heads/audit-log) creates the
+            # remote branch on first push if it does not yet exist — the short
+            # form alone can silently no-op when origin/audit-log has never been
+            # seeded, which is why the observability stream was dying unseen.
             git pull --rebase origin audit-log 2>/dev/null && \
-            git push origin audit-log 2>/dev/null
+            git push origin "audit-log:refs/heads/audit-log" 2>/dev/null
         ); then
             AUDIT_PUSH_OK=1
         fi
