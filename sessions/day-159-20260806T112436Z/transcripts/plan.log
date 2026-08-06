@@ -1,0 +1,593 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state. The trajectory shows all sessions with 0/1 tasks reverted — that's a serious signal. 10 consecutive sessions with reverts. Let me look at the issues file and recent journal entries to understand what's going on.
+
+Let me first read the key files: ISSUES_TODAY.md, journals/JOURNAL.md (last few entries), and check git log.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -15 && echo "---…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_plan/ 2>/dev/null; echo… ✓ (6ms)
+ ✓ (11ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+No ISSUES_TODAY.md file. Let me check the journal for recent entries to understand what's been happening, especially the reverts. The trajectory shows 10 sessions with 0/1 tasks reverted — this is a pattern. Let me look at the journal.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.2s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -120 journals/JOURNAL.md  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls .arc/ 2>/dev/null; echo "---"; … ✓ (4ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. The journal entries are all auto-generated with "Session commits: no commits made." — but git log shows commits being made (fix(evolve), fix(agent_builder), etc.). Wait, those commits in git log — let me check who made them. They might be from skill-evolve or the fix-loop commits... Actually looking at git log:
+
+- 723f6a2 skill-evolve: reset counter (cycle 2026-08-06T11:04Z)
+- 6a92a18 Day 159: bump skill-evolve counter (7)
+- 355b78f Day 159 (10:44): session wrap-up
+- 63dac27 fix(evolve): harness's own cargo dirties protected Cargo.lock, killing real commits (#14)
+- f2a2439 Day 159: bump skill-evolve counter (6)
+- 3a51933 Day 159 (10:19): session wrap-up
+- de9c49d fix(agent_builder): OpenCode rejects developer role (400) — use default compat (#13)
+
+So there ARE commits being made (fix commits #13, #14 with PR numbers?) but the "session wrap-up" entries say "no commits made". Hmm, wait — the journal says "Session commits: no commits made" but there ARE commits like "fix(evolve): harness's own cargo dirties protected Cargo.lock". These look like skill-evolve-related or agent commits that got through. Actually the trajectory says "tasks 0/1 — 1 task(s) reverted" for the last 10 sessions. So the fix-loop commits that landed (63dac27, de9c49d, a20e71a) — are those from sessions? They have issue-style numbers (#14, #13, #12). Hmm, those look like they might be from an external human or another process... Actually wait, the "fix(evolve)" commits might be from the impl agent's fix-loop that DID commit but then... no. Let me look more carefully.
+
+Actually, these "fix(...) (#14)" commits look like they reference PR/issue numbers. Let me check git log with more detail and see what these commits are.
+
+The trajectory says all sessions have 0/1 tasks reverted. That's a 10-session revert streak. But there are commits in the log with fix messages. Let me investigate what's happening. This is a critical pattern: 10 consecutive sessions with reverts. My lessons say: "Start at retreat size; read the reverted diff as the retry's map" and "Size the task to fit in one hand."
+
+Let me look at what's been happening. Let me check the session_staging directory, the audit log, and recent task files to understand what tasks keep failing.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 9.1s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -30 --all --date…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/session_staging/ 2>/de… ✓ (8ms)
+ ✓ (33ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the audit log more carefully to understand what's failing. The pattern is clear: sessions are being planned with 1 task each, and all tasks get reverted. But there ARE successful fix commits happening (fix(deps) #11, #12, fix(agent_builder) #13, fix(evolve) #14). Those appear to be coming from... hmm, those have both a raw commit (983fff5) and a "(#11)" version (3ca4b45). Looks like a human or the creator is committing fixes. Wait no — "3ca4b45 fix(deps): track renamed arcagent crate (was arcgent) on main — also pulls SSE fix (#11)" — maybe these are commits from a DIFFERENT branch merged in? Or the creator pushing fixes?
+
+Actually, let me look at the audit.jsonl properly to understand what the sessions are doing and why tasks are being reverted.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.7s (2 ✓)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (10 lines) ✓ (25ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The audit.jsonl format must be different. Let me look at raw lines.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -3 .arc/audit.jsonl | head -c… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The audit.jsonl here is being written by THIS session (the planning agent's bash tool calls). The real audit log with session outcomes must live elsewhere — the trajectory mentions audit-log branch with `sessions/day-N-<ts>/`. The trajectories section says sessions data comes from the audit-log branch. Let me check the git log for the actual task attempts. Let me look at what happened in the last few sessions — check the git reflog or the session wrap-up commits to see what tasks were reverted.
+
+Actually, the trajectory already tells me everything: 10 consecutive sessions with 1 task each, all reverted. The journal says "Session commits: no commits made." Yet there are fix commits — but those appear to be from skill-evolve or... wait, "fix(evolve): harness's own cargo dirties protected Cargo.lock" — this is authored by someone. Let me check who authored these.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --format="%h %an <%ae> %ad…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 355b78f --stat | head -20… ✓ (6ms)
+ ✓ (22ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I see it clearly. The pattern:
+- The creator (Mikhail Konovalov, mike.kon@gmail.com) is pushing fix commits: #12 (arcagent SSE fix), #13 (OpenCode developer role), #14 (harness cargo dirties Cargo.lock).
+- The evolve loop sessions keep producing 0/1 tasks reverted.
+- The journal says "Session commits: no commits made" — the bot is making no commits because all tasks get reverted.
+
+So the creator is actively fixing the harness (evolve.sh bugs: cargo dirtying Cargo.lock, OpenCode compat). The harness itself has had bugs that killed real commits (#14: "harness's own cargo dirties protected Cargo.lock, killing real commits"). This means the 10-session revert streak might be caused by harness bugs, not agent quality. The creator's fix #14 just landed (63dac27).
+
+So what should I plan? Given:
+1. No community issues today (ISSUES_TODAY.md doesn't exist / no issues).
+2. 10-session revert streak — tasks keep getting reverted. The most recent root causes were harness bugs that the creator just fixed.
+3. The dream milestone: accumulate first validation data (≥5 matched prediction-outcome pairs in risk_validations).
+
+Let me check what the last sessions actually tried to do. Let me look at the audit-log branch for session task files, or check git history for the reverted task content. The trajectory says 0/1 tasks reverted each session. Let me look at what tasks were planned recently — maybe there are session_plan remnants or the audit-log branch has transcripts.
+
+Actually, let me check the audit-log branch quickly.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.3s (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git branch -a | head; echo "---"; …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 63dac27 --stat | head -30 ✓ (9ms)
+ ✓ (13ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture:
+
+The creator has been fixing harness bugs that killed the evolve loop:
+1. arcagent SSE premature-close fix (#12)
+2. OpenCode developer role 400 (#13) — "the agent never executed any tool call and the evolve loop committed nothing"
+3. Harness's own cargo dirtying protected Cargo.lock (#14) — "That left an uncommitted... " (truncated)
+
+So the 10-session revert streak was caused by:
+- The agent couldn't complete tasks because OpenCode rejected the developer role (400 error before any tool call)
+- The harness's own cargo runs dirtied protected files, and the safety_commit/sweep machinery was killing commits
+
+These are now fixed by the creator (commits landed today). So the loop should work again now.
+
+What should the plan be? Given no community issues, the priorities are:
+1. Fix CI failures — none apparently
+2. Capability gaps
+3. Self-discovered bugs
+4. Self-driven work: at least 1 slot MUST be self-driven, preferring DREAM.md's next milestone
+5. Release check
+
+The dream milestone: "Accumulate the first validation data. What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs." This is an accumulation task — my lesson D129 says "For milestones blocked on accumulation, automate the feed; don't add more sensors."
+
+So the dream-advancing task could be: automate the risk-snapshot/validation feed so it accumulates without depending on the /commit handler. Wait — the CLAUDE.md says `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and (opt-in) on REPL exit under `arc_RISK_AUTOSNAPSHOT=1`. It does NOT fire in the evolve loop, which commits with raw `git commit`. Hmm, but the risk_snapshots.jsonl IS accumulating — the session wrap-up commits show it growing (day 159 entries at 03:00, 10:08, 10:36, 10:59). So snapshots are being recorded somehow. Wait, let me check — the wrap-up commit shows `{"day":159,"git_hash":"40ae0cc",...}` — so snapshots ARE firing in the evolve loop now (despite CLAUDE.md saying they don't). Actually those git_hashes are session wrap-up commits (40ae0cc = "Day 159: update day counter"? no, 40ae0cc is "Day 159: bump skill-evolve counter (3)"). Hmm, the git_hash points at commits that existed at snapshot time.
+
+Actually wait — let me re-read: `{"day":159,"git_hash":"40ae0cc","top_10":[...],"ts":"2026-08-06T03:00:00Z"}`. So snapshots ARE being recorded in the evolve loop (at 03:00, 10:08, 10:36, 10:59 today). The CLAUDE.md description may be out of date, or the harness calls `arc risk snapshot` now. Either way, the snapshot half IS accumulating.
+
+But the validation half (`risk_validations.jsonl`) — predictions matched against outcomes — needs `auto_validate_after_failure` to fire. The dream milestone is about getting ≥5 matched prediction-outcome pairs.
+
+Let me check what the current state of risk_validations.jsonl is and whether the validation loop is wired.
+
+Actually, hold on. Let me be careful about scope. The planner's job: write task files. Let me check a couple things:
+1. Does risk_validations.jsonl exist?
+2. What do recent task attempts look like (what were agents trying and failing)?
+
+Let me check the risk snapshots and validation files.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 11.5s (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/ && echo "---validatio…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git ls-tree --name-only audit-log … ✓ (9ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+So:
+- 37 risk snapshots accumulated (the snapshot half is firing — interesting, despite CLAUDE.md saying it only fires from `/commit`... the harness must call `arc risk snapshot` now, or the impl agents do)
+- risk_validations.jsonl does NOT exist yet — the validation half hasn't fired
+
+The dream milestone is to get ≥5 matched prediction-outcome pairs. The validation half (`auto_validate_after_failure`) fires after a task failure. But there's a gap: it needs to run after failures in a way that produces matched pairs. Since the last 10 sessions all had reverts (failures!), there should have been validation events... unless `auto_validate_after_failure` isn't wired into the evolve loop path or doesn't fire.
+
+Let me check the audit-log branch for the most recent session's outcome.json to see what the task was and why it reverted.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.2s (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git ls-tree -r audit-log sessions/… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show audit-log:sessions/day-15… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I see the picture. The last session's impl agent was given a fallback task ("make one small concrete improvement") and was flailing — it never found anything concrete, never committed, and the task got reverted. The 10-session revert streak is a mix of:
+1. Harness bugs (OpenCode 400, Cargo.lock dirtying) — now fixed by the creator today
+2. Fallback task that is too open-ended ("make one small improvement") — the planner-fallback task is "deliberately scoped to terminate" but the agent still flounders
+
+The task files are what matter. Let me look at what the plan looked like for that session — let me check the audit-log branch for the plan/task file. Actually the session directory only has audit.jsonl, outcome.json, transcripts. The task file was ephemeral (session_plan/ is gitignored).
+
+Key insight: the sessions keep giving impl agents tasks like "make one small concrete improvement" (fallback) and they fail to commit. The best thing I can do as planner is write SMALL, SPECIFIC, CONCRETE tasks with clear verification — so an impl agent can land them in 20 minutes.
+
+Now let me think about what tasks to write.
+
+Priorities:
+- No CI failures (build_ok: true, test_ok: true in outcomes)
+- No community issues today
+- Self-driven work is required: at least 1 slot. Dream milestone: accumulate validation data (≥5 matched prediction-outcome pairs). But wait — D129 lesson: "For milestones blocked on accumulation, automate the feed; don't add more sensors." And D134: "A clean-firing reflex biases task-selection toward its own shape" — I've done risk tasks repeatedly. Also D131: "Ship the inverse half at session-start selection."
+
+The dream milestone is accumulation-dependent. There are 37 snapshots but zero validations. Why? `auto_validate_after_failure` should fire after failures. The last 10 sessions all failed (reverts), so validation events should exist... but risk_validations.jsonl doesn't exist. Let me check whether `auto_validate_after_failure` is actually wired to fire anywhere in the evolve loop.
+
+Actually wait — the CLAUDE.md says: "auto_validate_after_failure" records outcomes. Let me grep where it's called. Let me check commands_risk_snapshots.rs.
+
+Actually, let me think about what's most valuable here. The trajectory shows a 10-session revert streak. The immediate context:
+1. Creator just fixed harness bugs (today).
+2. The loop's tasks keep getting reverted — often fallback tasks with no concrete change.
+
+My journal wisdom: "Start at retreat size; read the reverted diff as the retry's map" and "Size the task to fit in one hand" (D128). So the best plan is: write small, concrete, verifiable tasks.
+
+What are good candidate tasks? Let me consider:
+
+1. **Dream task (self-driven)**: The dream milestone is accumulating validation data. The validation half hasn't fired at all. Check why `auto_validate_after_failure` never writes. If it's wired but never fires in the evolve loop, that's the "automate the feed" work. But the harness's evolve loop uses raw `git commit` and reverts — does anything call auto_validate_after_failure on revert? If not, the validation feed never accumulates, and the dream milestone is blocked forever. That's a real, dream-advancing, concrete task: wire validation recording into the evolve loop's revert path OR make it CLI-callable (`arc risk validate` exists already? "Both meter halves are now CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`)").
+
+Hmm, but wait. CLAUDE.md says `arc risk snapshot` and `arc risk validate` are CLI-callable and recording. The harness calls `arc risk snapshot` at wrap-up (that's why snapshots accumulate). If the harness also called `arc risk validate` after a revert, validations would accumulate. But I can't modify evolve.sh (protected). I could modify the impl agents' skill (evolve skill) to tell them to run `arc risk validate` after a revert... but skills/evolve is core (immutable).
+
+Alternative: the risk accuracy reporting — `commands_risk_accuracy.rs` computes prediction accuracy from matched pairs. With zero pairs, it reports nothing. The dream milestone says "measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+Given that I can't touch evolve.sh, what CAN advance the dream? Options:
+- Make the validation feed self-sustaining: e.g., have `arc risk snapshot` (which the harness DOES call) also backfill validation by comparing the snapshot's top_10 predictions against subsequent snapshot diffs... that's convoluted.
+- Simpler: since snapshots ARE accumulating (37), the missing piece is outcomes. The snapshots already capture top_10 predictions per git_hash. Validation pairs could be derived: did a file in snapshot N's top_10 get modified+reverted in a later session? Hmm, too indirect.
+
+Actually, let me look at what `auto_validate_after_failure` does and where it's called. And check `risk_autosnapshot_enabled` / the autosnapshot env var. Maybe the real gap is: autosnapshot fires (evolve loop calls `arc risk snapshot`), but validation never fires because nothing in the loop calls `arc risk validate`. If I can find a hook that fires in the loop and would be a natural place to call validate... but wait, I can't modify evolve.sh. What about the wrap-up? The wrap-up is done by evolve.sh too.
+
+Hmm. Actually — what about `safety_commit`? That's in evolve.sh. Protected.
+
+OK here's another angle: the impl agent itself. When an impl agent finishes a task, the harness runs the evaluator. When a task fails and is reverted, that's harness-driven. But the impl agent's OWN process could record validation: if the agent ran `arc risk snapshot` at task start (predicting which files it will touch are risky) and `arc risk validate` after... no, that doesn't match the design (predictions are about fragility, failures are reverts).
+
+Let me step back. The dream milestone is about ACCUMULATION — it needs data from the loop firing naturally. The most dream-advancing CONCRETE task that fits "automate the feed, don't add more sensors": find where validation CAN fire in the loop and make it fire. Since evolve.sh is protected and skills/evolve is immutable... let me actually check what's in the code. Let me read commands_risk_snapshots.rs quickly to see auto_validate_after_failure's trigger conditions.
+
+2. **Product/UX task candidates** (self-discovered):
+- The uncommitted `tools/gasp-emit/Cargo.lock` change: the harness's cargo runs dirty this protected file. The creator fixed the harness (#14) but the local checkout still has this dirty file. Actually the fix landed; the dirty file is residue. Not a task for me.
+- From the transcript: clippy is clean, build green. No obvious product bugs.
+
+3. **The revert streak itself**: The most valuable thing I can do is make tasks that actually LAND. The fallback task ("make one small improvement") produces flailing. My plan should produce concrete tasks with: exact file, exact function, expected test, verification command. That's the "planner-fallback task" improvement — but the fallback task is written by evolve.sh (protected). Hmm, actually the fallback task text is in evolve.sh. I can't change it.
+
+So what tasks should I write? Let me think about what the impl agents can actually land.
+
+Task candidates:
+A. **Wire risk validation to fire in the loop** (dream, evolve-kind): find the gap where auto_validate_after_failure should fire but doesn't, and make it fire from a place that exists in the loop. Need to read the code first.
+
+B. **A small product improvement with tests**. Let me look at the transcript — the previous agent considered `version_is_newer`, extract_code_blocks, etc. all already tested. Let me find something genuinely small and concrete.
+
+Let me actually read some source to find concrete, small, testable improvements. The assessment says don't read source ("NO ASSESSMENT AVAILABLE" case only)... wait, re-read: "IMPORTANT: Do NOT read source code files. The assessment above already contains the source architecture... (Exception: if the assessment section says 'NO ASSESSMENT AVAILABLE', you must read source yourself.)"
+
+The assessment section says "NO ASSESSMENT AVAILABLE — The assessment agent did not produce output. Before writing tasks, quickly read: 1. All .rs files under src/ ... 2. journals/JOURNAL.md ... 3. git log --oneline -10". So I DO need to read source myself. I've already read the journal and git log. Let me do a quick scan of source for concrete improvement candidates.
+
+Let me check the risk validation wiring first (dream), then scan for a small product bug.
+────────────────────────────────────────────────────────────────────────────────
+
+The journal entries and git log reveal a critical pattern: the creator (Mikhail) has been fixing harness bugs today (#12 arcagent SSE fix, #13 OpenCode developer role 400, #14 harness cargo dirtying protected Cargo.lock) — these were killing the evolve loop's commits. Since no assessment is available, let me read source to understand the current state, focusing on the dream milestone (risk validation feed) and finding concrete small tasks.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_after_failu…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "risk_validations\|RISK_V… ✓ (13ms)
+ ✓ (15ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.8s (2 ✓)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:1..121 ✓ (1ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at `auto_validate_after_failure` and `write_validation_event` to understand the validation half.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn auto_validate_after_fa…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:220..350 ✓ (2ms)
+ ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+I see. `auto_validate_after_failure` exists but who calls it? Let me check call sites. The grep earlier showed no callers of `auto_validate_after_failure` in the CLI paths other than being re-exported. Let me check.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.3s (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_validate_after_fail…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "watch_failure\|auto_valid… ✓ (7ms)
+ ✓ (11ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `auto_validate_after_failure` fires ONLY from `watch.rs` (watch mode fix loops). The evolve loop doesn't use watch mode — the harness runs build/test and reverts. So:
+- The snapshot half accumulates (37 snapshots) because... wait, why? The CLAUDE.md says snapshots fire from `/commit` handler and opt-in REPL exit. The evolve loop doesn't use `/commit` (it uses raw `git commit`). Yet 37 snapshots exist. Let me check — the wrap-up commit showed the snapshot file growing. Let me check what wrote them — the harness may call `arc risk snapshot` at wrap-up. Let me check evolve.sh.
+
+Actually the dispatch_sub.rs:1050 comment mentions the validation meter staying starved. Let me read that.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.2s (2 ✓)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/dispatch_sub.rs:1000..1080  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk" scripts/evolve.sh |… ✓ (2ms)
+ ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+So the harness (`evolve.sh`) calls `arc risk snapshot` once per session (feeding the snapshot half). The comment at dispatch_sub.rs says "The harness will call `$arc_BIN risk validate` once per session" — "issue: wire risk validate into evolve.sh" — but that's a planned change (the harness doesn't call `arc risk validate` yet, per the comment "will call"). Since evolve.sh is protected (I can't modify it), the validation half stays starved unless:
+1. The watch-mode auto_validate fires (doesn't in the loop), or
+2. A human/harness calls `arc risk validate`.
+
+Wait — but the comment says "The harness will call `$arc_BIN risk validate` once per session so the prediction meter's *validation* half accumulates". Let me check if evolve.sh actually calls risk validate now. The grep only showed "risk snapshot" at line 2056. So the validate call is NOT in evolve.sh yet.
+
+Hmm, but the comment at dispatch_sub.rs:1042-1046 explicitly anticipates it: "issue: 'wire risk validate into evolve.sh'". So there's a known gap: the harness needs `arc risk validate` wired in, but evolve.sh is protected — only the creator can change it. 
+
+Wait, actually — can I file an agent-help-wanted issue for that? The instructions say: "If you hit a blocker that requires human action (missing credentials, external service access, permissions, design decisions you can't make alone), create an agent-help-wanted issue". The evolve.sh change is protected-file territory that only the creator does (he's been pushing fixes #12, #13, #14 today). But actually — let me check: is `arc risk validate` supposed to take a diff argument? Let me read the validate handler to see what it does. If `arc risk validate` can be called with the session's changed files... Let me look at what "arc risk validate" does in commands_risk.rs.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.4s (2 ✓)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "validate" src/commands_ri…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 2040,2075p scripts/evolve.s… ✓ (3ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture:
+
+1. `evolve.sh` calls `arc risk snapshot` at wrap-up (line 2056) — that's why snapshots accumulate.
+2. `arc risk validate` is CLI-callable (`handle_risk_validate` at commands_risk.rs:2139) and reads `git log` commits since the last snapshot to determine which files actually changed, then compares against predictions and writes validation events.
+3. But `evolve.sh` does NOT call `arc risk validate`. The dispatch_sub.rs test comment says "The harness will call `$arc_BIN risk validate` once per session" — future tense, planned but not done.
+
+So the dream milestone (accumulate ≥5 matched prediction-outcome pairs) is blocked on wiring `arc risk validate` into the harness — which is a protected file (scripts/evolve.sh) that only the creator edits. The creator is actively fixing harness bugs today.
+
+Actually wait — let me re-read handle_risk_validate to see if it depends on snapshots being present + commits after them. The dispatch_sub test says the harness "will call" it. So the wiring is pending. Since I can't modify evolve.sh, options:
+1. File an agent-help-wanted issue asking the creator to wire `arc risk validate` into evolve.sh wrap-up (mirroring the snapshot call at line 2056).
+2. OR — better — find where I CAN wire it: the snapshot recording happens via the CLI (`arc risk snapshot`). Is there anything on the arc side that could also fire validate? 
+
+Hmm wait, actually — could the impl agent's own session end fire validate? No, the wrap-up is harness-side.
+
+Actually, let me reconsider. `handle_risk_validate` compares "commits since last snapshot" via git log. The snapshot is taken at session wrap-up (after tasks). So a validate call at the NEXT session's wrap-up would validate the previous session's commits... Actually the timing works out: snapshot at wrap-up N, then at wrap-up N+1, `arc risk validate` would look at commits since snapshot N and compare against snapshot N's predictions. That's exactly the design.
+
+So the missing piece is genuinely a one-line addition to evolve.sh next to line 2056:
+```bash
+if ${TIMEOUT_CMD:+$TIMEOUT_CMD 60} "$arc_BIN" risk validate >/dev/null 2>&1; then
+    echo "  Risk validation recorded."
+else
+    echo "  Risk validation failed (non-fatal)."
+fi
+```
+
+But evolve.sh is PROTECTED — I cannot modify it. This is a genuine blocker requiring human action (the creator). The instructions say to file an agent-help-wanted issue for that. That's the right move for the dream milestone.
+
+BUT WAIT — let me check whether the validation could be triggered from inside `arc risk snapshot` itself! The snapshot command is already called by the harness. If `arc risk snapshot` ALSO ran the validate logic (comparing commits since the last snapshot against the previous snapshot's predictions), then both halves would accumulate from the single existing harness call. That would be an arc-side change I CAN make — no harness modification needed. It changes semantics slightly: "snapshot" would also "validate". Hmm, but that conflates two operations. Actually the validate step needs: previous snapshot predictions + commits since then. At wrap-up: last session's snapshot exists, and commits since then = this session's commits. So calling `arc risk snapshot` then validate in the same harness block... 
+
+Actually — hold on, let me check the ordering in the wrap-up. `arc risk snapshot` runs BEFORE the "commit any remaining uncommitted changes" block. So at wrap-up: snapshot records predictions as-of current HEAD (the last task commit), then uncommitted journal changes get committed as "session wrap-up" commit. At the NEXT session's wrap-up, `arc risk snapshot` runs again — recording new predictions as-of the new HEAD — and `arc risk validate` (if wired) would look at commits since the previous snapshot → the previous session's task commits + wrap-up commits. 
+
+If instead I made `arc risk snapshot` internally also validate: at each snapshot call, compare commits since the previous snapshot's git_hash, classify changed src/ files against the previous snapshot's top_10 predictions, write a validation event. That's EXACTLY the validate logic, but triggered by the existing harness call. The data flow works and no protected file changes.
+
+Hmm, but is that a good design? It conflates snapshot and validate. But honestly it's a defensible design: "snapshot records predictions now AND validates the previous snapshot's predictions against what happened since". The dream milestone is to accumulate matched pairs. This is the "automate the feed" move my D129 lesson prescribes.
+
+But wait — there's a subtlety: `auto_validate_after_failure` and `handle_risk_validate` already exist. `handle_risk_validate` at line 2139 — let me read it fully to understand what it needs and whether it can be invoked from the snapshot path. Let me read it.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 14.9s (2 ✓)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2060..2180 ✓ (2ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear understanding of the validate flow. `handle_risk_validate`:
+1. Loads the most recent snapshot
+2. Gets `git log <snapshot_hash>..HEAD --name-only` — commits since the snapshot
+3. Classifies changed files against predictions, computes accuracy
+4. Persists a validation event (line 2225-2228)
+
+The gap: `evolve.sh` calls `arc risk snapshot` but not `arc risk validate`. The dream milestone is starved on the validation half.
+
+Options for the planner:
+- **Option A**: File an agent-help-wanted issue for the creator to wire `arc risk validate` into evolve.sh (one line next to line 2056). The creator is actively fixing the harness today (#12, #13, #14). This is honest: evolve.sh is protected, only he can do it.
+- **Option B**: Make the arc-side change: after `arc risk snapshot` records a snapshot, also run the validate step internally. But this conflates operations and changes snapshot semantics.
+
+Wait — actually, let me re-read the snapshot flow. The `arc risk snapshot` CLI (handle_risk_snapshot presumably) writes the snapshot. What if the snapshot handler ALSO ran validate-first (validate the previous snapshot before recording the new one)? That's a design change but self-contained in arc source.
+
+Hmm, but hold on — is there a risk the harness calls snapshot with a timeout of 60s and validate is slow? The snapshot call has `TIMEOUT_CMD 60`. Validate does git log calls — fast. OK.
+
+Actually — let me reconsider the priorities here. The trajectory shows 10 sessions of 0/1 tasks reverted. The creator fixed the harness bugs. What the loop needs most right now is tasks that LAND. The dream-advancing task (validation feed) is nice but the wiring is blocked on a protected file. Let me think about what makes the dream milestone achievable WITHOUT touching evolve.sh:
+
+The watch-mode `auto_validate_after_failure` fires only in watch mode, not in the loop. The CLI `arc risk validate` exists. The harness calls `arc risk snapshot` once per session. If `arc risk validate` were ALSO called by the harness, both halves feed. The dispatch_sub.rs test comment explicitly says "The harness will call `$arc_BIN risk validate` once per session" — so this is the planned design, just not wired yet.
+
+Since evolve.sh is protected, the cleanest path: file an agent-help-wanted issue with the exact patch (one block of shell right after line 2056), AND meanwhile do the arc-side task I CAN do: nothing needed arc-side — validate already works via CLI. Hmm.
+
+Wait, actually — let me reconsider Option B more carefully. What if `handle_risk_snapshot` (the CLI `arc risk snapshot` path) runs the validate step BEFORE writing the new snapshot? At wrap-up: previous session's snapshot exists at hash H1. Commits since H1 = this session's task commits + wrap-up commits (well, wrap-up commits come after snapshot in the script — order in evolve.sh: snapshot → commit wrap-up → DAY_COUNT commit). So at snapshot time, HEAD = last task commit (or previous wrap-up if no task commits). Validate would compare commits since H1 against H1's predictions. That works! And it's entirely arc-side.
+
+But is that good design? "snapshot" doing double duty could surprise. Alternatively, the cleanest arc-side move: have the `arc risk snapshot` CLI command ALSO emit a validation line using the existing `handle_risk_validate` logic. Actually... you know what, I think the honest move here is BOTH:
+1. File the agent-help-wanted issue (creator wires validate into evolve.sh — the "right" fix, mirrors snapshot).
+2. Don't hack snapshot semantics arc-side.
+
+Actually wait. Let me think about what the impl agents can actually land TODAY given the 10-session revert streak. The streak was caused by harness bugs (now fixed). The remaining risk is task quality — tasks must be small, concrete, verifiable.
+
+Now, what are the best tasks for TODAY?
+
+Let me reconsider the whole landscape:
+1. No community issues.
+2. 10-session revert streak — mostly harness-caused, creator fixed today.
+3. Dream milestone: validation data accumulation — blocked on evolve.sh wiring (protected) OR arc-side design.
+
+Given the creator is active and responsive (fixed 3 harness bugs today), filing an agent-help-wanted issue for the evolve.sh validate wiring is exactly right — it's a protected file, only he can edit it, and the change is tiny and well-specified. That unblocks the dream feed at the harness level.
+
+For arc-side tasks, I need SMALL, CONCRETE, TESTABLE improvements that an impl agent can land in 20 minutes. Let me look for real gaps. From the transcript, the previous agent flailed looking for something to do — the fallback task was too open. My tasks must be specific.
+
+Let me scan for genuinely small, concrete opportunities:
+
+1. **`arc risk validate` with no commits since snapshot** — look at line 2207: "No commits since last snapshot — nothing to validate yet." Fine.
+
+2. Let me look for actual bugs. Let me check a few suspicious things quickly — the `parse_git_log_name_only` function, `classify_broke_files`. Or maybe there's a simpler product bug.
+
+Let me grep for obvious issues: functions with TODO, unwrap() on user input, etc. Actually — better: let me look at what tests exist and what's untested. The previous agent considered `version_is_newer` (tested), `extract_code_blocks` (tested). 
+
+Let me think about this differently. What would move the needle?
+
+**Idea: Make `arc risk snapshot` also validate (feed the validation half) — arc-side, unblocking the dream without touching evolve.sh.** This is dream work, self-driven slot. But it changes snapshot semantics — the snapshot CLI is documented as recording predictions. Hmm. Actually, wait — let me re-read the dream milestone: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs."
+
+The cleanest arc-side implementation: in `handle_risk_snapshot` (or the CLI dispatch for `arc risk snapshot`), after writing the new snapshot, also run `handle_risk_validate`'s logic. But that validates commits since the PREVIOUS snapshot — which at first call has no previous... it's fine, it just records when there's data.
+
+Hmm, actually there's a subtlety: the snapshot dedup guard. `auto_risk_snapshot` skips if same git_hash. If snapshot is skipped, would validate also be skipped? If the design is "validate then snapshot", validate should still run.
+
+Actually, you know what — let me look at how `arc risk snapshot` CLI is dispatched. Does it call `auto_risk_snapshot()` or a different function? Let me check.
+
+Actually, hold on. Let me step back and think about scope and risk. I have 3 task slots. The top priorities:
+
+1. **Self-driven (dream)**: Wire validation to accumulate. The blocker is evolve.sh (protected) → file agent-help-wanted issue. Arc-side alternative: make `arc risk snapshot` also validate. OR — even simpler arc-side: make the `arc risk snapshot` CLI path run the validate step after snapshotting. This is a small change in commands_risk.rs (handle_risk_snapshot) that reuses existing `handle_risk_validate` logic. Risky? It touches the risk subsystem which has been reverted... hmm, but those reverts were harness bugs, not risk-specific.
+
+Actually wait — I need to check: does `handle_risk_validate` write validation events, or just print? Line 2225-2228: "Persist a validation event so the CLI `/risk validate` path turns the..." — let me read that part. And check what `handle_risk_snapshot` does.
+
+2. **Product slot**: something small and user-facing. Let me hunt for a concrete small bug/UX gap.
+
+3. **Another concrete task**: maybe fix the dirty `tools/gasp-emit/Cargo.lock` situation (the uncommitted change). Actually that's residue from the harness bug #14 — the creator's fix may handle it. Not a task.
+
+Let me read handle_risk_snapshot and the validation persistence part.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2179..2279  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk_snapshot\|… ✓ (3ms)
+ ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a complete picture of the risk validation subsystem:
+
+- `handle_risk_validate` (CLI `/risk validate`, `arc risk validate`): loads last snapshot, git log from snapshot hash to HEAD, classifies changed src/ files against top-10 predictions, computes accuracy, prints report, AND persists a validation event to `.arc/risk_validations.jsonl`.
+- The harness (`evolve.sh`) calls `arc risk snapshot` once per session wrap-up but NOT `arc risk validate`.
+- So the snapshot half accumulates (37 lines) but the validation half stays empty — `risk_validations.jsonl` doesn't exist.
+
+The dream milestone is EXACTLY this: accumulate ≥5 matched prediction-outcome pairs. The gap is a one-block wiring in evolve.sh (protected — creator-only).
+
+The dispatch_sub.rs test comment says "The harness will call `$arc_BIN risk validate` once per session" — planned but not done.
+
+Plan for the dream slot:
+1. File an agent-help-wanted issue with the exact patch for evolve.sh (mirror the snapshot block at line 2056 with a validate block). Creator is active today and responsive.
+2. Arc-side task that unblocks WITHOUT harness change: make `arc risk snapshot` ALSO perform validation of the previous snapshot (validate-then-snapshot), so the existing harness call feeds both halves. This is fully arc-side, reuses `handle_risk_validate` logic, small, testable.
+
+Wait, but is #2 good design? Let me think about the semantics: `arc risk snapshot` records predictions as-of now. If it ALSO validates the previous snapshot against commits since then... the "then" is the previous wrap-up. Commits since previous snapshot hash = this session's task commits. That's exactly the validation we want. And the ordering in evolve.sh: snapshot runs before wrap-up commit — so at snapshot time HEAD is the last task commit, and commits since previous snapshot = this session's work. 
+
+But there's a wrinkle: `handle_risk_snapshot` — let me check if it dedups. Line 1255. And note `auto_risk_snapshot` (the /commit path) dedups by git hash. The CLI `handle_risk_snapshot` may not dedup. The harness calls it every session; the wrap-up commit's git_hash is recorded... Actually the risk_snapshots.jsonl shows one line per session-ish (day 159: 03:00, 10:08, 10:36, 10:59 = 4 sessions + others). Not strictly deduped? Whatever — not my concern right now.
+
+So the arc-side task: **"arc risk snapshot also validates"** — in `handle_risk_snapshot`, after writing the snapshot, call the validate logic (extract a shared helper `validate_last_snapshot()` from `handle_risk_validate`, or just call `handle_risk_validate()` after `handle_risk_snapshot()`). Simple version: at the end of `handle_risk_snapshot`, call `handle_risk_validate()`. That's a 2-line change. But wait — `handle_risk_validate` loads the MOST RECENT snapshot — which is the one we JUST wrote (same hash). git log `new_hash..HEAD` = empty → "No commits since last snapshot". It would validate the WRONG (new) snapshot against zero commits. So the validate must run BEFORE writing the new snapshot: validate (previous snapshot → current HEAD), then write new snapshot. Reorder: in `handle_risk_snapshot`, call validate first, then write. Hmm, but that means "snapshot" output includes a validation report — that's fine, informative.
+
+Actually cleaner: make `handle_risk_snapshot` first validate against the current last snapshot and HEAD, THEN record the new snapshot. Two-line change:
+```rust
+fn handle_risk_snapshot() {
+    handle_risk_validate();  // validate previous predictions against commits since then
+    // ... existing snapshot recording ...
+}
+```
+Wait, need to check the existing body of handle_risk_snapshot first — does it print a report? Let me read it. Also need to verify the harness's snapshot call tolerates extra output (it redirects to /dev/null — `"$arc_BIN" risk snapshot >/dev/null 2>&1`). Yes! Line 2056: `"$arc_BIN" risk snapshot >/dev/null 2>&1` — output discarded. So extra validate output is harmless to the harness.
+
+But hmm — the validate writes to `.arc/risk_validations.jsonl` which then gets swept into the wrap-up commit by `git add -A`. 
+
+Also — one concern: `handle_risk_validate`'s persistence uses `write_validation_event` which requires hits/surprises non-empty. And it needs commits since the last snapshot. On the FIRST wrap-up after this change, the last snapshot is from a previous session (different hash), and commits since then = this session's tasks. Good — that's exactly the pair we want: snapshot predictions from session N-1 vs. files actually changed (broke) in session N's commits.
+
+Hmm wait — but "broke" in classify_broke_files — let me check what classify_broke_files considers "broke". It classifies files changed in commits as... let me look. It's "broke_files" from git log name-only — files touched by commits. So it's "files changed since snapshot" — a proxy for "fragility realized". OK.
+
+This is a solid, small, arc-side task: **"Wire `arc risk snapshot` to also validate the previous snapshot, so the existing harness call feeds the validation meter"** — changes src/commands_risk.rs only (+ tests). Kind: evolve (it feeds arc's own loop meter). But also arguably product (risk subsystem)... primary beneficiary: evolve (the dream/loop meter). Actually the risk subsystem is product-visible too (`/risk validate`). I'll mark it evolve since the point is feeding the loop.
+
+Hmm, wait. Actually, let me reconsider whether to do the arc-side hack vs. just file the help-wanted issue. The instruction says: "If you hit a blocker that requires human action ... create an agent-help-wanted issue ... Then move on to other tasks."
+
+The evolve.sh wiring IS a human-action blocker (protected file). So:
+- File agent-help-wanted issue for the evolve.sh one-liner (mirror snapshot block with validate).
+- AND do the arc-side task (validate-then-snapshot) so the feed works regardless of when the human lands the harness change.
+
+These are complementary, not redundant: if the creator wires `arc risk validate` too, the arc-side validate-then-snapshot would double-record (validate once via snapshot, once via harness call). Wait — would it? The harness would call `arc risk validate` at wrap-up, which validates last snapshot → HEAD... but by then the snapshot recorded THIS session's state, and validate runs before the wrap-up commit. Commits since snapshot... empty (snapshot was just written at this HEAD). Hmm — actually if the harness calls snapshot then validate sequentially, validate finds "No commits since last snapshot". So the harness validate call would only do useful work if the snapshot dedups (skips writing) — e.g., if the wrap-up commit hash was already recorded... The dedup is in `auto_risk_snapshot` (commit path), not necessarily CLI. Ugh, this is getting complicated. 
+
+Let me simplify: the arc-side task (validate-then-snapshot in handle_risk_snapshot) is self-sufficient and doesn't conflict — if the creator ALSO adds the harness validate call, the harness validate would be a no-op ("no commits since last snapshot") most of the time because the arc-side change already validated at snapshot time. Actually no — the harness validate call happens AFTER snapshot. Snapshot validates previous→HEAD, then records new snapshot at HEAD. Then harness `arc risk validate` loads the NEW snapshot, git log new_hash..HEAD = empty → no-op. 
+
+So the arc-side change makes the dream feed work TODAY with zero harness changes, and it's the "automate the feed" move my D129 lesson prescribes. I'll do that as the primary dream task and file the help-wanted issue for the harness symmetry (optional, so the human knows the validate CLI is being used).
+
+Actually, should I even file the issue? The arc-side change makes it unnecessary. But the harness's explicit `arc risk validate` call was the "planned" design per the dispatch_sub test comment. Since my change achieves the goal without it, filing an issue is optional noise. Hmm — the instructions say to file help-wanted ONLY when blocked. I'm not blocked (arc-side works). So skip the issue. Good — cleaner.
+
+Wait, one more consideration: is modifying the `snapshot` command's behavior product-safe? `/risk snapshot` is a user-facing command. If a user runs `/risk snapshot`, they'd now also get a validation report printed. That's... actually informative and harmless. And it only writes validation events when there are hits/surprises. Product-safe enough. But the semantics change ("snapshot now also validates") should be documented in the /risk help and maybe CLAUDE.md.
+
+Hmm, actually, hold on. Let me reconsider — is there a cleaner separation? Instead of changing `handle_risk_snapshot` semantics, I could keep snapshot pure and instead... there's no other arc-side hook the harness hits. The harness hits `arc risk snapshot` — that's the only lever. So yes, validate-then-snapshot is the lever. OK.
+
+Now — is this the RIGHT task for the dream slot given the 10-session revert streak? My lessons: "Start at retreat size", "Size the task to fit in one hand". The risk subsystem has been touched a lot (commands_risk.rs is 3862 lines, low-test... wait no, it says "low-test" signal for commands_risk.rs in the snapshot! score 0.34 with "▲size","▲low-test"). Touching a low-test, high-churn file is itself risky per the risk scorer. But the change is tiny (call validate before snapshot write) and there are existing tests around handle_risk_validate (test_risk_validate_routing, etc.). The impl agent can add a test.
+
+Let me check the actual `handle_risk_snapshot` body to size the change precisely.
+
+Then the other two slots. Let me think about concrete product tasks:
+
+Candidate: The transcript showed the impl agent repeatedly stalling on "find a small improvement". A good product task would be something with clear user value. Let me scan for a small real bug or UX gap. Ideas:
+
+1. **`!` bang output truncation** — tail_for_capture ~8KB/200-line tail. Not obviously buggy.
+2. **LITE tools / lite mode** — check LITE_TOOLS vs tools drift (BUILTIN_TOOL_NAMES sync is a known gotcha).
+3. **`arc --version` / update check** — update.rs.
+4. Something from the docs/commands that's missing.
+
+Actually, let me look at this from the "what did recent revert streaks teach" angle + "what can land in 20 min". Let me check a couple of quick candidate bugs by grepping.
+
+Actually — let me reconsider. The BEST use of slots given the revert streak: pick tasks with tiny scope + existing test scaffolding. Let me look for small concrete gaps in recently-churned code. Let me check the `arc risk` bare output / accuracy report — with zero validations, `arc risk accuracy` shows nothing; fine.
+
+Let me look at something concrete: the `tools/gasp-emit/Cargo.lock` dirty file — residue of the harness bug. After the creator's #14 fix, the harness should no longer dirty it. The dirty file in the working tree right now — should I sweep it? It's an uncommitted change to a protected-ish file (tools/gasp-emit/Cargo.lock — is it in the protected list? The protected list is IDENTITY.md, PERSONALITY.md, ECONOMICS.md, evolve.sh, format_issues.py, build_site.py, workflows). Cargo.lock files aren't protected. But sweeping a lockfile change into a session commit without understanding it is risky. Leave it; the creator's #14 fix + gitignore may handle it.
+
+Let me look for genuinely small product bugs. Let me grep a few patterns quickly: unused imports won't compile, so build is green. Let me check `clippy` is clean (transcript said yes).
+
+What about UX gaps that are cheap? E.g., `arc risk accuracy` with no data says what? Let me check format. Or `arc risk predict`? Let me look at the "empty states" of risk commands — they were designed. Skip.
+
+Alternative approach for product slot: **The `--help` / docs consistency**. Or check `help_data.rs` for stale entries.
+
+Hmm, let me think about what a real user would hit. The project has 59 src files, 3000+ line files (cli.rs 3475, commands_git.rs 3131, commands_project.rs 3146, commands_info.rs 3029, commands_search.rs 3001). Big files are risk-flagged (commands_git.rs, cli.rs, repl.rs all in top-10 risk with ▲size).
+
+Actually — here's a thought. Rather than hunt for a bug blindly, let me check the recently reverted sessions' task transcripts to see WHAT tasks were attempted (they may reveal a real bug the loop kept trying to fix, or a task that's ripe to land now). The transcript I read was a fallback task (flailing). Let me check another session's transcript, e.g. day-159 00:46 or day-158.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 35.8s (2 ✓)
+
+Let me check what tasks previous sessions attempted (to learn from the revert streak) and look at `handle_risk_snapshot` to size a dream task precisely.
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git ls-tree -r audit-log sessions/…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1255..1345 ✓ (2ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand `handle_risk_snapshot`. The change for the dream task is clear:
+
+In `handle_risk_snapshot()` (line 1255), before writing the new snapshot, call the validation logic so the previous snapshot's predictions get validated against commits since it. Implementation options:
+1. Simplest: call `handle_risk_validate()` at the top of `handle_risk_snapshot()`. It loads the last snapshot (the previous one — new one not yet written), git log prev_hash..HEAD, classifies, prints report, writes validation event. Then proceed to write the new snapshot. 2-line change, reuses tested logic.
+
+Wait — but `handle_risk_validate` prints "No commits since last snapshot" when empty — that's fine, harmless.
+
+One concern: `handle_risk_validate` prints a report to stdout. The harness redirects `> /dev/null 2>&1`, so no issue. Interactive users see a validation report when running `/risk snapshot` — informative.
+
+But hmm — is it semantically weird that `/risk snapshot` prints a validation report? Slightly, but it's "here's how last session's predictions did, and here's the new snapshot." Actually that's a nice UX. And for the dream: the harness's existing `arc risk snapshot` call now feeds BOTH halves. 
+
+But wait — there's a subtle issue with validation-before-snapshot and the git hash dedup: `handle_risk_validate` uses `last_snapshot_git_hash`... no, it takes the last line's git_hash. At wrap-up: last snapshot = previous session's wrap-up hash. git log prev_hash..HEAD = this session's task commits + skill-evolve counter commits etc. classify_broke_files picks src/ files. Computes hits/surprises vs previous snapshot's top_10. Writes validation event. 
+
+Now — will this produce "≥5 matched pairs" fast? It needs commits since the previous snapshot that touch src/ files, and ≥1 hit or surprise. Sessions that revert produce no commits (revert → no diff) → no validation event. Sessions that land a fix → commits touch src/ files → validation event fires. So the feed accumulates only on successful sessions — which have been rare lately, but the creator's harness fixes should unblock successful sessions. Good.
+
+Task sizing: this is a ~5-line change in commands_risk.rs + a test. Very small. Fits the 20-min budget. And it advances the dream directly ("automate the feed").
+
+Now, the second concern — is this change risky to the risk subsystem? It reuses tested code (handle_risk_validate). The test for it: add a unit test that... hmm, handle_risk_validate does git operations and file I/O — hard to unit test directly. There's already `test_risk_validate_routing` (dispatch) and tests for compute_validation etc. The impl agent could add a test verifying that calling snapshot → validate writes a validation event given a temp snapshot file... Actually the existing test suite has tests like `test_build_risk_input_snapshot_contract`. The impl agent can add a test for the new ordering: snapshot handler calls validate first. Might be tricky since handle_risk_snapshot does real git/fs. Alternative: extract a tiny helper `validate_then_snapshot` or just document. The impl agent can add a test at the parse/compute level or a routing-level test.
+
+Let me now decide the other tasks.
+
+Given the revert streak, the highest-value OTHER tasks should be:
+1. Something with guaranteed landing — a pure-function test addition or tiny fix.
+2. A product-facing improvement.
+
+Let me look at the plan.log from the 00:46 session to see what the planner planned and why it failed — that tells me what NOT to repeat.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 11.7s (2 ✓)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show audit-log:sessions/day-15… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The plan.log is mostly empty (the planner produced almost nothing — probably hit the OpenCode/hy3:free 400 error or SSE issue that the creator fixed). Let me check the task_01 transcript from that session briefly to confirm what the task was. Actually, the transcript I read earlier (10:44 session) showed the fallback "make one small improvement" task with flailing. Let me quickly check the 00:46 session's task transcript to see the task title.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show audit-log:sessions/day-15… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now the full picture of the revert streak is clear:
+- Some sessions failed at the model level (404 insufficient credits on nousresearch — the provider account ran out of credits!)
+- Some failed at the protocol level (OpenCode developer role 400, SSE premature close — creator fixed)
+- Some failed because the harness's own cargo dirtied protected Cargo.lock (#14 — creator fixed)
+- The fallback tasks were too open-ended ("find a small improvement") → agents flailed and never committed → reverted
+
+The creator's fixes (#12, #13, #14) landed today, and the counter has been bumped to 7. So the loop infrastructure should be healthier now.
+
+Wait — "Model 'deepseek/deepseek-v4-flash' requires available credits. Your account balance is too low" — that's an account funding issue on the nousresearch provider. The creator fixed the OpenCode/hy3:free 400, so hy3:free is now usable (free model, no credits needed). So the fix #13 specifically switched to a free model that works.
+
+OK. Now let me decide the plan. Given:
+1. **No community issues today.**
+2. **Revert streak mostly harness/provider-caused, creator fixed today.**
+3. **The dream milestone (validation feed) is starved — I can unblock it arc-side.**
+
+Slots (3 max):
+- **Slot 1 (self-driven, dream)**: Wire validation into the existing harness-triggered snapshot path: `handle_risk_snapshot` validates the previous snapshot before recording the new one. Files: src/commands_risk.rs. Kind: evolve (feeds the loop's prediction meter; also benefits product users who run /risk snapshot). Small, reuses tested logic.
+- **Slot 2 (product)**: I need a genuinely small, concrete, user-facing improvement that will land. Let me hunt for one.
+- **Slot 3 (evolve or product)**: Another small concrete one.
+
+Let me hunt for real product bugs/UX gaps now. Good candidates to check quickly:
+
+1. `commands_risk_accuracy.rs` — with zero validations, what does `arc risk accuracy` show? Should have a friendly empty state. Let me check.
+2. The `parse_git_log_name_only` / `classify_broke_files` — fine.
+3. A real user-facing bug: let me grep for common issues like `unwrap()` on args, panics, byte indexing on strings (known bug class #250 — "Never use byte indexing on strings").
+
+Let me search for the byte-indexing pattern and `[..` slices on strings, plus `split_at`/`truncate` — the known panic class.
+────────────────────────────────────────────────────────────────────────────────
+
+The revert streak is now fully explained: provider credit exhaustion, the OpenCode developer-role 400, SSE premature-close, and the harness's own cargo dirtying Cargo.lock — all today-fixed by the creator (#12–#14). Let me hunt for genuinely small, concrete product tasks now, starting with the known byte-indexing panic class (#250) and empty-state UX.
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\.truncate(" src/ | grep…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\[\.\.n\]\|\[\.\.len\|ch… ✓ (20ms)
+ ✓ (21ms)
+  2 tools completed in 22ms (2 ✓)
+
+
