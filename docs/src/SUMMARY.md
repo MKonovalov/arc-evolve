@@ -33,6 +33,7 @@
 # Architecture
 
 - [Architecture Overview](./architecture.md)
+- [Ecosystem Schema & Interdependencies](./ecosystem-schema.md)
 
 # Guides
 
