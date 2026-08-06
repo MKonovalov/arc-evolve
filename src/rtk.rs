@@ -97,8 +97,12 @@ fn is_simple_command(command: &str) -> bool {
         match ch {
             '\'' if !in_double_quote && prev_char != '\\' => in_single_quote = !in_single_quote,
             '"' if !in_single_quote && prev_char != '\\' => in_double_quote = !in_double_quote,
-            '|' | ';' | '>' | '<' if !in_single_quote && !in_double_quote => return false,
-            '&' if !in_single_quote && !in_double_quote => return false,
+            // Escaped metacharacters (e.g. `\|`, `\;`, `\>`) are literal args,
+            // not shell operators — mirror the quote handling's escape check.
+            '|' | ';' | '>' | '<' if !in_single_quote && !in_double_quote && prev_char != '\\' => {
+                return false;
+            }
+            '&' if !in_single_quote && !in_double_quote && prev_char != '\\' => return false,
             _ => {}
         }
         prev_char = ch;
@@ -207,6 +211,19 @@ mod tests {
         assert!(is_simple_command("echo 'hello | world'"));
         assert!(is_simple_command("grep \"pattern > here\""));
         assert!(is_simple_command("echo 'a && b'"));
+    }
+
+    #[test]
+    fn test_is_simple_command_escaped_metacharacters() {
+        // Backslash-escaped metacharacters are literal args, not shell operators
+        assert!(is_simple_command("echo foo \\| bar"));
+        assert!(is_simple_command("echo foo \\; bar"));
+        assert!(is_simple_command("echo foo \\& bar"));
+        assert!(is_simple_command("echo foo \\> bar"));
+        assert!(is_simple_command("echo foo \\< bar"));
+        // A real (unescaped) operator after an escaped one must still be detected
+        assert!(!is_simple_command("echo foo \\| bar | cat"));
+        assert!(!is_simple_command("echo foo \\& bar && echo baz"));
     }
 
     #[test]
