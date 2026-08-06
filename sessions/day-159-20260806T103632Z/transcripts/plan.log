@@ -1,0 +1,560 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the situation. I'm arc, a self-evolving coding agent. Today is Day 159. I need to:
+
+1. First check for CI failures
+2. Read ISSUES_TODAY.md for community issues
+3. Look at my trajectory - it shows 10 consecutive sessions with 0/1 tasks reverted. That's a critical signal.
+4. Write a session plan with task files
+
+Let me start by gathering context. The trajectory shows every session for days 158-159 had tasks reverted. That's a big red flag — something is systematically failing.
+
+Let me check the current state of things first.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && echo "---" && git lo…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat ISSUES_TODAY.md 2>/dev/null | … ✓ (5ms)
+ ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the recent git history more carefully. There are commits like "fix(agent_builder): OpenCode rejects developer role (400) — use default compat (#13)" and "fix(deps): bump arcagent to b11de796 (SSE premature-close fix) (#12)" — these look like real fixes, but they might have been from other processes. Let me check the trajectory again:
+
+All 10 sessions had tasks 0/1 reverted. That's a systematic failure. But the git log shows some fix commits with PR numbers (#12, #13). Wait — those PR numbers suggest these are actual PRs merged. Let me look at what happened recently.
+
+Let me check the journals to understand what's been happening with the reverts.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.7s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -100 journals/JOURNAL.md  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -30 | grep -i -E… ✓ (5ms)
+ ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. The journal is auto-generated and shows "no commits made" for many sessions. But the trajectory shows tasks 0/1 reverted for the last 10 sessions. There are also some PR fixes that look like they were done outside the main loop (PR #9, #10, #11, #12, #13 — these look like human-driven fixes or PRs).
+
+The journal entries are all auto-generated with "Session commits: no commits made." This means sessions are failing systematically. Let me check what the reverts were about. Let me look at the trajectory data more carefully and check audit logs.
+
+Let me check what the actual task reverts look like. Let me look at the audit-log or session plans.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.9s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la session_plan/ 2>/dev/null; …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline --all -50 | grep… ✓ (12ms)
+ ✓ (11ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+So the trajectory says "tasks 0/1 reverted" for the last 10 sessions, but git log doesn't show revert commits. Wait — the trajectory says "Reverts in window: 0 of last ~10 sessions had reverts." That's contradictory. Let me re-read:
+
+```
+## Recent session outcomes (last 10)
+day-159 (2026-08-06 10:08:52): tasks 0/1 ⚠️ — 1 task(s) reverted
+...
+## Reverts in window
+0 of last ~10 sessions had reverts.
+```
+
+Hmm, that's confusing. The outcome says "tasks 0/1 — 1 task(s) reverted" but then "Reverts in window: 0 of last ~10 sessions had reverts." That's a bug in the trajectory extraction, or "reverted" in the outcome means something different (maybe the safety_commit revert, i.e., the task work was reverted via `git reset --hard` after all fix attempts failed).
+
+Actually "Reverts in window: 0 of last ~10 sessions had reverts" — this probably counts REVERT commits in git log (like "Revert "..." commits), which are different from the harness reverting agent work. The outcome line "1 task(s) reverted" means the task failed and its work was reverted.
+
+So the picture: For 10+ consecutive sessions, every task (1 per session) has failed and been reverted. The journal shows "Session commits: no commits made" — so no work ever landed. Something is systematically broken.
+
+But there are PR fixes (#9-#13) from a human (or someone): OpenCode rejects developer role, arcagent SSE premature-close fix, provider secret injection. These look like fixes to the very problems causing failures — the loop couldn't talk to the provider (OpenCode/OpenRouter) properly.
+
+Wait, but this is the "session plan" phase. My job is to produce task files in session_plan/. The trajectory of failures is critical context — whatever I plan must be small and highly likely to succeed, because the impl agents have been failing for 10 sessions straight.
+
+Let me look at what those PR fixes were about, and check the current build state. Also check whether there's a current failure mode. Let me run a quick build to see the state.
+
+Actually, let me first understand WHY tasks have been failing. The risk snapshots show git hashes advancing. Let me look for audit logs or transcripts of the failed tasks. There might be a session_plan directory in git history or audit-log branch.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 7.9s (2 ✓)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --all --oneline --grep="re…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show de9c49d --stat | head -30… ✓ (11ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the picture better. The human maintainer (Mikhail Konovalov) has been fixing infrastructure issues:
+
+1. **#9/#10** — Provider secret not exported to the runner env → the loop couldn't use the configured provider
+2. **#11/#12** — arcagent SSE premature-close fix → 'Stream ended without the expected termination signal' error blocked the evolve loop on nousresearch
+3. **#13** — OpenCode rejects developer role (400) → every request 400'd before the model responded → "the agent never executed any tool call and the evolve loop committed nothing"
+
+So the 10+ sessions of "0/1 reverted" were caused by infrastructure failures (API 400s, SSE stream errors) — not by bad task choices. The fixes have just landed (de9c49d at 12:18 today).
+
+This is the key insight: the loop was broken at the infrastructure level and the maintainer just fixed it. Now, the current session should be able to actually execute tasks.
+
+Let me verify the current build state is green, since that determines everything. Let me also check whether there are open issues from the community. ISSUES_TODAY.md says "No community issues today."
+
+Let me check the current state — build and test. Since tasks have been failing at the infrastructure level, my planning should be robust: pick tasks that are small, self-contained, and genuinely achievable.
+
+Wait — but actually, I should think about what's the right move here. My role is the planner. The trajectory says every session fails. The human fixed infrastructure issues just now (commit de9c49d is the HEAD, committed at 12:18 today, which is after my "10:19" session start... interesting — the session start time says 10:19 but the fix commit is at 12:18 +0200 = 10:18 UTC. So HEAD already includes all three fixes).
+
+So the plan should:
+1. First verify build works (can't rely on the assessment).
+2. Pick tasks that are small and safe — since the loop has been through 10 failed sessions, the highest priority is to land SOMETHING real.
+
+Let me check the build status quickly. The instructions say "Do NOT read source code files" but I can run builds. Actually, let me check if the build works first, since that's critical context for planning.
+
+Actually the prompt says: "IMPORTANT: Do NOT read source code files. The assessment above already contains the source architecture, build status, bugs, and capability gaps. Plan from the assessment. (Exception: if the assessment section says 'NO ASSESSMENT AVAILABLE', you must read source yourself.)"
+
+The assessment says "NO ASSESSMENT AVAILABLE" — so I SHOULD read source files myself. It also says: "Before writing tasks, quickly read: 1. All .rs files under src/ — note module structure and recent changes 2. journals/JOURNAL.md — last 5 entries for recent context 3. git log --oneline -10 — recent commit history. Keep this investigation brief."
+
+I've done journals (last 5 entries are all "no commits made" — the loop has been dead) and git log. Let me quickly check the build state and maybe scan a couple of source files for obvious issues. But most importantly, I need to figure out what tasks to plan.
+
+Given the context:
+- The loop has been failing for 10+ sessions due to infrastructure issues (400 errors, SSE premature close) — now fixed by the human
+- No community issues today
+- The DREAM.md milestone: accumulate first validation data for risk predictions (≥5 matched prediction-outcome pairs)
+
+Let me think about what tasks to plan:
+
+**Task 1 (self-driven, dream-aligned):** The dream milestone is "Accumulate the first validation data... enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs. Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+Since the loop has been failing, the `auto_risk_snapshot` and `auto_validate_after_failure` haven't been firing. What's a concrete step I can take today toward that milestone? 
+
+Looking at the CLAUDE.md: "`auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and (opt-in) on REPL exit under `arc_RISK_AUTOSNAPSHOT=1` — it does **NOT** fire in the evolve loop, which commits with raw `git commit`". So the evolve loop commits with raw git commit and never records risk snapshots. That's the cold-start blocker!
+
+Wait, but the risk_snapshots.jsonl file has entries... from `.arc/risk_snapshots.jsonl` — those were recorded with `arc risk snapshot` presumably by the human or a harness. Looking at the data: day 158 entries with git hashes 298e267, 7fb0063, a20e71a, 40ae0cc, 7bef7f6. These look like they were recorded automatically? The CLAUDE.md says it does NOT fire in the evolve loop... but these entries exist. Hmm, maybe the human ran `arc risk snapshot` via the harness, or maybe there's a new mechanism. Actually the snapshot entries say "git_hash":"298e267" which is the skill-evolve reset counter commit — hmm.
+
+Actually wait — maybe these snapshots ARE being recorded now via some mechanism. Or the human/harness runs `arc risk snapshot` manually. Either way, data is accumulating in `.arc/risk_snapshots.jsonl`. 
+
+But the validation half — `.arc/risk_validations.jsonl` (or similar) — that's what's missing. Let me check if there are validation events.
+
+Actually, let me focus. The key question for planning: what tasks should I write? Given the extreme failure streak, I should:
+
+1. **Verify the build is green** (task 0 priority — but as planner I can just check it myself with cargo build to make sure the repo is healthy)
+2. Plan a small, concrete, high-value task
+
+Let me think about what would actually help:
+
+**Option A — Dream milestone task:** Wire `auto_risk_snapshot` into the evolve loop's commit path. But that's evolve.sh — which is PROTECTED (never modify scripts/evolve.sh). So I can't do it there. The alternative: make the evolve-loop task agents call `arc risk snapshot` at the end... but that's also harness-level.
+
+Hmm, what CAN be done in src/ for the dream? The dream's next milestone is data accumulation — mostly a harness/scheduling concern. A src/-level contribution: make the risk snapshot data more useful — e.g., improve the snapshot to include validation-relevant fields, or make `arc risk predict` usable, or add a `risk validate` helper that computes the ≥5 matched-pair check.
+
+**Option B — Fix something concrete in the product:** Given 10 failed sessions, maybe pick something genuinely useful for real users. Let me check open issues... there are no community issues today. Let me check what agent-self issues are open.
+
+Let me check the open issues via gh CLI.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 15.9s (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && gh issue list --repo MKonovalov/ar…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -5 ✓ (174ms)
+ ✓ (457ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The build is green (it finished quickly, probably cached). `gh` can't access issues (token limitation in this environment). Let me check the risk validation file and the `.yoyo` directory to understand state, and check for any risk validation data.
+
+Let me check:
+1. Is there a risk_validations.jsonl?
+2. What does the .arc/ directory contain?
+3. Check if there are pending items in DREAM.md / active_dream
+
+Let me also quickly scan src/commands_risk_snapshots.rs to understand the current snapshot/validation machinery (I'm allowed to read source since NO ASSESSMENT AVAILABLE).
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.3s (2 ✓)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/ .yoyo/ 2>/dev/null; e…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "risk_validations\|RISK_V… ✓ (8ms)
+ ✓ (13ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the state:
+- 35 risk snapshots accumulated in `.arc/risk_snapshots.jsonl` 
+- No `risk_validations.jsonl` yet — the validation half is still starved
+- Build is green
+
+The `.yoyo/` directory has risk_snapshots too (fork-related?). Let me check the DREAM.md milestone and the current state of risk validation to figure out the best self-driven task.
+
+Let me read the relevant part of commands_risk_snapshots.rs to understand the validation mechanism, and check what prediction_accuracy_summary needs.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.1s (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pub fn\|fn " src/commands…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1,60p src/commands_risk_sna… ✓ (5ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the validation event structure and how auto_validate_after_failure works, to understand what data would feed the dream milestone.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.9s (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 160,240p src/commands_risk_… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the risk validation machinery. The dream milestone is to accumulate ≥5 matched prediction-outcome pairs. The data path:
+- `auto_risk_snapshot` records predictions (snapshots) — 35 snapshots exist now
+- `auto_validate_after_failure` records outcomes — the validation file doesn't exist yet, meaning it hasn't fired (or fired but never matched)
+
+Let me look at where auto_validate_after_failure is called from and where auto_risk_snapshot is called from.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_validate_after_fail…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_validate_after_fail… ✓ (6ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting! So `scripts/evolve.sh` at line 2037-2043 DOES call `arc risk snapshot` per session (the CLAUDE.md says it doesn't fire in the evolve loop, but apparently evolve.sh was updated — this is the human's fix #575-related work, or it's part of the current evolve.sh which is protected). The CLAUDE.md text says "it does NOT fire in the evolve loop" but the actual evolve.sh calls `arc risk snapshot` at line 2043. There's a doc/code mismatch — but evolve.sh is protected, so I can't change it.
+
+Wait, let me re-read: "Risk-meter feed (#575): record one risk snapshot per session so the ..." — so evolve.sh DOES call `arc risk snapshot` each session now. That explains the 35 snapshots. The CLAUDE.md is stale on this point, but I can't edit evolve.sh; I CAN edit CLAUDE.md (it's a doc, not protected — protected files are IDENTITY.md, PERSONALITY.md, ECONOMICS.md, scripts/evolve.sh, scripts/format_issues.py, scripts/build_site.py, .github/workflows/).
+
+Let me look at the evolve.sh section around 2037 to see exactly what it does.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.9s (2 ✓)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 2030,2055p scripts/evolve.s…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "risk validate\|arc risk"… ✓ (4ms)
+ ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+OK so:
+- evolve.sh records one risk snapshot per session via `arc risk snapshot` (the snapshot half IS accumulating — 35 snapshots)
+- The validation half (`risk validate` / `auto_validate_after_failure`) never fires in the evolve loop — it only fires from `/commit` handler and watch-mode fix loops
+- `arc risk validate` is CLI-callable (`dispatch_sub.rs` routes it)
+
+The dream milestone: "Accumulate the first validation data... produce ≥5 matched prediction-outcome pairs. Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+Now, the key self-driven opportunity: the evolve loop records snapshots but never validates. The validation half only fires when the agent calls `/commit` or a watch-mode fix loop runs. In the evolve loop, the impl agent uses raw `git commit`, so validations never get recorded.
+
+But wait — I can't modify evolve.sh. Can I make the src/ side accumulate validations automatically? The `auto_validate_after_failure` function is called from watch.rs after a failed watch loop. In the evolve loop, does the impl agent use watch mode? Probably not.
+
+Hmm. What src/-level change would advance the dream milestone? Options:
+
+**Option 1: Snapshot → validation enrichment.** Each snapshot records top-10 risk files. The validation event records which changed files were hits/surprises. To get ≥5 matched pairs, we need validation events. What if `auto_risk_snapshot` ALSO wrote a companion "next-session validation" — i.e., when a snapshot is recorded and later the git hash changes, the changed files since the snapshot could be auto-validated?
+
+Actually, a cleaner idea: add an `arc risk validate` enhancement that can validate against git history — e.g., compare the last snapshot's top-10 against files changed in the subsequent commits, and write a validation event. But `arc risk validate` already exists as CLI. Let me check what it does.
+
+Actually — let me step back and think about what the best USE of this session is, given:
+1. The loop was dead for ~10 sessions due to infra issues (now fixed by human)
+2. No community issues today
+3. The dream milestone needs validation data (accumulation — mostly a harness concern)
+4. I have 3 task slots; at least 1 must be self-driven
+
+The highest-value, safest plan:
+
+**Task 1 (self-driven, dream-aligned):** Make the validation half actually accumulate in the evolve loop. Since evolve.sh is protected and already records snapshots via `arc risk snapshot`, the symmetric move is: have the snapshot-recording path in src/ ALSO attempt an auto-validation against the files changed since the last snapshot. I.e., extend `arc risk snapshot` to compute "changed src/ files since last snapshot's git_hash" and write a validation event for them. That would make each session's `arc risk snapshot` call (which already runs in evolve.sh) produce both halves of the meter: snapshot + auto-validation from the diff between consecutive snapshots. This directly feeds the dream milestone: after N sessions, we get N-1 validation events with hits/surprises computed from git history — real matched pairs without touching evolve.sh.
+
+Wait, but is that a good design? A validation event's semantics: "the snapshot predicted top-10 risk files; these files later failed (hits) / these failed files weren't predicted (surprises)". The current `auto_validate_after_failure` takes changed_files (files that failed — e.g., files touched in a failed watch cycle) and compares against the last snapshot's top-10. If we instead use "files changed since last snapshot", that's a weaker signal (changed ≠ failed), but it's the only signal the loop provides. Actually the risk system already treats "changed after a failure" as the outcome signal. Hmm, using plain changed-files would mark every touched file as a "failure", which would corrupt the accuracy data.
+
+Let me look at how auto_validate_after_failure computes hits/surprises to understand the semantics better. Let me also look at what `arc risk validate` does in dispatch_sub.rs.
+
+Actually, let me look at the code to be precise.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 11.0s (2 ✓)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 240,335p src/commands_risk_… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the machinery deeply. The validation signal is "changed src files after a failure" (watch_failure trigger, or /commit). The outcome signal is imperfect but it's what exists.
+
+The dream milestone is data accumulation: ≥5 matched prediction-outcome pairs. The evolve loop records a snapshot per session but NEVER validates — the validation half is starved, exactly as DREAM.md says.
+
+The cleanest src/-only move that feeds the dream: **`arc risk snapshot` should also auto-validate the previous snapshot against files changed since it was recorded.** I.e., when the CLI records a new snapshot (which evolve.sh does once per session), look at the last snapshot's git_hash, diff files changed in src/ between that hash and HEAD, and write a validation event classified against the last snapshot's top-10. This gives the loop both halves per session with zero harness changes and zero behavior change for product users... 
+
+Wait, but is this semantically sound? A "changed file" is not a "failed file". The existing validation semantics use changed-after-failure as a proxy for failure. Using "changed since last snapshot" as the outcome signal would systematically say "the top-10 files are the ones we touch most" — which is basically measuring churn correlation, not failure prediction. The risk scorer uses "churn" as one signal, so this would create a self-fulfilling loop: high-churn files get flagged, then they get flagged as "hits" because they were changed again. Hmm. That's actually a real methodological concern — but it's also somewhat the existing design's approach (watch_failure uses changed files too, which are the files the watch loop modified in response to a failure — closer to "files implicated in failures").
+
+Hmm, let me think about this differently. What's the minimal, safe, genuinely-useful task?
+
+Actually, let me reconsider the whole situation. The trajectory shows 10+ sessions of complete failure — but the ROOT CAUSE was infrastructure (400 errors, SSE premature close), now fixed by the human (commits #12, #13 landed at 12:18 today, which is after the last failed session at 10:08). Wait, actually the last risk snapshot ts is 2026-08-06T10:08:52Z which is the current session start. The human's fix commit de9c49d is at 12:18+0200 = 10:18Z. So the fix landed right around now.
+
+So the most important thing this planning phase can do: **plan tasks that the impl agent can actually complete now that the provider works.** The tasks must be SMALL and SAFE. Given 10 straight failures, the biggest risk is that I over-scope again.
+
+What are the candidates?
+
+1. **Dream task: feed the validation half.** A small src/ change: in `arc risk snapshot` CLI path (commands_risk.rs handle_risk "snapshot" subcommand or dispatch_sub), after writing the snapshot, compare src/ files changed since the previous snapshot's git_hash and auto-write a validation event with trigger "session_delta". Actually — simpler and cleaner: implement it as part of `risk snapshot` in the src so evolve.sh's existing call automatically produces both. But careful: the FIRST snapshot (no previous) should no-op. This directly advances DREAM.md's next milestone: accumulate matched pairs. Each evolve session would produce one validation event. After ~5 sessions, the milestone's ≥5 pairs condition is met. This is exactly "the validation loop exists in code but has zero data points" — fixing the cold start.
+
+   Risk: semantic concern (changed≠failed). Mitigation: label the trigger clearly (e.g., "session_delta" vs "watch_failure") so accuracy stats can be interpreted honestly. Actually, hmm, is it honest to call changed-files "hits"? The dream says "measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones". With session_delta events, we'd be measuring "files the scorer flagged got changed more often" — a weaker claim but still a real one: the scorer ranks by fragility, and files that need frequent editing ARE the fragile ones. It's defensible as a first data feed. But I'm slightly worried about corrupting the prediction-accuracy meter with a different semantic.
+
+   Alternative framing: the validation event's accuracy_pct would be ~always high (since top-10 risk files are high-churn, and the diff-any-file-changed check will hit them often). This creates a biased self-fulfilling metric. Hmm.
+
+   Actually wait. Let me reconsider. The accuracy metric is "of the files changed, how many were predicted". High-churn files are top-10, and the changed set is dominated by high-churn files → accuracy looks great but measures churn correlation. This is exactly the kind of "test that mirrors the implementation" trap my own wisdom warns about. BUT — the dream explicitly says the first milestone is just to ACCUMULATE data, and the measurement question ("did high-risk files fail more often") comes after. A churn-correlation signal is still real signal — fragile files are fragile BECAUSE they churn. I think a cleaner design: make the auto-validation fire on a better outcome signal.
+
+2. **CLAUDE.md stale-doc fix:** The CLAUDE.md says "auto_risk_snapshot fires ONLY from arc's own /commit handler and (opt-in) on REPL exit... it does NOT fire in the evolve loop" — but evolve.sh now calls `arc risk snapshot` directly (line 2043), and 35 snapshots exist. That's a false past-tense claim in a context file — my own Day-130 lesson: "A false past-tense claim in a context file is a self-reinforcing error." Fixing CLAUDE.md to match reality is a tiny, safe, valuable task. This is a great "small task done whole" candidate.
+
+3. **A product improvement.** No community issues today. But maybe there's a known rough edge. Let me think about what a real user would hit... Actually, the trajectory shows the loop could not complete ANY task for 10 sessions — the most valuable thing for the PRODUCT (users of arc) right now is... hmm, the product wasn't broken; the loop was. The product-level improvements are speculative without issues.
+
+4. **risk predict/accuracy CLI polish:** With 35 snapshots and 0 validations, `arc risk predict` / `accuracy` currently shows "no data". A task could make the accuracy report handle the "snapshots but no validations" state gracefully with an honest message ("N snapshots recorded, 0 validation events — the meter is warming up") — that's a real UX gap: dispatch_sub.rs:1050 mentions "the meter stays starved". Let me look at that comment.
+
+Let me check dispatch_sub.rs around line 1050 and the accuracy report behavior when validations are empty.
+
+Actually, let me think about the ideal session plan given all constraints:
+
+- At least 1 self-driven slot (dream-milestone preferred)
+- Remaining slots: community (none today), so self-driven/product
+- Tasks must be ≤3 source files each, 20-minute completable
+- The loop has failed 10 sessions — keep tasks SMALL and verifiable
+
+My plan:
+
+**Task 01 (self-driven, dream):** Feed the validation half from the snapshot path. Modify `arc risk snapshot` (in src/commands_risk.rs or commands_risk_snapshots.rs) so that after writing the new snapshot, it diffs src/ files between the previous snapshot's git_hash and HEAD, and if the previous snapshot exists and ≥1 src file changed, writes a validation event (trigger: "session_delta") classified against the previous snapshot's top-10. This makes the existing evolve.sh `arc risk snapshot` call produce both meter halves per session. Files: src/commands_risk_snapshots.rs (+ maybe src/commands_risk.rs for the snapshot subcommand handler). Include tests: pure-function diff classification test + integration-ish test. This is 2 files, small.
+
+Hmm wait — actually, let me check how the snapshot subcommand is wired. Let me look at handle_risk in commands_risk.rs for "snapshot".
+
+**Task 02 (evolve/doc):** Fix the stale CLAUDE.md claim about auto_risk_snapshot not firing in the evolve loop — update to reflect that evolve.sh records one snapshot per session via `arc risk snapshot` (#575), and that the new session_delta validation now fires alongside. Files: CLAUDE.md only. Also update the same section in CLAUDE.md about auto_validate_after_failure if needed. Tiny, safe, doc-only — a guaranteed land.
+
+**Task 03 (product):** accuracy report UX when validations are empty — `arc risk accuracy` should say something useful like "0 validation events yet — predictions accumulate via session snapshots; run `arc risk validate`..." instead of a bare "no data". Let me check what it currently prints. This is a product-facing small polish that also serves the dream (visibility into meter state).
+
+Actually — wait. Let me reconsider Task 01's semantics concern more carefully, because I don't want to plan a task that corrupts the accuracy meter. Let me look at how accuracy is computed and what the "matched pairs" dream milestone needs. Let me check prediction_accuracy_summary and parse_validation_events.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1040,1075p src/dispatch_sub… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at what `arc risk accuracy` currently reports when there are 0 validation events, and how `arc risk predict` works. Let me find the handle_risk code for the accuracy/predict subcommands.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "snapshot\|validate\|accur…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "RISK_SUBCOMMANDS" src/com… ✓ (8ms)
+ ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.2s (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1247,1320p src/commands_ris… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture. `handle_risk_snapshot` is the CLI path that evolve.sh calls once per session. Currently it just writes the snapshot. The dream milestone needs validation data.
+
+The cleanest dream-aligned task: after writing the snapshot, look up the PREVIOUS snapshot (from the same JSONL), diff src/ files between that snapshot's git_hash and current HEAD, and if ≥1 src file changed, write a validation event classified against the previous snapshot's top-10 predictions. This gives the evolve loop both meter halves per session with zero harness changes.
+
+But the semantics concern: "changed" ≠ "failed". Let me think about how to make this honest. The event's trigger field should distinguish it: "session_delta" vs "watch_failure". The accuracy stats — let me check compute_accuracy_stats to see if it mixes triggers. And prediction_accuracy_summary uses all events. If session_delta events dominate, the "accuracy" number becomes "of files changed between sessions, how many were predicted as high-risk" — which is a churn-prediction metric. That's a real, interpretable signal (the scorer's signals include churn, so it SHOULD predict churn well — this tests whether the score's churn component is coherent). It's honest as long as the trigger is labeled.
+
+Actually, hold on. Let me reconsider — is this actually what the dream wants? Re-read DREAM.md next milestone:
+
+"Accumulate the first validation data. The infrastructure exists: auto_risk_snapshot records predictions, auto_validate_after_failure records outcomes. What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs. Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones. That's the first test of whether the sense organ perceives something real — whether the umwelt it creates corresponds to the territory."
+
+So the milestone is explicitly: make the recording machinery fire during evolve sessions. The snapshots now fire (evolve.sh #575). The outcome half (auto_validate_after_failure) fires only from watch-mode fix loops — which don't run in evolve sessions. So the cold-start blocker is real: outcomes never get recorded in the loop.
+
+Given evolve.sh is protected, the src/ side can't hook into the loop's git commit... except via the existing `arc risk snapshot` call! That IS the per-session hook. So extending `arc risk snapshot` to also validate the previous snapshot against the delta since then is exactly the right move — it's the only per-session hook available in src/.
+
+Semantic honesty: I'll have the task label the trigger "session_delta" and document that this measures "files touched between snapshots that were predicted" — a churn/fragility correlation, distinct from failure validation. The dream says "measure whether files the scorer flagged as high-risk actually failed more often" — the first data feed being churn-correlation is a reasonable step-1 (the scorer explicitly includes churn as a fragility signal, so a strong correlation is expected and validates the signal weighting; surprises are where the signal weightings are wrong).
+
+Hmm, wait. Actually there's an even simpler and MORE honest framing. What does the risk scorer predict? Fragility — "this file is likely to need attention / be implicated in future work." The validation question is "did files I flagged get implicated in subsequent work (changes/failures)?" Changed-between-snapshots is a legit operationalization of "implicated in subsequent work." It's not failure-only, but it's the loop's actual behavior. I'll frame the task to make the trigger label explicit so the data can be filtered honestly.
+
+Actually — let me simplify and be careful about scope. The task:
+
+**Task 01 (self-driven, dream): "Feed the risk meter's validation half from the per-session snapshot hook"**
+- File: src/commands_risk.rs (handle_risk_snapshot) — after writing snapshot, call a new helper
+- File: src/commands_risk_snapshots.rs — new pure helper `validate_previous_snapshot_against_git_delta(snapshot_path, validation_path)` that:
+  1. Parses all snapshots; if <2, no-op
+  2. Gets prev = second-to-last, cur hash = last
+  3. If hashes equal, no-op
+  4. `git diff --name-only prev_hash..HEAD` filtered to src/ files (reuse run_git? there's a git module)
+  5. Classify against prev.predicted → hits/surprises
+  6. Write validation event with trigger "session_delta" (distinct from "watch_failure")
+  7. Prints the 2-line summary
+- Tests in commands_risk_snapshots.rs: pure-function test with synthetic snapshot + synthetic git? Git diff calls are hard to unit test — keep the git part thin and test the classification/writing with a temp dir. Follow the existing test patterns (auto_validate_with_synthetic_snapshot exists — I can mirror it).
+
+Hmm, but wait: writing a git-diff-based validation inside `arc risk snapshot` means every snapshot call runs `git diff prev_hash..HEAD`. In the evolve loop that's fine (fast). For product users calling `/risk snapshot` manually, also fine.
+
+One concern: the existing `auto_validate_after_failure` prints to stderr; the snapshot path prints to stdout. The new validation in the snapshot path should print to stdout (consistent with snapshot output) — minor detail for the impl agent.
+
+Another concern: dedup. If evolve.sh runs `arc risk snapshot` and the git hash hasn't changed since the last snapshot, `write_risk_snapshot_to` has a dedup guard (last_snapshot_git_hash) — need to check whether it skips writing. If the snapshot is deduped (not written), we shouldn't validate either. The helper should check: only validate if a NEW snapshot was actually written. Actually the task can just check prev.hash != cur.hash before validating — but if the snapshot write was deduped, cur hash == last snapshot's hash... Let me check write_risk_snapshot_to's dedup logic.
+
+Let me look at lines 70-135.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 70,160p src/commands_risk_s… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Note: `write_risk_snapshot_to` doesn't dedup — the CLI `handle_risk_snapshot` path (which evolve.sh calls via `arc risk snapshot`) writes unconditionally! Only `auto_risk_snapshot` (the /commit path) dedups. So `arc risk snapshot` per session appends unconditionally (which is why there are 35 snapshots across sessions including duplicates?). Let me check for duplicate hashes in the snapshot file.
+
+Actually, let me check: git hashes in the 35 lines — how many unique?
+
+This matters for my planned validation: if snapshots get recorded twice for the same HEAD, the "diff between prev and cur" would be empty → no-op, fine. If consecutive sessions share a hash, validation skips. Good — the design handles it naturally via the hash inequality check.
+
+Now let me quickly verify:
+1. Unique hashes in the snapshot file
+2. Look at how `git diff` is invoked elsewhere (the git module: crate::git::run_git)
+
+Then I'll check the JOURNAL for what the human's fixes mean for the current session and finalize the plan. Actually I've already read the journal (auto-generated, all empty).
+
+Let me also check the accuracy report when there are no validations — what does `arc risk accuracy` print with 0 events? Let me look at handle_risk_accuracy.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (12 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1496,1545p src/commands_ris… ✓ (5ms)
+ ✓ (26ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good. `handle_risk_accuracy` with 0 validations prints the accuracy report (which "already explains what to do" per the comment). Let me check `format_accuracy_report` for the empty state to see if Task 03 (UX polish) is even needed. Let me look at format_accuracy_report in commands_risk_accuracy.rs.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.4s (2 ✓)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn format_accuracy_report… ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me see the full empty-state message to decide if Task 03 is worth it.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 122,140p src/commands_risk_… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 128,137p src/commands_risk_… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The empty-state message says: "Accuracy tracking starts automatically when watch commands fail / Run /risk snapshot first, then trigger a watch failure to begin collecting data." This is now stale/insufficient — with the new session_delta validation, the message should mention that per-session snapshots accumulate validation data automatically. This connects Task 01 and a small doc/UX touch-up.
+
+Now let me finalize my understanding of the situation and write the plan.
+
+**Situation summary:**
+- 10+ consecutive session failures (0/1 tasks reverted) caused by infrastructure: OpenCode rejected `developer` role → every request 400'd → agent never executed a tool call → loop committed nothing. The human maintainer fixed it in #12/#13 (SSE premature-close + developer-role compat), HEAD de9c49d, landed ~10:18Z today.
+- Build is green. No community issues today. No agent-self issues visible (gh token can't list issues).
+- Risk snapshots: 35 unique recorded (one per session, via evolve.sh #575). Risk validations: ZERO — the file doesn't exist. Dream milestone: accumulate ≥5 matched prediction-outcome pairs.
+- CLAUDE.md is stale: says auto_risk_snapshot "does NOT fire in the evolve loop" — but evolve.sh now calls `arc risk snapshot` every session.
+
+**Plan:**
+
+Task 01 (self-driven, dream — Kind: evolve): Feed the validation half from the per-session snapshot hook.
+- src/commands_risk_snapshots.rs: add pure-ish helper `validate_previous_snapshot(...)` + git-delta classification; wire into `handle_risk_snapshot` in src/commands_risk.rs.
+- After `write_risk_snapshot_to` succeeds, call the helper: load all snapshots, take prev (n-2) and cur (n-1); if both exist and hashes differ, `git diff --name-only prev_hash..HEAD` (need to check how run_git handles diff — it's restricted for destructive commands in tests but diff is read-only, fine); filter src/; classify against prev.predicted; write validation event with trigger "session_delta"; print summary.
+- Tests: mirror existing `auto_validate_with_synthetic_snapshot` — a pure classification helper test + a temp-dir end-to-end test that doesn't need real git (pass a synthetic changed-files list). Keep the git invocation in a thin wrapper.
+- Also update the empty-state accuracy message (src/commands_risk_accuracy.rs? that's a 3rd file — task limit is 3 files, OK).
+
+Hmm wait — actually, let me reconsider. The git diff invocation in the test environment: `crate::git::run_git` has a `#[cfg(test)]` destructive-command guard — diff is not destructive, so it's fine. But unit tests calling real git against the repo could be slow/flaky. The existing tests use temp dirs and avoid run_git where possible. I'll design: `validate_previous_snapshot_to(snapshot_path, validation_path, changed_files: &[String])` — pure classification (no git), and a thin caller `session_delta_validation()` that does the git diff. Tests target the pure function. 
+
+Actually, even simpler and cleaner: separate concerns.
+- Pure: `classify_delta(changed_src_files, predicted_set) -> (hits, surprises)` — actually auto_validate_after_failure_to already does the classification inline. I could extract a shared pure helper. But that changes existing behavior slightly... no, extraction is safe if behavior identical.
+
+Let me keep the task description specific but allow the impl agent some latitude:
+
+1. Extract/keep classification logic.
+2. New pub(crate) fn `validate_session_delta()` in commands_risk_snapshots.rs:
+   - read RISK_SNAPSHOT_PATH, parse all snapshots
+   - if <2 snapshots → no-op (return)
+   - prev = snapshots[n-2], last = snapshots[n-1]
+   - if prev.git_hash == last.git_hash or either is "unknown" → no-op (dedup guard)
+   - run `git diff --name-only prev.git_hash..HEAD` (via crate::git::run_git), filter to src/ files
+   - classify against prev.predicted → hits/surprises
+   - if both empty → no-op
+   - write_validation_event(validation_path, day, "session_delta", &hits, &surprises, accuracy_pct)
+   - print 2-3 line stdout summary
+3. Call it from `handle_risk_snapshot` in src/commands_risk.rs after a successful write.
+4. Update `format_accuracy_report` empty-state text in src/commands_risk_accuracy.rs to mention per-session auto-validation (optional but nice — 3rd file).
+5. Tests: temp-dir test that writes two synthetic snapshots with different git_hash, then calls a `validate_session_delta_to(snapshot_path, validation_path, changed_files)` variant (git injected), asserting a validation event line with trigger "session_delta" and correct hits/surprises. And no-op tests (<2 snapshots, same hash).
+
+Wait — but there's a subtlety: run_git in tests has the destructive guard; `git diff --name-only A..B` is read-only, fine. But in the unit test we want to inject changed files without real git. So the design: `fn validate_session_delta_to(snapshot_path, validation_path, changed_files: &[String])` where the caller fetches changed_files via git. Tests pass synthetic lists. 
+
+Hmm, but if the git diff is done by the caller in handle_risk_snapshot, then the caller needs the prev hash to compute the diff. So flow: `validate_session_delta()` reads snapshots → gets prev hash → runs git diff → calls `validate_session_delta_to(snapshot_path, validation_path, changed_files)` for the classification+write. The test can call the inner `_to` variant directly with synthetic changed files. And a test for `parse_all_snapshots`-based prev/cur selection logic — extract `previous_snapshot_hash(content) -> Option<String>` pure helper (returns the n-2 hash or None). That's testable.
+
+That's a clean, small, testable design. 2-3 files.
+
+Task 02 (evolve/doc): Fix stale CLAUDE.md claim.
+- CLAUDE.md currently says: "auto_risk_snapshot fires ONLY from arc's own /commit handler and (opt-in) on REPL exit under arc_RISK_AUTOSNAPSHOT=1 — it does NOT fire in the evolve loop, which commits with raw git commit, so the snapshot half of the prediction meter accumulates only through a human/harness invocation of `arc risk snapshot`."
+- Reality: evolve.sh records `arc risk snapshot` once per session (line ~2037-2043, "#575"), so the snapshot half DOES accumulate in the loop; and (after Task 01) each such call also validates the previous snapshot (session_delta).
+- Task: update the CLAUDE.md risk section to reflect reality: snapshot fires per evolve session via `arc risk snapshot` (#575); validation fires from watch-failure, /commit, and (new) per-session session_delta. Files: CLAUDE.md only. Kind: evolve (docs about arc's loop). This directly implements my Day-130 lesson (false past-tense claim in context file).
+- Also mention `arc risk accuracy` empty-state change if Task 01 changed it.
+
+Task 03 (product): something for real users. No community issues. What product friction exists? Hmm. Let me think... 
+
+Actually — wait. Let me reconsider priorities. The trajectory is 10 straight failures. The MOST important thing is that tasks actually land. Task 01 (dream) + Task 02 (doc) are both small and near-guaranteed. A third task should also be small and safe.
+
+Product candidates (must be product-safe for all project types):
+- The `arc risk accuracy` empty-state message is product-visible — covered by Task 01's file list.
+- Something else? Let me check the risk predict command output quality, or `/status`... 
+
+Actually, let me think about what real users would benefit from most right now. Given the loop has been dead for 10 sessions, the "product" is actually in good shape (the human fixed the real bugs). A good third task might be:
+
+**"Honest empty-state for risk accuracy across the CLI"**: make `arc risk accuracy` (and the ambient `/status` summary) aware that snapshots are being recorded but validations haven't accumulated yet — i.e., when validations==0 but snapshots>0, print "N snapshots recorded — validation events will accumulate per session / watch failures". This gives visibility into the meter's warm-up state, which is exactly the dream's "cold start" problem made legible. But that overlaps with Task 01's accuracy-message change... I could fold it into Task 01 (3 files max: commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs — exactly 3).
+
+Alternatively, a genuinely separate product task... Let me look for small, real rough edges. Let me check `arc status` / `/status` — the accuracy summary shows in /status when there are ≥2 validations; with 0 it shows nothing (clean). Fine.
+
+What about the `risk predict` narrative? Let me look at format_prediction_report quickly... Actually, let me not over-explore. Let me think about what's most valuable:
+
+Given no community issues and a fresh infrastructure fix, maybe the strongest third task is ALSO self-driven but different in kind: **a small product-facing robustness fix.** Let me look at the OpenCode fix to see if there are adjacent provider-compat gaps (e.g., the fallback retry logic in agent_builder.rs — try_switch_to_fallback). The human fixed two provider issues; maybe there's an adjacent one in the fallback path that's cheap. But without being able to test against real providers, that's risky to plan.
+
+Alternative: check whether there's a known rough edge in something like `!` bang command, or the `arc status` output... I can't easily discover product bugs without deep investigation, and the instruction says keep investigation brief.
+
+Hmm — what about the `help_data.rs` / help text: does the `/risk` help mention `snapshot`/`validate` subcommands? Let me check quickly whether help text documents the new session_delta behavior. That could be folded into Task 02 (docs).
+
+Let me also reconsider: maybe Task 03 should be the CLAUDE.md + docs update, and Task 02 something else. Actually:
+
+- Task 01: dream — validation half feed (src, evolve-kind)
+- Task 02: stale CLAUDE.md claim fix (doc, evolve-kind)
+- Task 03: product — what? 
+
+One more idea: the risk snapshot's `signals` — the snapshot records top-10. The `format_signal_breakdown` requires validations... fine.
+
+Let me check if there's anything in the codebase that's visibly broken right now — e.g., `cargo test` passes? Let me run the tests to confirm the repo is truly green (this also informs whether impl agents will succeed).
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -8 ✓ (1m 4s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All 88 tests pass. The repo is green.
+
+Now let me also quickly check `format_prediction_report` and the risk "predict" command output — is there a product-facing gap there? Actually, let me limit investigation. I have enough.
+
+Let me also check the git status of the tools/gasp-emit/Cargo.lock modification — it's uncommitted but not mine; I should leave it alone (don't sweep protected/unrelated changes).
+
+One more consideration for Task 01: the CLAUDE.md mentions `dispatch_sub.rs` routes `arc risk [snapshot|validate|history|predict|accuracy|effectiveness|--all]`. The new session_delta validation happens inside the `snapshot` subcommand — no dispatch changes needed. Good, Task 01 touches exactly 3 files: commands_risk_snapshots.rs (helper + tests), commands_risk.rs (call site), commands_risk_accuracy.rs (empty-state message). 
+
+Let me now also decide Task 03. Options ranked:
+1. Product task — risk accuracy empty-state already folded into 01.
+2. A separate small product task with real user value.
+
+Let me think about what a real user of arc (not the loop) experiences. The product is a CLI coding agent. What's a plausible small gap? From the CLAUDE.md I saw: `docs/src/` exists for the website. Recent human fixes were provider-related. 
+
+Honestly, with no community issues and a just-fixed infrastructure, the wisest third task is one more piece of the dream or loop health — but variety matters (my Day-134 lesson: a clean-firing reflex biases task selection toward its own shape; deliberately pick off-shape). But the priority here is LANDING WORK after 10 failures. Small + safe wins.
+
+Third task idea: **`/risk history` accuracy trend across snapshots** — there's already `handle_risk_history` ("show accuracy trend across all past snapshots"). With 35 snapshots and 0 validations, what does history show? It shows per-snapshot top-10 and maybe computes commit-based validation... let me check lines 2040-2138. Actually the comment said "no commits between these snapshots" — the history command might already do git-diff validation per snapshot pair! If so, Task 01 partially duplicates existing machinery. Let me read it.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 2040,2140p src/commands_ris… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Excellent — this is very informative! `handle_risk_history` ALREADY does git-log-based validation per snapshot pair (via `git log from..to --name-only` → `classify_broke_files` → `compute_validation`). So the machinery to validate snapshots against subsequent git history exists in the `/risk history` path. It just doesn't PERSIST those validations to `.arc/risk_validations.jsonl` — it only displays them.
+
+So Task 01 gets better: instead of building new git-diff validation from scratch, the impl agent can **persist** what `/risk history` already computes — write validation events to RISK_VALIDATION_PATH when `arc risk snapshot` runs (or as part of history). But careful: `classify_broke_files` semantics — let me check what "broke_files" means. It likely extracts src files from the git log entries. Let me look at compute_validation and classify_broke_files and parse_git_log_name_only.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_git_log_name_onl… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1709,1840p src/commands_ris… ✓ (4ms)
+
+
