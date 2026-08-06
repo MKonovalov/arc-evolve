@@ -120,6 +120,10 @@ fi
 echo "→ Checking build..."
 cargo build --quiet
 cargo test --quiet
+# The harness's own cargo run may regenerate tools/gasp-emit/Cargo.lock (a
+# protected file). Restore it so the tree starts clean and the agent's later
+# commit can't sweep a harness-induced protected-file change.
+git checkout -- tools/gasp-emit/ 2>/dev/null || true
 arc_BIN="./target/debug/arc"
 echo "  Build OK."
 gasp_session_start "$DAY"
@@ -956,6 +960,15 @@ echo ""
 #    trajectory/skill-evolve mining.
 safety_commit() {
     local msg="$1" staged_protected commit_out
+    # Discard harness-induced dirt on protected files (e.g. the harness's own
+    # `cargo build/test` regenerating tools/gasp-emit/Cargo.lock) BEFORE staging,
+    # so `git add -A` only stages the agent's real work. Without this, a protected
+    # file modified by the harness's own cargo run gets swept into the commit and
+    # the guard below aborts the ENTIRE commit — throwing away legitimate src/ work.
+    git checkout -- .github/workflows/ IDENTITY.md PERSONALITY.md \
+        scripts/evolve.sh scripts/gasp_shim.sh tools/gasp-emit/ \
+        scripts/format_issues.py scripts/build_site.py \
+        skills/self-assess/ skills/evolve/ skills/communicate/ skills/research/ 2>/dev/null || true
     git add -A 2>/dev/null || true
     staged_protected=$(git diff --cached --name-only -- \
         .github/workflows/ IDENTITY.md PERSONALITY.md \
