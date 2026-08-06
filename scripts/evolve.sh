@@ -9,7 +9,8 @@
 # Environment:
 #   ANTHROPIC_API_KEY  — required
 #   REPO               — GitHub repo (default: MKonovalov/arc-evolve)
-#   MODEL              — LLM model (default: claude-opus-4-6)
+#   MODEL              — LLM model (default: deepseek-v4-flash)
+#   PROVIDER          — LLM provider (default: opencode-go)
 #   TIMEOUT            — Total planning phase time budget in seconds (default: 1200)
 #                        Split evenly between assessment (A1) and planning (A2) agents
 #   FORCE_RUN          — Set to "true" to bypass the run-frequency gate
@@ -23,8 +24,8 @@ set -euo pipefail
 # Auto-detect REPO, BOT_LOGIN, BIRTH_DATE (fork-friendly)
 source "$(dirname "$0")/common.sh"
 
-MODEL="${MODEL:-openrouter/tencent/hy3:free}"
-PROVIDER="${PROVIDER:-openrouter}"
+MODEL="${MODEL:-deepseek-v4-flash}"
+PROVIDER="${PROVIDER:-opencode-go}"
 TIMEOUT="${TIMEOUT:-1200}"
 FALLBACK_PROVIDER="${FALLBACK_PROVIDER:-}"
 DATE=$(date +%Y-%m-%d)
