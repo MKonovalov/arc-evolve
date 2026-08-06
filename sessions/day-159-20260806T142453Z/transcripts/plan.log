@@ -1,0 +1,601 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand my situation. I'm arc, the self-evolving coding agent. Today is Day 159. I need to produce a session plan.
+
+Key observations:
+1. There's NO ASSESSMENT AVAILABLE, so I need to read source files myself.
+2. My trajectory shows a concerning pattern: 8 of the last 10 sessions had tasks reverted (0/1 tasks reverted). This is a critical signal — my tasks keep failing. The trajectory says "0 of last ~10 sessions had reverts" which is contradictory (reverts count shows 0 but sessions show "1 task(s) reverted"). Actually the "Reverts in window" says 0, but the session outcomes say tasks were reverted. That's odd — maybe the revert detection regex differs. But regardless, many sessions show "tasks 0/1 ⚠️ — 1 task(s) reverted".
+3. Two recent sessions today (13:55 and 14:04) succeeded: tasks 1/1 ✅.
+4. My dream: accumulate the first validation data (≥5 matched prediction-outcome pairs for the risk scorer).
+5. ISSUES_TODAY.md — I need to read it.
+
+Let me start by gathering the required context:
+- Read all .rs files under src/ — note module structure and recent changes (but that's a lot; I should be brief)
+- journals/JOURNAL.md — last 5 entries
+- git log --oneline -10
+- ISSUES_TODAY.md
+- DREAM.md
+- Check recent reverts to understand why tasks keep getting reverted
+
+Wait, the instructions say "Do NOT read source code files" unless "NO ASSESSMENT AVAILABLE" — which is the case here. So I should read source. But keep it brief.
+
+Let me start with the essential reads. First, let me look at the state of things: git log, journal, issues today, dream, and recent reverts.
+
+Given the high revert rate, I need to understand WHY tasks are being reverted. Let me check git log and the journal.
+
+Let me make parallel calls to gather context.
+────────────────────────────────────────────────────────────────────────────────
+
+I'll gather context first — there's no assessment available, so I need to read source myself. Let me start with the essentials.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -15 && echo "---…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_plan/ 2>/dev/null; ls I… ✓ (8ms)
+ ✓ (14ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. No community issues today. Let me look at the journal's last entries, DREAM.md, and understand the revert situation. There are several reverts today. Let me look at the recent commit history and journal.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.8s (2 ✓)
+
+No community issues today. Let me check the journal and understand the recent revert pattern.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -120 journals/JOURNAL.md  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat DREAM.md ✓ (5ms)
+ ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Very important observations:
+
+1. The journal is full of auto-generated "Session commits: no commits made." entries — many consecutive sessions with no commits. This is a critical signal. Looking at the git log, I see today's commits are mostly "Day 159: bump skill-evolve counter" and "session wrap-up" commits. Also there are some fix commits:
+   - `4455645 fix: stop tracking tools/gasp-emit/Cargo.lock — was reverting every evolve commit (#15)`
+   - `63dac27 fix(evolve): harness's own cargo dirties protected Cargo.lock, killing real commits (#14)`
+
+So there's a recurring pattern of reverts — and interestingly, these two fixes suggest the harness itself (running `cargo build`/`cargo test` as part of the safety checks) was dirtying Cargo.lock which is a protected file, causing commits to be reverted. That's why tasks keep getting reverted: the harness's own build was mutating protected Cargo.lock.
+
+Wait, but these fixes (#14, #15) landed today. Let me look at those commits to understand.
+
+Also the "Reverts in window: 0 of last ~10 sessions had reverts" in trajectory contradicts "tasks 0/1 ⚠️ — 1 task(s) reverted" — probably a bug in the trajectory extractor where "reverted" sessions show as having reverts but the window count says 0. Hmm.
+
+Let me investigate:
+1. What are the session wrap-up commits doing?
+2. What happened in recent sessions that got reverted?
+3. The trajectory says sessions show "tasks 0/1 ⚠️ — 1 task(s) reverted" — need to understand what's failing.
+
+Let me check the recent commit diffs and the audit log.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 5.6s (2 ✓)
+
+The journal shows many "no commits made" sessions — and two fix commits today about Cargo.lock reverting commits. Let me investigate the revert pattern.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 4455645 --stat && echo "=…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --all --oneline -30 | head… ✓ (12ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the situation much better. The maintainer (Mikhail Konovalov / @MKonovalov) stepped in with several fixes:
+
+1. `fix: stop tracking tools/gasp-emit/Cargo.lock — was reverting every evolve commit (#15)` — this was the ROOT CAUSE of all the reverts: the harness's own `cargo build` regenerated `tools/gasp-emit/Cargo.lock` (a protected, tracked file), which then got swept into `git add -A` by safety_commit, the protected-file guard aborted the commit, and the agent's real src/ work got thrown away. This is why tasks_succeeded stayed 0 for 8+ sessions.
+
+2. `fix(evolve): harness's own cargo dirties protected Cargo.lock, killing real commits (#14)` — same root cause, fixed in evolve.sh.
+
+3. `fix(agent_builder): OpenCode rejects developer role (400)` — provider fix.
+
+4. `fix(deps): bump arcagent to b11de796 (SSE premature-close fix)` — provider fix.
+
+So the reverts were NOT caused by bad tasks — they were caused by a harness bug where legitimate agent work was being thrown away. The two most recent sessions (13:55, 14:04) succeeded 1/1 — the fixes are landing.
+
+Also there's `4c9ca5f fix: stop tracking tools/gasp-emit/Cargo.lock (was killing evolve commits)` — a separate commit with the same message.
+
+So the situation today: the harness was fixed, the last two sessions succeeded. My job now: write a good session plan.
+
+Key considerations:
+1. There are no community issues today.
+2. My dream milestone: accumulate ≥5 matched prediction-outcome pairs for the risk scorer validation. The infrastructure exists but has zero data points. The dream says "automate the feed; don't add more sensors" (from self-wisdom Day 129). The dream mentions the validation loop exists in code but has zero data points — `risk_validations.jsonl` doesn't exist yet.
+
+Wait — the DREAM.md says "the `risk_validations.jsonl` file doesn't exist yet" but CLAUDE.md mentions `RISK_VALIDATION_PATH` in commands_risk_snapshots.rs. Let me check the current state of the risk infrastructure.
+
+3. Given the revert history, tasks should be SMALL and verifiable. The instructions say: "If a task has been reverted before (check agent-self issues above), make it SMALLER than last time."
+
+4. There's a discrepancy in the trajectory: "Reverts in window: 0 of last ~10 sessions had reverts" but sessions show reverted. This might be a trajectory extractor bug — the revert detection regex. Actually wait, looking more carefully: "Reverts in window / 0 of last ~10 sessions had reverts." But the sessions show "tasks 0/1 ⚠️ — 1 task(s) reverted". Hmm, the revert detection might look for revert commits (git revert or reset) and there were none — the reverts happened as part of the harness's own handling (the task commit was aborted, not reverted via git revert). So "reverts in window" counts explicit revert commits, while the "task reverted" is from outcome.json. That's a possible inconsistency but not critical.
+
+Let me now think about what to work on.
+
+First, let me verify the current state of the risk snapshot/validation infrastructure to understand the dream milestone better. Also let me check the open issues for agent-self and help-wanted.
+
+Let me check:
+- gh issue list --state open (to see what's open)
+- The risk infrastructure code
+- What state files exist (.arc/risk_snapshots.jsonl, etc.)
+
+Also since NO ASSESSMENT AVAILABLE, I need to quickly read source files to understand module structure. Let me do a quick scan.
+
+Let me check the open issues first.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 9.8s (2 ✓)
+
+Now I understand the root cause of the revert streak: the harness's own `cargo build` regenerated the tracked `tools/gasp-emit/Cargo.lock`, which swept into `git add -A`, tripped the protected-file guard, and threw away real agent work. The maintainer fixed it today (#14, #15), and the last two sessions succeeded 1/1. Let me check open issues and the risk-snapshot state for my dream milestone.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && gh issue list --state open --limit…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/ .yoyo/ 2>/dev/null; e… ✓ (11ms)
+ ✓ (821ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — `gh issue list` returned nothing. Maybe gh isn't authenticated or there are no open issues. Let me verify.
+
+Also I see the risk snapshots are accumulating (41 lines in .arc, 9 in .yoyo). The snapshots ARE being recorded — the harness runs `arc risk snapshot` apparently. Wait, CLAUDE.md says `auto_risk_snapshot` fires only from arc's own `/commit` handler or REPL exit under env var. But the snapshots at 12:57, 13:55, 14:04 are being recorded each session — so something is recording them. Actually looking at the git log, there are no "risk snapshot" commits visible... let me check if .arc/risk_snapshots.jsonl is tracked.
+
+Actually the important thing: my dream milestone is to accumulate ≥5 matched prediction-outcome pairs. The snapshots are being recorded (41 lines). Now I need the validation half — `risk_validations.jsonl`. Let me check whether that file exists and whether `auto_validate_after_failure` fires.
+
+Let me check:
+1. Does .arc/risk_validations.jsonl exist?
+2. Is auto_validate_after_failure wired into anything? CLAUDE.md says it fires... let me check.
+3. Is `arc risk validate` CLI-callable?
+
+The dream says "Automate the feed; don't add more sensors" (Day 129 lesson). The next milestone: accumulate ≥5 matched prediction-outcome pairs. The validation loop exists in code but has zero data points.
+
+So a dream-advancing task could be: wire the validation half to actually fire — e.g., `auto_validate_after_failure` should fire when a session has failures. Let me look at the code to see the current wiring.
+
+Let me check the relevant source files quickly. Since NO ASSESSMENT AVAILABLE, I should scan source. Let me look at commands_risk_snapshots.rs and where auto_validate_after_failure is called.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.8s (2 ✓)
+
+The risk snapshots ARE accumulating (41 lines, one per session). Now let me check the validation half of the dream loop — where `auto_validate_after_failure` is wired and whether `risk_validations.jsonl` exists.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/risk_validations.jsonl…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && gh auth status 2>&1 | head -5; ech… ✓ (24ms)
+ ✓ (866ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting findings:
+
+1. `.arc/risk_validations.jsonl` doesn't exist — the validation half has zero data. The dream milestone is exactly this: accumulate validation data.
+
+2. `auto_validate_after_failure` is wired into `src/watch.rs` (3 call sites) — it fires after watch-mode fix loops. And `dispatch_sub.rs:1050` mentions the meter stays starved.
+
+3. `gh issue list` fails with "Resource not accessible by personal access token (repository.issues)" — the token doesn't have issues read access apparently. Hmm, that's a permissions issue. ISSUES_TODAY.md says "No community issues today." So no issues to respond to.
+
+Let me look at the watch.rs call sites and the commands_risk_snapshots.rs to understand the validation wiring. The dream says the validation loop "exists in code but has zero data points." auto_validate_after_failure fires in watch mode after failures. But watch mode... is the watch cycle running in the evolve loop? Let me check.
+
+Let me read the relevant parts of commands_risk_snapshots.rs and watch.rs to understand how validation fires.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.8s (2 ✓)
+
+The validation file doesn't exist — zero data points, exactly what my dream milestone targets. Let me read the validation wiring to understand how it fires.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,120p' src/commands_risk_… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the validation side — `auto_validate_after_failure` and how validation entries get written. Let me read further in the file.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_after_failu… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '155,300p' src/commands_ris… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the validation wiring:
+
+- `auto_validate_after_failure` fires from `src/watch.rs` (3 call sites) — after watch-mode fix loops, when failures happen (or regardless?). It loads the last snapshot, classifies changed src/ files as hits vs surprises, writes a validation event with `trigger: "watch_failure"`.
+
+Key observation: `auto_validate_after_failure` is called in watch.rs at lines 1367, 1405, 1416. Let me check what those contexts are — whether they fire on failure or always. The name says "after_failure" but let me check.
+
+The problem with the current wiring for the dream milestone: validation only fires when watch mode runs AND there are changed files AND snapshots exist. In the evolve loop, does watch mode run? The watch cycle runs after prompts. Let me check where these watch.rs call sites fire.
+
+Let me look at watch.rs around those lines.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1340,1430p' src/watch.rs ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the validation wiring completely:
+
+- `auto_validate_after_failure` fires in watch.rs at the end of the watch cycle — both on failure and on success ("Validate risk predictions even on success"). It's only reached if the watch cycle runs at all (`should_run_watch_after_prompt` gate: skipped entirely when the prompt changed zero files).
+
+So validation events fire when:
+1. A prompt runs
+2. Files changed (≥1)
+3. The watch cycle runs (watch enabled, auto-detect works for the project)
+4. The most recent snapshot has `predicted` files
+
+In the evolve loop, tasks are executed... does the evolve loop use watch mode? The evolve loop runs `cargo build` and `cargo test` via the harness. The agent in Phase B runs prompts — with auto-watch? Auto-watch is gated by project-type detection and `should_run_watch_after_prompt`.
+
+The key insight: validation data is NOT accumulating (`.arc/risk_validations.jsonl` doesn't exist), while snapshots ARE (41 lines). So the validation half never fires. Why?
+
+Possible reasons:
+1. The evolve loop doesn't run the watch cycle (watch only fires in interactive REPL / prompt mode with auto-watch enabled).
+2. The gate `should_run_watch_after_prompt` returns false in evolve mode.
+3. The changed files never include src/ files.
+
+Actually wait — the two successful sessions today (13:55, 14:04) made commits. Let me check what those commits contained and whether validation would have fired.
+
+Actually, let me check what the audit.jsonl says about watch cycles. Also let me check how the evolve loop invokes the agent — does it use prompt mode with watch?
+
+Actually, let me focus. My job is PLANNING. The dream milestone: accumulate ≥5 matched prediction-outcome pairs. The infrastructure exists but has zero validation data points. The snapshots are flowing (the harness records them — actually who records snapshots? Let me check: 41 lines in .arc/risk_snapshots.jsonl with the most recent at 14:04 (hash 2699140). CLAUDE.md says auto_risk_snapshot fires only from `/commit` or REPL exit under env var. But there's also the "harness or human to record daily risk snapshots" via `arc risk snapshot`. And `dispatch_sub.rs:1050` mentions something about the meter staying starved.
+
+Hmm — 41 snapshots accumulated. Something IS recording them. Let me check scripts/evolve.sh for `risk snapshot`.
+
+Actually wait — I recall the CLAUDE.md line: "making the risk subsystem callable from any non-interactive context (the prerequisite for the harness or a human to record daily risk snapshots where the DREAM.md measurement data actually accumulates)". So the harness (evolve.sh) probably calls `arc risk snapshot` now. Let me verify.
+
+Let me check:
+1. scripts/evolve.sh for risk snapshot calls
+2. dispatch_sub.rs around line 1050 (the starved meter comment)
+3. How watch fires in the evolve loop
+
+Then decide the dream task.
+
+Given all this, a strong dream-advancing task: make the validation half fire in the evolve loop — since snapshots fire via the harness (`arc risk snapshot`), the validation should fire too (e.g., `arc risk validate` at session end comparing last snapshot against files actually changed in this session's commits). Let me look at what `arc risk validate` does and whether the harness calls it.
+────────────────────────────────────────────────────────────────────────────────
+
+Now let me check how the harness records snapshots and whether it calls validate — this determines the dream task.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk snapshot\|risk valid… ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+So:
+- `scripts/evolve.sh` line 2050-2056: the harness records one risk snapshot per session via `arc risk snapshot` (this explains the 41 snapshot lines).
+- The validation half (`arc risk validate`) is CLI-callable but the harness doesn't call it.
+
+So my dream milestone task is clear: wire the validation half into the evolve loop so that each session with changed src/ files produces a validation event (comparing the last snapshot's predicted files against files actually changed this session). That would start accumulating the ≥5 matched prediction-outcome pairs.
+
+But wait — there's a subtlety. The validation should compare a *prediction made before the change* against *the outcome (changed files that then failed)*. The current `auto_validate_after_failure` in watch.rs fires immediately after a watch fix loop: it compares the most recent snapshot (the session's starting snapshot, recorded by the harness) against files changed in that prompt's watch cycle. That's the right semantic: did the risky files (predicted at session start) actually need fixing (changed during watch)?
+
+Hmm, but actually there's a semantic issue: the "prediction" (top 10 risk files) vs "changed files during this prompt" — a hit means a changed file was predicted risky. The accuracy metric is hits/total_changed. That's a reasonable first validation signal.
+
+For the evolve loop, the natural wiring: after the impl agent's task completes (with commits), run `arc risk validate` — which would compare last snapshot vs the files changed in this session. But does `arc risk validate` write a validation event, or just display? Let me check the commands_risk.rs handle_risk validate path.
+
+Let me look at how `/risk validate` works and whether it writes to risk_validations.jsonl.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "\"validate\"\|=> .*valida…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2040,2075p' scripts/evolve… ✓ (4ms)
+ ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture:
+
+1. The harness records one snapshot per session via `arc risk snapshot` at session end (before wrap-up commit).
+2. The validation half: `arc risk validate` exists in CLI and compares snapshots against actual breakage. Let me look at what `handle_risk_validate` does (line 2138). It validates "compare past predictions against actual breakage" — let me read it to understand when it writes.
+
+Key question for the dream task: how to get ≥5 matched prediction-outcome pairs. Two options:
+- (a) Wire the harness to call `arc risk validate` at session end (like it calls `arc risk snapshot`). But validate needs commits between snapshots — and `handle_risk_validate` only records when there's something to validate.
+- (b) The watch-mode `auto_validate_after_failure` fires during prompts — but in the evolve loop, does the watch cycle run? Let me check whether Phase B agent uses watch.
+
+Let me read handle_risk_validate to see its conditions.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.8s (2 ✓)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2138,2260p' src/commands_r… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I fully understand the situation:
+
+**Snapshot half**: The harness records one snapshot per session (`arc risk snapshot` at session end). ✓ Accumulating (41 lines).
+
+**Validation half**: Two paths exist:
+1. `handle_risk_validate` (CLI `/risk validate`): loads last snapshot, finds commits since snapshot, classifies which changed files were predicted (hits) vs not (surprises) — where "broke" is defined via `classify_broke_files`. Writes a validation event if hits/surprises non-empty.
+2. `auto_validate_after_failure` (watch mode): fires during watch fix loops.
+
+The validation file has zero data points because:
+- The harness records snapshots but never runs `arc risk validate`.
+- Watch mode may not run in the evolve loop (or changed files don't include src/).
+
+Wait — actually, look at the timing. The harness records `arc risk snapshot` at the END of the session (after tasks). So the snapshot recorded at end of session N is for git_hash of session N's wrap-up. The NEXT session's `arc risk validate` (if wired) would compare commits between that hash and current HEAD. That's the intended flow: session N+1 validates session N's predictions.
+
+The natural dream task: **wire `arc risk validate` into evolve.sh** right after the risk snapshot feed (or before it, at session start, validating the previous session's snapshot against the commits made since). Actually the semantics: snapshot at end of session N records predictions for hash H_N. Then session N+1 makes commits. At the end of session N+1 (or start), `arc risk validate` compares H_N..HEAD commits and writes a validation event. 
+
+But wait — there's a subtlety: `arc risk validate` validates the MOST RECENT snapshot. If the harness records a snapshot at the end of each session, then at the end of session N+1 the most recent snapshot is the one just recorded (H_{N+1}), and there are no commits since H_{N+1} → "nothing to validate yet". So the harness would need to run `arc risk validate` BEFORE recording the new snapshot.
+
+Actually the flow should be: at session end:
+1. `arc risk validate` — validates the previous session's snapshot (H_{N-1}) against commits since then (the work done this session). Writes a validation event.
+2. `arc risk snapshot` — records today's predictions for H_N.
+3. Commit wrap-up.
+
+That would produce one validation event per session that changed src/ files. 
+
+But hold on — does the harness have a `risk validate` CLI path that works non-interactively? Yes: `arc risk validate` (dispatch_sub routes to /risk validate). And there are tests locking that contract (`test_build_risk_input_validate_contract`).
+
+But the risk: adding harness wiring (evolve.sh) is an evolve-kind task, touching scripts/evolve.sh which is a PROTECTED file (Safety Rules: "Never modify ... scripts/evolve.sh"). Hmm! The safety rules say never modify scripts/evolve.sh. But the maintainer himself modified it today (fixes #14/#15). The rule exists for the agent. So I can't modify evolve.sh myself... but the harness is evolving and the maintainer edits it. Can I create an agent-help-wanted issue? That seems heavy for this.
+
+Alternative: make validation fire from within the arc binary itself at the right time — e.g., have `arc risk snapshot` (the CLI path the harness already calls) ALSO run a validation pass first: "before recording a new snapshot, validate the previous snapshot against commits since it". That's elegant: the harness already calls `arc risk snapshot` once per session; if that call first validates the prior snapshot, then each session with changes produces a validation event — no harness change needed, no protected-file touch.
+
+Let me check `handle_risk_snapshot` (line 1255) to see if it could trigger validation first. Actually there might already be a comment about that. Let me look.
+
+Actually, let me reconsider. There's also the option of validating at the start of `arc risk snapshot`: the CLI `arc risk snapshot` records the CURRENT state as predictions. If it validates BEFORE recording (using the last snapshot as prediction and commits since as outcome), then:
+- Session N end: snapshot for H_N recorded.
+- Session N+1 end: `arc risk snapshot` called → first validates H_N snapshot vs H_N..HEAD (the session N+1 commits) → writes validation event; then records new snapshot for H_{N+1}.
+
+This gives one validation event per session with src/ changes. The "prediction-outcome pairs" accumulate. This is exactly the dream milestone: "Automate the feed; don't add more sensors."
+
+And the semantic question of what "failure/breakage" means: `classify_broke_files` — let me check what it does. It's about files that were "broke" — changed in commits that were later reverted? Let me check. Actually the watch-mode validation uses "files changed during watch fix loop" as the outcome (files that needed fixing). The CLI validate uses commits-since-snapshot as the outcome. Let me check `classify_broke_files`.
+
+Actually, let me look at what "broke_files" means in the CLI path.
+────────────────────────────────────────────────────────────────────────────────
+
+Let me check `handle_risk_snapshot` and `classify_broke_files` to understand the validation semantics and whether snapshot could trigger validate-first.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1255,1330p' src/commands_r… ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture of the dream milestone. The task is clear:
+
+**Dream task**: Make the validation half of the risk-meter fire automatically in the evolve loop. The harness already calls `arc risk snapshot` at session end. The cleanest agent-side fix (no protected-file changes): `handle_risk_snapshot` should first run a validation pass — validate the most recent existing snapshot against commits since it (the previous session's work), writing a validation event — then record the new snapshot. This way each session produces at most one validation event, and the ≥5 matched pairs accumulate within ~5 sessions.
+
+But wait — there's a subtlety. `classify_broke_files` — let me check what it considers "broke". Let me read it. If "broke" = files in commits that were reverted (from revert history), then the CLI validate path only counts files whose commits were reverted — that's a narrow definition of "failure". Let me check.
+
+Actually the watch-mode `auto_validate_after_failure` uses "changed files" as the outcome (files that changed during the watch fix loop — i.e., files that needed fixing to make tests pass). The CLI path uses `classify_broke_files` which might use revert history.
+
+Let me read those functions.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1709,1840p' src/commands_r… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I fully understand the validation semantics:
+
+- `classify_broke_files` — a file "broke" if it appeared in a commit whose message contains "revert" or "fix". The `compute_validation` compares the top-10 predicted files against the set of "broke" files. Hits = predicted files that broke; surprises = broke files not predicted.
+
+So the CLI validate path has a decent semantic: did the risky files actually need fixing (appear in fix/revert commits)?
+
+The watch-mode path uses "files changed during the watch fix loop" as outcome — files that needed to be changed to fix failing tests. Also a reasonable semantic.
+
+Now, the dream task design. The cleanest agent-side approach (touching only src/ files, not the protected evolve.sh):
+
+**Task: `arc risk snapshot` validates the previous snapshot first.** When the harness calls `arc risk snapshot` at session end, before recording the new snapshot, it runs a validation pass: load the most recent snapshot (the previous session's), find commits since that snapshot's git_hash, classify broke files, compute hits/surprises, and write a validation event. Then record the new snapshot. This accumulates ~1 validation event per session with fix/revert commits.
+
+Wait, but there's an issue: `handle_risk_validate` already does all of this. The simplest change: in `handle_risk_snapshot`, before writing the new snapshot, invoke the validation logic (extract a shared `validate_against_commits()` function from `handle_risk_validate`, call it from both). Then when the harness calls `arc risk snapshot`, validation events flow automatically.
+
+Semantics check: snapshot for H_N recorded at end of session N. Session N+1 makes commits (with "fix"/"revert" messages typically — impl commits like "Day 159: ..." might not contain "fix"). Hmm — the broke classification requires "revert" or "fix" in commit message. Evolve commits are often "Day N: task title" — the title might contain "fix" sometimes. Hmm, that could produce zero broke files most sessions → zero validation events (the write only happens if hits or surprises non-empty).
+
+That's a problem: with the "broke = fix/revert commits" definition, the CLI path only fires when a session had fix/revert commits. Given the last two sessions succeeded 1/1 with no reverts, and a revert streak before... hmm.
+
+Actually wait — the watch-mode path has a different semantic: files changed during the watch fix loop. In the evolve loop, Phase B agents run tasks. Do they trigger watch cycles? The watch cycle is skipped when a prompt changes zero files. Let me think about what the evolve impl agent does: it edits src/, runs cargo build/test via its own tools (bash), and commits. The watch-mode auto-fix loop is part of the prompt pipeline — it runs after prompts in the REPL/CLI when auto-watch is on. In the evolve loop, the agent runs `arc` prompts? No — the evolve loop runs agents via the arcagent library directly (run_agent_with_fallback), not via the arc CLI with auto-watch. So watch-mode validation never fires in the evolve loop.
+
+So the only path that can fire in the evolve loop is the CLI `arc risk validate` (via harness call) or the snapshot-triggered validation (my proposal). But the "broke = fix/revert commit" semantic is too narrow — it requires commit messages containing "fix" or "revert".
+
+Hmm. Let me reconsider. What's the actual dream? "Measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones." The outcome measure should be: did a high-risk file need fixing (was changed in response to a failure / appeared in a fix or revert commit / was changed during a watch fix loop)?
+
+Alternative outcome definition for the evolve loop: a file "needed attention" if it was changed in a commit that... hmm, but ALL task commits change files. Every session changes some src/ files. If outcome = "changed files", then hits/surprises accumulate every session regardless of fix/revert semantics. But then "predicted files that were changed" — the accuracy metric would measure "did the agent touch the risky files", which is a different (weaker) signal: agents often touch whatever files the task requires, not necessarily the risky ones. Actually it does measure something: are the top-10 risk files the ones that actually get worked on? Not exactly "failure" but a proxy for "attention".
+
+Hmm, but the current `handle_risk_validate`'s semantic (broke = fix/revert commits) is the designed one. The question is whether to broaden it.
+
+Let me step back and think about what task to actually propose. The dream says: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs." The infrastructure exists; it just never fires in the loop.
+
+The minimal, smallest, verifiable task that advances the dream: **make `arc risk snapshot` (the harness's existing per-session call) also validate the previous snapshot against commits since it** — reusing the existing validate logic. This is a small change in src/commands_risk.rs:
+1. Extract the validation core from `handle_risk_validate` into a shared helper (e.g., `validate_last_snapshot_against_commits() -> Option<ValidationResult>` that also writes the event), or simply have `handle_risk_snapshot` call the same internal function.
+2. Call it at the top of `handle_risk_snapshot` before writing the new snapshot.
+3. Add a unit test.
+
+Wait, but there's a subtlety about ordering: the harness runs `arc risk snapshot` at session END, then commits wrap-up. So at session N+1 end, the last snapshot is H_N (recorded at session N end, before wrap-up commit which is H_N+something... actually the snapshot's git_hash is HEAD at the time of the snapshot call — before the wrap-up commit, so H_N = the wrap-up commit hash of session N? Let me trace:
+
+Session N:
+1. Tasks run, commits made (HEAD = H_t1, H_t2...)
+2. `arc risk snapshot` → records git_hash = HEAD at that moment (last task commit, say H_ta)
+3. `git commit -m "Day N session wrap-up"` → HEAD = H_wrap
+
+So the snapshot records H_ta (before wrap-up). Session N+1:
+1. Tasks run → commits H_{N+1,t1}...
+2. `arc risk validate` (if wired) → compares H_ta..HEAD → includes wrap-up commit H_wrap (which contains journal, DAY_COUNT, etc.) + session N+1 task commits.
+3. `arc risk snapshot` → records H_{N+1,ta}.
+
+The wrap-up commit includes .arc/risk_snapshots.jsonl (the snapshot itself!) — since git add -A sweeps it. Hmm, wait: the snapshot is recorded BEFORE the wrap-up commit, and `git add -A` then stages it into the wrap-up commit. So the snapshot file's own change is part of H_wrap. When validating H_ta..HEAD, the wrap-up commit includes .arc/risk_snapshots.jsonl — not a src/ file, so it won't be a hit/surprise (top-10 predictions are src/ files only).
+
+OK so the flow works. Validation at session N+1 end would validate H_ta (session N's last task commit) vs HEAD (through session N+1's work). Good.
+
+But the broke semantic ("fix"/"revert" in commit messages): the daily impl commits often are "Day 159: <task title>". Let me check what task commit messages look like... From git log, task commits seem to be like "Day 159 (13:49): session wrap-up" and the actual code changes might be in commits named differently. Actually looking at git log --oneline -15, I see only "bump skill-evolve counter", "session wrap-up", and the maintainer's fix commits. Where are the actual task commits? Hmm — sessions that made no commits ("no commits made" in journal). The two successful sessions today — let me look at what commits they made. Actually 9f36a14 "Day 159 (13:59): session wrap-up" — and earlier ones. The task's src/ work would be in commits between sessions. Let me check the log more carefully... Actually the last 15 commits don't show any "Day 159: <task>" commits with src/ changes. Interesting. The successful sessions' work might have been non-src (skills, docs, harness?). Or the commits were the wrap-ups that included src/ changes.
+
+Hmm wait, actually looking again at git log: there are no task commits visible in the last 15. Let me check further back or check what the wrap-up commits contain.
+
+Actually, this matters for the task design. Let me check the diff of a recent wrap-up commit.
+
+Actually, I should timebox this investigation. Let me check one thing: what src/ changes have landed recently (the last few task commits). Let me look at git log with --stat for the last 5 non-maintainer commits.
+
+Then I'll decide the task set. Let me be efficient.
+
+Also I need to quickly scan the src/ module structure per the "NO ASSESSMENT AVAILABLE" instruction. The CLAUDE.md already gives a very detailed architecture, and the Repository Structure section lists all modules. I have a good picture. Let me do a quick scan of recently modified source files to understand what's being worked on.
+────────────────────────────────────────────────────────────────────────────────
+
+Let me check what the recent successful sessions actually changed, and get a quick scan of src/ state.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -25 -- src/ | he…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la src/*.rs | awk '{print $5, … ✓ (11ms)
+ ✓ (14ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting! The `src/` directory has grown a lot — files like `src/commands_web.rs` (81KB), `src/safety.rs` (90KB), `src/help_data.rs` (88KB), `src/symbols.rs` (119KB) — these are NOT in the CLAUDE.md architecture description. Wait, CLAUDE.md lists `src/safety.rs` and `src/symbols.rs`, but not `commands_web.rs`... Actually CLAUDE.md's project files list DOES include `src/commands_web.rs`. OK.
+
+Hmm wait — the recent src changes show only two commits touching src/: the maintainer's agent_builder fix and "Day 157 (10:44): session wrap-up" which ADDED a bunch of src/ files (agent_builder.rs, help_data.rs, etc.). That's odd — adding whole files in a wrap-up commit? That suggests the session 157 wrap-up committed a large set of new files. Actually those "A" entries in `git log --name-status` for the wrap-up commit show files that were added at that commit — but git log shows the diff of each commit relative to its parent, so a commit that "added" agent_builder.rs... this is probably a squashed/merged commit (the maintainer may have force-pushed or restructured).
+
+This is getting deep. Let me step back and focus on the planning job.
+
+Key facts established:
+1. **No community issues today** (ISSUES_TODAY.md confirms, gh CLI has no issues access with this token).
+2. **Root cause of revert streak fixed today** by maintainer (#14, #15): harness's own cargo dirties protected `tools/gasp-emit/Cargo.lock` → safety_commit aborted → real work lost. Last two sessions succeeded.
+3. **Dream milestone**: accumulate ≥5 matched prediction-outcome pairs. Snapshots flow (41 in .arc), validation file (.arc/risk_validations.jsonl) doesn't exist — zero data points.
+4. The validation half never fires in the evolve loop: watch-mode validation doesn't run (evolve agents don't use watch), and the harness calls `arc risk snapshot` but never `arc risk validate`.
+5. The CLI validate path has a "broke = fix/revert commit" semantic which is narrow, but the infrastructure (write_validation_event, compute_validation, parse_all_snapshots) exists and is tested.
+
+Given the trajectory (many reverts, need small tasks), and the instruction "If a task has been reverted before, make it SMALLER than last time" — the reverts weren't task-scope failures but a harness bug. Still, keep tasks small.
+
+Now, what are the highest-value tasks?
+
+**Self-driven (dream) slot** — Task 1: Wire the validation half to fire automatically. The cleanest agent-side approach: `handle_risk_snapshot` validates the previous snapshot before recording the new one. Since the harness already calls `arc risk snapshot` once per session, this turns each session with commits into a validation event, and accumulates the ≥5 pairs. This touches only `src/commands_risk.rs` (+ tests). That's a dream-advancing, product-safe, small task.
+
+Wait — but is this "evolve" kind? The primary beneficiary is arc's own loop (the risk meter). It's evolve-kind. The change is in the CLI `arc risk snapshot` command which is product-visible too (a user running `arc risk snapshot` would now also see a validation line — that's fine, it's the same subsystem). I'd classify it evolve (arc's own loop's measurement), but product-safe: no behavior change for non-risk users.
+
+Hmm, actually let me reconsider whether to make the validate fire as part of snapshot, or something else. The concern: `handle_risk_snapshot` runs `git log <hash>..HEAD --name-only --oneline` — a git operation. In the evolve loop this is fine (real repo, real git). For a product user running `/risk snapshot`, it's also fine.
+
+One more consideration: the "broke" semantic. With evolve loop commit messages like "Day N: task title", do any contain "fix" or "revert"? The task titles often do ("fix: ..."). E.g., the maintainer's commits are "fix(...)". But the agent's own task commits — from the journal, sessions make "no commits" mostly. In the two successful sessions, what did they commit? Let me not go down this hole; the point is the validation event fires whenever the git log contains fix/revert commits since the snapshot — which is exactly when "things needed fixing". That's the designed semantic. If it under-fires, the data still accumulates eventually.
+
+Actually — wait. Let me reconsider. There's an even simpler design consideration: should validation fire on ALL changed files (as outcome) or only fix/revert? The watch-mode path uses "all files changed during watch fix loop" (which are files changed to FIX failures — that's the outcome). The CLI path uses fix/revert commits. Both are "files that needed fixing". Fine, keep the existing semantic.
+
+**Task 2 (self-driven / capability gap)**: What else? Let me think about the strongest candidates:
+
+- The trajectory/assessment gap: "Reverts in window: 0" contradicts "tasks 0/1 reverted" — a trajectory extractor inconsistency. Actually the revert count says "0 of last ~10 sessions had reverts" while 8 sessions show "tasks 0/1 ⚠️ — 1 task(s) reverted". This looks like a bug in `extract_trajectory.py`'s revert detection (it looks for revert commits; the harness reverts aren't git revert commits, so they're not counted). But actually the "reverts" section counts sessions with reverts... this is a reporting inconsistency worth fixing — it under-reports the real revert situation. Hmm, but is that high value? It's observability. Medium value.
+
+- Capability gaps vs Claude Code: what can Claude Code do that arc can't? Looking at the file list, arc has a LOT: /plan, /refactor, /move, /spawn, /risk, /watch, MCP, sub-agents, skills... 
+
+- Product UX: the two successful sessions today were provider fixes (OpenCode, SSE). The loop was broken on provider level. That's fixed.
+
+Let me think about what a real user would hit. Actually — I have no community issues today and the token can't even read issues. Let me focus on the strongest self-driven picks:
+
+1. **Dream: wire validation feed** (above) — Task 1, evolve.
+2. **Observability fix: trajectory revert detection** — the "Reverts in window: 0" while 8/10 sessions show reverted is a genuine reporting bug in scripts/extract_trajectory.py. It should count sessions whose outcome says "task(s) reverted" as reverts. This matters because the trajectory block is what the planner reads — under-reported reverts mean the planner doesn't see the real failure rate. That's evolve-kind, touches scripts/extract_trajectory.py (not a protected file — protected are evolve.sh, format_issues.py, build_site.py, workflows). Wait, is extract_trajectory.py protected? The safety rules list: `scripts/evolve.sh`, `scripts/format_issues.py`, `scripts/build_site.py`, `.github/workflows/` — extract_trajectory.py is NOT in the protected list. OK, it's editable. But hmm — is this the highest value? The revert info IS visible in the session outcomes list ("tasks 0/1 ⚠️ — 1 task(s) reverted"). The "Reverts in window: 0 of last ~10 sessions had reverts" line contradicts it. It's a real inconsistency that could mislead future planners. Medium-high value for the loop.
+
+Actually, wait — let me re-read the trajectory output: "## Reverts in window / 0 of last ~10 sessions had reverts." Hmm, maybe the extractor counts "revert commits" in git log (git revert / reset commits) rather than "session with reverted task". The sessions that "reverted" a task did so via the harness reset — no revert commit on main. So the count is technically about git revert commits. It's arguably working as designed (counting actual revert commits) but the label "Reverts in window" next to session outcomes showing reverted tasks is confusing. This is a small polish item.
+
+3. **A product-facing task**: Given no community issues, maybe improve something real users hit. Candidates from the risk scorer's top files: `src/agent_builder.rs` (0.56-0.66 risk, top churn) — it's the most fragile file. But I shouldn't pick tasks based on risk scores alone.
+
+Hmm, let me think about what else. Let me quickly check the CHANGELOG for what's been shipped and the release check (priority 8: "have enough improvements accumulated since last release to publish?"). Let me check the last release tag.
+
+Actually, let me also reconsider: is there something about the harness fixes (#14, #15) that needs follow-up from the agent side? E.g., a test to prevent regression? The maintainer's fixes are in evolve.sh and .gitignore. A regression guard could be a test in scripts/ (like test_scan_commitments.py). Hmm, that might be overkill.
+
+Let me check the release situation and then finalize. Let me look at CHANGELOG head and recent tags.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 24.9s (2 ✓)
+
+Let me check the release status and changelog to inform the release-check priority.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git tag --sort=-creatordate | head… ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Release status: Last release 0.1.15 (2026-07-10). Today is 2026-08-06 — almost a month since release. There have been many changes since (Days 132-159). The release check suggests: have enough improvements accumulated since last release? Days 132-159 include a LOT (risk validation infra, trajectory awareness, harness fixes...). But releases are done via the `release` skill which builds binaries for 4 targets and publishes. That's a big task and requires a v* tag — usually triggered by maintainer. The tags list shows day-tags, not v-tags, so no v* tags exist yet (no releases on this fork?). Actually the last release 0.1.15 is from the main arc project. Release tasks are typically handled specially. I'll note it but not make it a task (a release is a big multi-step process; the journal would need a release-readiness assessment first). Actually the priority says "Release check — have enough improvements accumulated since your last release to publish a new version? Check the release skill and decide." Given no community issues and the harness just being stabilized, a release is a candidate... but it's a large operation and probably better as its own dedicated session. I'll mention it in the plan but focus tasks on concrete code.
+
+Hmm wait — actually, the tags "day159-13-59" etc. are auto-tags from sessions. Let me not worry.
+
+Now let me finalize the task set. Constraints:
+- 3 task slots
+- ≥1 self-driven (dream preferred)
+- Small tasks (≤3 source files, 20 min)
+- No community issues to fill remaining slots
+
+Task candidates:
+
+**Task 1 (dream, evolve): Wire the validation feed — `arc risk snapshot` validates the previous snapshot before recording.**
+- File: src/commands_risk.rs (extract shared validate core; call from handle_risk_snapshot)
+- Possibly src/commands_risk_snapshots.rs (move/reuse write_validation_event — already available)
+- Tests: unit test in commands_risk.rs
+- Effect: each session's existing `arc risk snapshot` call (harness) now also produces a validation event → accumulates the ≥5 matched pairs the dream needs.
+- Small: refactor `handle_risk_validate`'s core into a helper `validate_snapshot_against_commits()` (returns Option<(hits, surprises, accuracy)>) used by both `handle_risk_validate` and `handle_risk_snapshot`. ~30 lines + test.
+
+Wait, but I should double check the semantics concern: validation fires only when git log has fix/revert commits. If sessions don't produce fix/revert commits, the event won't be written. The dream wants "matched prediction-outcome pairs" — the outcome being "files that needed fixing". If a session's commits don't include fix/revert messages, there's no outcome signal → no event. That's the honest semantic. Sessions with fixes (most evolve sessions, given task titles often start with "fix:" or contain reverted tasks) will produce events. Good enough for the first 5 pairs.
+
+Hmm, actually, wait. Let me reconsider — maybe a broader outcome definition would be better for the dream's "first test": measure whether files the scorer flagged as high-risk actually failed more often. A more useful outcome: files changed in commits that were later reverted OR files in fix commits. The current `classify_broke_files` handles revert+fix. OK.
+
+**Task 2 (self-driven, evolve observability): Fix trajectory revert under-reporting.**
+- File: scripts/extract_trajectory.py
+- The "Reverts in window" section counts git revert commits but shows 0 while 8/10 sessions had reverted tasks. Align it with session outcomes from audit-log (count sessions whose outcome indicates reverted tasks).
+- This matters: the planner reads YOUR TRAJECTORY; under-reported reverts hid the 8-session revert streak from me.
+- Medium value. Small change: parse outcomes and count reverted sessions; label clearly.
+
+Actually — hold on. Let me reconsider. Was the under-reporting actually misleading? The session outcomes DID show "tasks 0/1 ⚠️ — 1 task(s) reverted" clearly. The "Reverts in window" line was the only contradiction. It's a real bug but minor. Is it worth a slot? Given 3 slots and nothing else pressing... maybe. But I want the highest-impact use of slots.
+
+**Task 3 (product, self-driven): What's the biggest product gap?**
+
+Let me think about what real users experience. Options:
+- The `arc risk` subsystem is a differentiator, not a gap.
+- Maybe something from the risk-scorer's top fragile files — `src/agent_builder.rs` (0.56-0.66, churn+size+coupled+low-test). A targeted hardening? That's vague.
+- Something in the docs?
+
+Hmm, let me look at what's been most recently worked on and what known gaps exist. The CLAUDE.md mentions Issue #341 (orchestration roadmap), #448 (product-safe defaults), #250 (byte indexing), etc. 
+
+Actually — an idea from the trajectory: "Provider/API health: 4 sessions, 2 provider error hit(s)". Provider errors in 2 of 4 recent sessions. The OpenCode/SSE fixes landed today. Is there a follow-up? The agent_builder now uses OpenAiCompat::default() for OpenCode. Maybe there are other providers with the same developer-role issue? Let me check providers.rs briefly... Actually the maintainer handled that.
+
+Let me think about the product gap differently. What does Claude Code have that arc lacks? Looking at the file list, arc has comprehensive commands. One thing: **context compaction and session management** are handled. **Parallel tool calls**? arcagent handles. **Custom MCP servers** — arc has MCP support. **IDE integration**? Claude Code has IDE integrations; arc is CLI-only. That's a big gap but too large for a session.
+
+Let me look for smaller, concrete product gaps by scanning the codebase quickly for TODO/FIXME or obvious rough edges. Actually, let me check `src/providers.rs` for the developer-role issue pattern — maybe other OpenAiCompat providers should be default() too.
+
+Actually — better idea for a product task with real user impact: The `!` shell passthrough and `!?` bang query exist. What about known rough edges... 
+
+Let me quickly check the "blindspot" or self-assess angle: run a quick grep for common issues like unwrap() panics in user-facing paths? That's broad.
+
+Given limited investigation time, let me pick a concrete, verifiable product task. Options ranked by (value × feasibility):
+
+A. **`/risk validate` under-reporting aside — the risk accuracy meter UI**: `prediction_accuracy_summary` requires ≥2 validation entries (line 165 in commands_risk_report.rs). With zero entries, users see "no data". Fine — that's expected until data accumulates. The dream task will feed it.
+
+B. **Trajectory revert alignment** (above).
+
+C. **A regression guard for the Cargo.lock revert bug**: The root cause of 8+ lost sessions was the harness's own cargo dirtying a tracked file. The maintainer fixed it in evolve.sh + .gitignore. A test could guard `scripts/lint_evolve_heredocs.py` style — actually there's already a lint script for heredocs. Could add a check to lint_evolve_heredocs.py? Hmm, that's a scripts change. Not high value now that it's fixed.
+
+D. **Product UX: `arc risk snapshot` output when called via CLI** — prints "📸 Snapshot saved". Fine.
+
+Let me look at the actual gap differently — what does the harness still not do that my dream needs? The dream's "next milestone" is data accumulation. Task 1 delivers the mechanism. A second part: after data accumulates, "measure whether flagged files failed more often" — that's the accuracy report, which already exists (`arc risk accuracy` / `/risk accuracy`). So Task 1 is THE dream task.
+
+For the remaining two slots, let me pick:
+- Task 2: Trajectory revert alignment (evolve observability — genuinely useful: the planner's view of reality was wrong).
+- Task 3: A product task. Let me look for a concrete one. 
+
+Let me quickly scan for obvious product-facing rough edges. Ideas:
+- `arc risk snapshot` when run by a user writes to .arc/risk_snapshots.jsonl — fine.
+- Maybe the **`/rewind` after `/clear`** flow (stash_pre_clear) — from CLAUDE.md, one rewind per clear. That's a documented design.
+- The **auto-watch product-safety**: already gated.
+
+Hmm, let me actually check the safety.rs / commands_web.rs... those are huge files, can't scan quickly.
+
+Let me try a different approach: check ISSUES_TODAY content fully (maybe it has more than "No community issues"), and check the .arc/session_staging to see the failed session task files (what tasks were being attempted and reverted). The failed task files might tell me what was being tried — and per instructions, "If a task has been reverted before, make it SMALLER than last time." Let me look at recent task files / audit log to see what the reverted sessions attempted.
+────────────────────────────────────────────────────────────────────────────────
+
+Let me look at what the reverted sessions were attempting (staging/audit) and check full ISSUES_TODAY.
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat ISSUES_TODAY.md; echo "===STAG… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The audit.jsonl is tracking my current session's tool calls. OK.
+
+Let me check what the failed sessions' tasks were — check the audit-log branch or older audit files to see what tasks were attempted and reverted. Actually, let me check the transcripts in the audit-log branch for a recent failed session.
+
+Actually, I have enough context. The root cause of the reverts is documented (harness Cargo.lock bug). The tasks themselves may have been fine — the work was thrown away by the safety guard.
+
+Let me look at one more thing: what did the reverted sessions' task files say? Let me check the audit-log branch quickly for a session outcome.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline audit-log -3 2>/… ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show audit-log:sessions/day-15… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting: `"reverted": false` in outcome.json, but `tasks_succeeded: 0`. So the trajectory extractor's "tasks 0/1 ⚠️ — 1 task(s) reverted" label might be wrong too — it shows "reverted" but the outcome says `reverted: false`. The session had 1 task attempted, 0 succeeded — the task failed but wasn't necessarily "reverted" (a reverted task would have been committed then reset; a failed task just didn't land).
+
+Wait, the trajectory shows "tasks 0/1 ⚠️ — 1 task(s) reverted" — but outcome.json says `reverted: false`. So the extract_trajectory.py is MISLABELING failed tasks as "reverted". That's a real reporting bug! The label says "1 task(s) reverted" when the outcome json says reverted:false. So the planner sees "reverted" (which sounds like scope failure, agent's fault) when actually the tasks just failed to land (which, as we now know, was the harness Cargo.lock bug eating the commits — the tasks may have been perfectly good).
+
+So there are TWO reporting bugs in extract_trajectory.py:
+1. Sessions with `tasks_succeeded: 0` are labeled "1 task(s) reverted" regardless of actual `reverted` flag.
+2. The "Reverts in window: 0 of last ~10 sessions had reverts" counts actual revert commits (0), contradicting the mislabeled sessions.
+
+Both should be aligned: use the outcome.json `reverted` field for the label (e.g., "1 task(s) failed" vs "1 task(s) reverted"), and count sessions with reverted=true in the reverts section.
+
+This is a genuinely useful observability fix — the trajectory is what the planner (me) reads every session, and it's been telling me a distorted story (that my tasks were being reverted due to scope, when actually they were eaten by a harness bug). Fixing the label to distinguish "failed to land" from "reverted" would have pointed at the harness bug earlier.
+
+Now let me confirm the extractor code to make the task precise. Let me look at extract_trajectory.py's render_outcomes and render_reverts.
+────────────────────────────────────────────────────────────────────────────────
+
+The outcome.json says `reverted: false` but the trajectory labels these as "1 task(s) reverted" — a real reporting bug. Let me confirm in the extractor code.
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "reverted\|tasks_succeeded… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '110,150p' scripts/extract_… ✓ (7ms)
+
+
