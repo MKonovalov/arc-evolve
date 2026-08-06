@@ -472,7 +472,11 @@ pub fn create_model_config(provider: &str, model: &str, base_url: Option<&str>) 
             let mut config = ModelConfig::openai(model, model);
             config.provider = "opencode-zen".into();
             config.base_url = base_url.unwrap_or("https://opencode.ai/zen/v1").to_string();
-            config.compat = Some(OpenAiCompat::openai());
+            // OpenCode's upstream rejects the `developer` role (only accepts
+            // system/user/assistant/tool/latest_reminder), so use the default
+            // compat (supports_developer_role: false) rather than openai()
+            // which sets it true -> would 400 on the first request.
+            config.compat = Some(OpenAiCompat::default());
             config
         }
         "opencode-go" => {
@@ -485,7 +489,9 @@ pub fn create_model_config(provider: &str, model: &str, base_url: Option<&str>) 
             config.base_url = base_url
                 .unwrap_or("https://opencode.ai/zen/go/v1")
                 .to_string();
-            config.compat = Some(OpenAiCompat::openai());
+            // Same as Zen: OpenCode Go rejects the `developer` role, so use the
+            // default compat (supports_developer_role: false).
+            config.compat = Some(OpenAiCompat::default());
             config
         }
         "custom" => {
