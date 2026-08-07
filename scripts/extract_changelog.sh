@@ -25,18 +25,21 @@ BODY=$(awk -v ver="$VERSION" '
 if [ -z "$BODY" ]; then
   # Fallback: derive a body from git history since the version tag. This keeps
   # releases working even if CHANGELOG.md wasn't updated for this version.
+  # All git calls are guarded so a missing repo/tag never kills the script.
   echo "Warning: Version $VERSION not found in CHANGELOG.md; using git log fallback" >&2
-  PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)"
-  if [ -n "$PREV_TAG" ]; then
+  PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' "${TAG}^" 2>/dev/null || true)"
+  if [ -n "$PREV_TAG" ] && git rev-parse --quiet --verify "${PREV_TAG}..${TAG}" >/dev/null 2>&1; then
+    COMMITS="$(git log --no-merges --pretty=format='- %s' "${PREV_TAG}..${TAG}" 2>/dev/null | head -50)"
     BODY="Release $VERSION
 
 Changes since $PREV_TAG:
 
-$(git log --no-merges --pretty=format='- %s' "${PREV_TAG}..${TAG}" 2>/dev/null | head -50)"
+${COMMITS:-（no commits found）}"
   else
+    COMMITS="$(git log --no-merges --pretty=format='- %s' -n 50 2>/dev/null || true)"
     BODY="Release $VERSION
 
-$(git log --no-merges --pretty=format='- %s' "$TAG" 2>/dev/null | head -50)"
+${COMMITS:-（changelog entry and git history unavailable）}"
   fi
 fi
 
