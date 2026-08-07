@@ -9,8 +9,8 @@
 # Environment:
 #   ANTHROPIC_API_KEY  — required
 #   REPO               — GitHub repo (default: MKonovalov/arc-evolve)
-#   MODEL              — LLM model (default: deepseek-v4-flash)
-#   PROVIDER          — LLM provider (default: opencode-go)
+#   MODEL              — LLM model (resolved from arc-models; default: deepseek-v4-flash)
+#   PROVIDER          — LLM provider (resolved from arc-models; default: opencode-go)
 #   TIMEOUT            — Total planning phase time budget in seconds (default: 1200)
 #                        Split evenly between assessment (A1) and planning (A2) agents
 #   FORCE_RUN          — Set to "true" to bypass the run-frequency gate
@@ -24,9 +24,41 @@ set -euo pipefail
 # Auto-detect REPO, BOT_LOGIN, BIRTH_DATE (fork-friendly)
 source "$(dirname "$0")/common.sh"
 
+TIMEOUT="${TIMEOUT:-1200}"
+# Primary/fallback model routing is centralized in arc-models
+# (github.com/MKonovalov/arc-models). Resolve PROVIDER/MODEL/FALLBACK_PROVIDER
+# from its config.yml, which the health probe keeps current (so a rate-limited
+# or retired primary is auto-skipped). Fail-soft: any failure falls back to the
+# hardcoded defaults below, so the loop never breaks because of model routing.
+#
+# The evolve workflow injects PROVIDER/MODEL/FALLBACK_PROVIDER from GitHub
+# secrets. To let arc-models be the authoritative source, we unset them so the
+# resolver's "env override wins" path does not pass the stale secrets through.
+# Operators can still force a value by exporting it AFTER this block (or by
+# editing config.yml in arc-models).
+RESOLVED_MODELS=""
+if [ -z "${ARC_MODEL_OVERRIDE:-}" ] && command -v python3 >/dev/null 2>&1; then
+  _arc_models_dir="$(mktemp -d)/arc-models"
+  _arc_models_url="https://x-access-token:${GH_PAT:-}@github.com/MKonovalov/arc-models.git"
+  if git clone --quiet --depth 1 "${_arc_models_url}" "${_arc_models_dir}" 2>/dev/null \
+     && [ -f "${_arc_models_dir}/config.yml" ]; then
+    RESOLVED_MODELS="$(ARC_MODELS_CONFIG="${_arc_models_dir}/config.yml" \
+      python3 "${_arc_models_dir}/resolver/arc-resolve-model" 2>/dev/null)" || RESOLVED_MODELS=""
+  fi
+  rm -rf "${_arc_models_dir}" 2>/dev/null || true
+fi
+
+if [ -n "${RESOLVED_MODELS}" ]; then
+  # unset workflow-injected values so the resolver output takes effect
+  unset PROVIDER MODEL FALLBACK_PROVIDER 2>/dev/null || true
+  eval "${RESOLVED_MODELS}"
+  echo "  [models] resolved from arc-models: PROVIDER=${PROVIDER} MODEL=${MODEL} FALLBACK=${FALLBACK_PROVIDER}"
+else
+  echo "  [models] arc-models resolution skipped/failed — using built-in defaults" >&2
+fi
+
 MODEL="${MODEL:-deepseek-v4-flash}"
 PROVIDER="${PROVIDER:-opencode-go}"
-TIMEOUT="${TIMEOUT:-1200}"
 FALLBACK_PROVIDER="${FALLBACK_PROVIDER:-}"
 DATE=$(date +%Y-%m-%d)
 SESSION_TIME=$(date +%H:%M)
