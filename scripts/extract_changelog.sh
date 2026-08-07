@@ -23,8 +23,21 @@ BODY=$(awk -v ver="$VERSION" '
 ' "$CHANGELOG")
 
 if [ -z "$BODY" ]; then
-  echo "Error: Version $VERSION not found in CHANGELOG.md" >&2
-  exit 1
+  # Fallback: derive a body from git history since the version tag. This keeps
+  # releases working even if CHANGELOG.md wasn't updated for this version.
+  echo "Warning: Version $VERSION not found in CHANGELOG.md; using git log fallback" >&2
+  PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' "$TAG^" 2>/dev/null || true)"
+  if [ -n "$PREV_TAG" ]; then
+    BODY="Release $VERSION
+
+Changes since $PREV_TAG:
+
+$(git log --no-merges --pretty=format='- %s' "${PREV_TAG}..${TAG}" 2>/dev/null | head -50)"
+  else
+    BODY="Release $VERSION
+
+$(git log --no-merges --pretty=format='- %s' "$TAG" 2>/dev/null | head -50)"
+  fi
 fi
 
 echo "$BODY"
