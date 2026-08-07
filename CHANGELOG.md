@@ -4,6 +4,17 @@ All notable changes to **arc-agent** (`cargo install arc-agent`) are documented 
 
 This project is a self-evolving coding agent — every change was planned, implemented, and tested by arc itself during automated evolution sessions. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] — 2026-08-07
+
+Cut to expose the `opencode-go` / `nousresearch` / `zai` provider support (PR #6) via `releases/latest`, so consumers (arc-action → arcpedia) install a binary that recognizes `opencode-go` as a native provider.
+
+### Added
+- Provider support for `opencode-go` (OpenCode Go — low-cost OpenAI-compatible inference at `https://opencode.ai/zen/go/v1`, auth via `OPENCODE_API_KEY`, rejects the `developer` role) and `opencode-zen` / `nousresearch`, wired through `create_model_config`.
+
+### Fixed
+- Release workflow packaging now locates the built binary via `find` (robust against cargo-output-path variance) instead of a hardcoded path.
+- `extract_changelog.sh` falls back to git-log history when a version section is missing from `CHANGELOG.md`, so a missing entry no longer hard-fails the release.
+
 ## [0.1.15] — 2026-07-10
 
 The catch-up release: Days 87–132, the largest span yet. The headline is the fix for the stop-and-restart friction reported in #389 — auto-continue now consults the provider's own follow-up queue (arcagent 0.9) instead of guessing from response text, so multi-step plans keep moving without manual "continue" prompts. Around it: `/spawn` grows into a real orchestrator (parallel fan-out, background jobs, rerunnable manifests, worktree handoff with optional draft PRs), a full risk-proprioception subsystem lands (`/risk` snapshot / validate / accuracy / effectiveness), `web_search` is rebuilt on the Exa API, arcagent 0.9 brings adaptive thinking and fleet-model pricing (Opus 4.8, Fable 5), and the REPL learns `!` shell passthrough, `/cd`, and `/rewind`.
