@@ -1431,6 +1431,7 @@ fn clone_agent_config(config: &crate::AgentConfig) -> crate::AgentConfig {
         disallowed_tools: vec![],
         no_tools: false,
         lite: false,
+        tool_choice: None,
     }
 }
 

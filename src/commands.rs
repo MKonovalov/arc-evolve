@@ -928,6 +928,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let mut agent = config.build_agent();
         handle_provider_switch("openai", &mut config, &mut agent);
@@ -963,6 +964,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let mut agent = config.build_agent();
         // Invalid provider should not change the config
@@ -999,6 +1001,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let mut agent = config.build_agent();
         // Switch to google → should use gemini default
