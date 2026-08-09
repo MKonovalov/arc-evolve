@@ -546,6 +546,10 @@ pub struct AgentConfig {
     pub disallowed_tools: Vec<String>,
     pub no_tools: bool,
     pub lite: bool,
+    /// Opt-in forced tool choice for free/open-weight models. Set to
+    /// Some("required") for models that answer in prose under tool_choice:"auto"
+    /// (e.g. tencent/hy3:free on nousresearch). None = default behavior.
+    pub tool_choice: Option<String>,
 }
 
 impl AgentConfig {
@@ -569,6 +573,10 @@ impl AgentConfig {
             .with_api_key(&self.api_key)
             .with_thinking(self.thinking)
             .with_skills(self.skills.clone());
+        
+        if let Some(tc) = &self.tool_choice {
+            agent = agent.with_tool_choice(Some(tc.clone()));
+        }
 
         // When --no-tools is active, skip all tool construction (build_tools,
         // sub_agent, shared_state). This is cleaner than building then filtering
@@ -695,25 +703,41 @@ impl AgentConfig {
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(AnthropicProvider).with_model_config(model_config);
-            self.configure_agent(agent, context_window)
+            let mut agent = self.configure_agent(agent, context_window);
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         } else if self.provider == "google" {
             // Google uses its own provider
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(GoogleProvider).with_model_config(model_config);
-            self.configure_agent(agent, context_window)
+            let mut agent = self.configure_agent(agent, context_window);
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         } else if self.provider == "bedrock" {
             // Bedrock uses AWS SigV4 signing with ConverseStream protocol
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(BedrockProvider).with_model_config(model_config);
-            self.configure_agent(agent, context_window)
+            let mut agent = self.configure_agent(agent, context_window);
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         } else {
             // All other providers use OpenAI-compatible API
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(OpenAiCompatProvider).with_model_config(model_config);
-            self.configure_agent(agent, context_window)
+            let mut agent = self.configure_agent(agent, context_window);
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         }
     }
 
@@ -862,6 +886,7 @@ impl AgentConfig {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         editor_config.build_agent()
     }
@@ -1002,6 +1027,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         }
     }
 
@@ -1033,6 +1059,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         assert_eq!(config.model, "claude-opus-4-6");
         assert_eq!(config.api_key, "test-key");
@@ -1075,6 +1102,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         // Agent should have 6 tools (bash, read, write, edit, list, search)
@@ -1111,6 +1139,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         // Agent created successfully — verify it has empty message history
@@ -1147,6 +1176,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         // Agent created successfully — verify it has empty message history
@@ -1182,6 +1212,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         // Agent created successfully — verify it has empty message history
@@ -1217,6 +1248,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent1 = config.build_agent();
         let agent2 = config.build_agent();
@@ -1308,6 +1340,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         assert_eq!(config.model, "claude-opus-4-6");
         config.model = "claude-haiku-35".to_string();
@@ -1344,6 +1377,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         assert_eq!(config.thinking, ThinkingLevel::Off);
         config.thinking = ThinkingLevel::High;
@@ -1611,6 +1645,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         assert_eq!(agent.messages().len(), 0);
@@ -1699,6 +1734,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         assert_eq!(agent.messages().len(), 0);
@@ -1760,6 +1796,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config.build_agent();
         // If this compiles and runs, BedrockProvider is correctly wired
@@ -1795,6 +1832,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         // Verify the anthropic ModelConfig would have headers set
         // (We test the helper directly since Agent doesn't expose model_config)
@@ -1894,6 +1932,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         // This should not panic — context config and execution limits are wired
         let agent =
@@ -1931,6 +1970,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         // Should not panic — limits are set with defaults
         let agent = config_no_turns
@@ -1963,6 +2003,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         };
         let agent = config_with_turns
             .configure_agent(Agent::new(arcagent::provider::AnthropicProvider), 200_000);

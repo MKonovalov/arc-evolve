@@ -1226,6 +1226,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         }
     }
 

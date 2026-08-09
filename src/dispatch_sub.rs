@@ -542,6 +542,7 @@ fn run_review_subcommand(args: &[String], review_arg: &str) -> i32 {
         disallowed_tools: vec![],
         no_tools: false,
         lite: false,
+        tool_choice: None,
     };
 
     // We're inside a tokio runtime (called from parse_args in async main),
