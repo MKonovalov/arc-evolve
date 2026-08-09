@@ -1202,6 +1202,7 @@ mod tests {
     /// Helper to create a default AgentConfig for tests, varying only the provider.
     fn test_agent_config(provider: &str, model: &str) -> AgentConfig {
         AgentConfig {
+            stream: None,
             model: model.to_string(),
             api_key: "test-key".to_string(),
             provider: provider.to_string(),

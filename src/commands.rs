@@ -905,6 +905,7 @@ mod tests {
         use crate::cli;
         let mut config = crate::AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -941,6 +942,7 @@ mod tests {
         use crate::cli;
         let mut config = crate::AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -978,6 +980,7 @@ mod tests {
         use crate::cli;
         let mut config = crate::AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,

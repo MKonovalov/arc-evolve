@@ -1407,6 +1407,7 @@ fn apply_model_override(config: &mut crate::AgentConfig, model_name: &str) {
 /// Since AgentConfig doesn't derive Clone, we reconstruct it field by field.
 fn clone_agent_config(config: &crate::AgentConfig) -> crate::AgentConfig {
     crate::AgentConfig {
+        stream: None,
         model: config.model.clone(),
         api_key: config.api_key.clone(),
         provider: config.provider.clone(),

@@ -699,6 +699,7 @@ async fn main() {
 
     let mut agent_config = AgentConfig {
         model: config.model,
+        stream: None,
         api_key: config.api_key,
         provider: config.provider,
         base_url: config.base_url,
@@ -997,6 +998,7 @@ mod tests {
     /// Helper to create a default AgentConfig for tests.
     fn test_agent_config(provider: &str, model: &str) -> AgentConfig {
         AgentConfig {
+            stream: None,
             model: model.to_string(),
             api_key: "test-key".to_string(),
             provider: provider.to_string(),

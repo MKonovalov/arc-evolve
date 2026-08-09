@@ -519,6 +519,7 @@ fn run_review_subcommand(args: &[String], review_arg: &str) -> i32 {
 
     let agent_config = crate::agent_builder::AgentConfig {
         model,
+        stream: None,
         api_key,
         provider,
         base_url,

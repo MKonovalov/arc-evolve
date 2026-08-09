@@ -550,6 +550,8 @@ pub struct AgentConfig {
     /// Some("required") for models that answer in prose under tool_choice:"auto"
     /// (e.g. tencent/hy3:free on nousresearch). None = default behavior.
     pub tool_choice: Option<String>,
+    #[allow(dead_code)]
+    pub stream: Option<bool>,
 }
 
 impl AgentConfig {
@@ -621,7 +623,6 @@ impl AgentConfig {
                     );
                 }
             }
-
             agent = agent.with_tools(tools);
 
             // Add sub-agent tool via the dedicated API (separate from build_tools count).
@@ -706,6 +707,7 @@ impl AgentConfig {
             let mut agent = self.configure_agent(agent, context_window);
             if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
                 agent = agent.with_tool_choice(Some("required".to_string()));
+                agent = agent.with_stream(Some(false));
             }
             agent
         } else if self.provider == "google" {
@@ -736,6 +738,7 @@ impl AgentConfig {
             let mut agent = self.configure_agent(agent, context_window);
             if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
                 agent = agent.with_tool_choice(Some("required".to_string()));
+                agent = agent.with_stream(Some(false));
             }
             agent
         }
@@ -862,6 +865,7 @@ impl AgentConfig {
     pub fn build_editor_agent(&self, editor_model: &str) -> Agent {
         // Create a temporary config clone with the editor model
         let editor_config = AgentConfig {
+            stream: None,
             model: editor_model.to_string(),
             api_key: self.api_key.clone(),
             provider: self.provider.clone(),
@@ -1003,6 +1007,7 @@ mod tests {
 
     fn test_agent_config(provider: &str, model: &str) -> AgentConfig {
         AgentConfig {
+            stream: None,
             model: model.to_string(),
             api_key: "test-key".to_string(),
             provider: provider.to_string(),
@@ -1036,6 +1041,7 @@ mod tests {
         // AgentConfig should hold all the fields needed to build an agent
         let config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1079,6 +1085,7 @@ mod tests {
         // build_agent should produce an Agent for the anthropic provider
         let config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1116,6 +1123,7 @@ mod tests {
         // build_agent should produce an Agent for a non-anthropic provider
         let config = AgentConfig {
             model: "gpt-4o".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "openai".to_string(),
             base_url: None,
@@ -1153,6 +1161,7 @@ mod tests {
         // Google provider should also work
         let config = AgentConfig {
             model: "gemini-2.0-flash".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "google".to_string(),
             base_url: None,
@@ -1189,6 +1198,7 @@ mod tests {
         // Anthropic with a base_url should use OpenAI-compat path
         let config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: Some("http://localhost:8080/v1".to_string()),
@@ -1225,6 +1235,7 @@ mod tests {
         // Calling build_agent twice should produce two independent agents
         let config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1317,6 +1328,7 @@ mod tests {
         // Simulates /model switch: change config.model, rebuild agent
         let mut config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1354,6 +1366,7 @@ mod tests {
         // Simulates /think switch: change config.thinking, rebuild agent
         let mut config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1622,6 +1635,7 @@ mod tests {
     fn test_agent_config_build_agent_zai() {
         let config = AgentConfig {
             model: "glm-4-plus".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "zai".to_string(),
             base_url: None,
@@ -1711,6 +1725,7 @@ mod tests {
     fn test_agent_config_build_agent_minimax() {
         let config = AgentConfig {
             model: "MiniMax-M2.7".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "minimax".to_string(),
             base_url: None,
@@ -1773,6 +1788,7 @@ mod tests {
     fn test_build_agent_bedrock() {
         let config = AgentConfig {
             model: "anthropic.claude-sonnet-4-20250514-v1:0".to_string(),
+            stream: None,
             api_key: "test-access:test-secret".to_string(),
             provider: "bedrock".to_string(),
             base_url: Some("https://bedrock-runtime.us-east-1.amazonaws.com".to_string()),
@@ -1809,6 +1825,7 @@ mod tests {
         // The Anthropic path in build_agent() should also get headers
         let agent_config = AgentConfig {
             model: "claude-opus-4-6".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1909,6 +1926,7 @@ mod tests {
         // Verify that configure_agent successfully builds an agent with context config
         let config = AgentConfig {
             model: "test-model".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1947,6 +1965,7 @@ mod tests {
         // Even without --max-turns, configure_agent should set execution limits
         let config_no_turns = AgentConfig {
             model: "test-model".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
@@ -1980,6 +1999,7 @@ mod tests {
         // With explicit max_turns, it should use that value
         let config_with_turns = AgentConfig {
             model: "test-model".to_string(),
+            stream: None,
             api_key: "test-key".to_string(),
             provider: "anthropic".to_string(),
             base_url: None,
