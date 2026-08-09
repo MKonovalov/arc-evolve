@@ -573,6 +573,10 @@ impl AgentConfig {
             .with_api_key(&self.api_key)
             .with_thinking(self.thinking)
             .with_skills(self.skills.clone());
+        
+        if let Some(tc) = &self.tool_choice {
+            agent = agent.with_tool_choice(Some(tc.clone()));
+        }
 
         if let Some(tc) = &self.tool_choice {
             agent = agent.with_tool_choice(Some(tc.clone()));

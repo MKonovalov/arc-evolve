@@ -742,8 +742,8 @@ async fn main() {
         disallowed_tools: config.disallowed_tools,
         no_tools: config.no_tools,
         lite: config.lite,
-        tool_choice: None,
-    };
+                tool_choice: None,
+};
 
     if !run_setup_wizard_if_needed(is_interactive, &mut agent_config) {
         return;
