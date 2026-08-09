@@ -578,6 +578,10 @@ impl AgentConfig {
             agent = agent.with_tool_choice(Some(tc.clone()));
         }
 
+        if let Some(tc) = &self.tool_choice {
+            agent = agent.with_tool_choice(Some(tc.clone()));
+        }
+
         // When --no-tools is active, skip all tool construction (build_tools,
         // sub_agent, shared_state). This is cleaner than building then filtering
         // and also avoids the sub_agent/shared_state bypass that disallowed_tools
