@@ -742,6 +742,7 @@ async fn main() {
         disallowed_tools: config.disallowed_tools,
         no_tools: config.no_tools,
         lite: config.lite,
+        tool_choice: None,
     };
 
     if !run_setup_wizard_if_needed(is_interactive, &mut agent_config) {
@@ -1020,6 +1021,7 @@ mod tests {
             disallowed_tools: vec![],
             no_tools: false,
             lite: false,
+            tool_choice: None,
         }
     }
 
