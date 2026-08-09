@@ -546,6 +546,10 @@ pub struct AgentConfig {
     pub disallowed_tools: Vec<String>,
     pub no_tools: bool,
     pub lite: bool,
+    /// Opt-in forced tool choice for free/open-weight models. Set to
+    /// Some("required") for models that answer in prose under tool_choice:"auto"
+    /// (e.g. tencent/hy3:free on nousresearch). None = default behavior.
+    pub tool_choice: Option<String>,
 }
 
 impl AgentConfig {
@@ -569,6 +573,10 @@ impl AgentConfig {
             .with_api_key(&self.api_key)
             .with_thinking(self.thinking)
             .with_skills(self.skills.clone());
+        
+        if let Some(tc) = &self.tool_choice {
+            agent = agent.with_tool_choice(Some(tc.clone()));
+        }
 
         // When --no-tools is active, skip all tool construction (build_tools,
         // sub_agent, shared_state). This is cleaner than building then filtering
