@@ -704,34 +704,26 @@ impl AgentConfig {
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(AnthropicProvider).with_model_config(model_config);
-            let mut agent = self.configure_agent(agent, context_window);
-            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
-                agent = agent.with_tool_choice(Some("required".to_string()));
-                agent = agent.with_stream(Some(false));
-            }
-            agent
+            self.configure_agent(agent, context_window)
         } else if self.provider == "google" {
             // Google uses its own provider
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(GoogleProvider).with_model_config(model_config);
-            let mut agent = self.configure_agent(agent, context_window);
-            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
-                agent = agent.with_tool_choice(Some("required".to_string()));
-            }
-            agent
+            self.configure_agent(agent, context_window)
         } else if self.provider == "bedrock" {
             // Bedrock uses AWS SigV4 signing with ConverseStream protocol
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(BedrockProvider).with_model_config(model_config);
-            let mut agent = self.configure_agent(agent, context_window);
-            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
-                agent = agent.with_tool_choice(Some("required".to_string()));
-            }
-            agent
+            self.configure_agent(agent, context_window)
         } else {
-            // All other providers use OpenAI-compatible API
+            // All other providers use OpenAI-compatible API.
+            //
+            // The free-model workaround below is intentionally placed ONLY here:
+            // `nousresearch` is an OpenAI-compatible provider, so the condition
+            // can never be true in the anthropic/google/bedrock branches above
+            // (dead code previously duplicated in all four branches).
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(OpenAiCompatProvider).with_model_config(model_config);
