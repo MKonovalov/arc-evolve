@@ -688,26 +688,6 @@ impl AgentConfig {
         agent
     }
 
-    /// True when the configured model is a known free endpoint that needs the
-    /// workarounds below (answers in prose under `tool_choice:"auto"` and
-    /// rejects streaming).
-    fn is_free_model(&self) -> bool {
-        self.provider == "nousresearch" && self.model == "tencent/hy3:free"
-    }
-
-    /// Apply the free-model workarounds: force `tool_choice:"required"` and
-    /// disable streaming. Previously this was duplicated (inconsistently — the
-    /// google/bedrock branches missed `with_stream`) across every branch of
-    /// `build_agent`; centralizing it keeps behavior uniform and gives new
-    /// free endpoints a single place to be added.
-    fn apply_free_model_workarounds(&self, mut agent: Agent) -> Agent {
-        if self.is_free_model() {
-            agent = agent.with_tool_choice(Some("required".to_string()));
-            agent = agent.with_stream(Some(false));
-        }
-        agent
-    }
-
     /// Build a fresh Agent from this configuration.
     ///
     /// Provider selection (Anthropic, Google, or OpenAI-compatible) and model
@@ -725,28 +705,42 @@ impl AgentConfig {
             let context_window = model_config.context_window;
             let agent = Agent::new(AnthropicProvider).with_model_config(model_config);
             let mut agent = self.configure_agent(agent, context_window);
-            self.apply_free_model_workarounds(agent)
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+                agent = agent.with_stream(Some(false));
+            }
+            agent
         } else if self.provider == "google" {
             // Google uses its own provider
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(GoogleProvider).with_model_config(model_config);
             let mut agent = self.configure_agent(agent, context_window);
-            self.apply_free_model_workarounds(agent)
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         } else if self.provider == "bedrock" {
             // Bedrock uses AWS SigV4 signing with ConverseStream protocol
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(BedrockProvider).with_model_config(model_config);
             let mut agent = self.configure_agent(agent, context_window);
-            self.apply_free_model_workarounds(agent)
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+            }
+            agent
         } else {
             // All other providers use OpenAI-compatible API
             let model_config = create_model_config(&self.provider, &self.model, base_url);
             let context_window = model_config.context_window;
             let agent = Agent::new(OpenAiCompatProvider).with_model_config(model_config);
             let mut agent = self.configure_agent(agent, context_window);
-            self.apply_free_model_workarounds(agent)
+            if self.provider == "nousresearch" && self.model == "tencent/hy3:free" {
+                agent = agent.with_tool_choice(Some("required".to_string()));
+                agent = agent.with_stream(Some(false));
+            }
+            agent
         }
     }
 
@@ -2391,41 +2385,6 @@ mod tests {
             };
             let _agent = config.build_agent();
         }
-    }
-
-    #[test]
-    fn test_free_model_workarounds_applied() {
-        // The nousresearch tencent/hy3:free endpoint needs tool_choice forced to
-        // "required" AND streaming disabled. Verify both are applied when building
-        // an agent for the free model (the openai-compat branch is the real path),
-        // and that non-free models are untouched.
-        let free = AgentConfig {
-            ..test_agent_config("nousresearch", "tencent/hy3:free")
-        };
-        assert!(free.is_free_model(), "free model should be detected");
-        let agent = free.build_agent();
-        assert_eq!(
-            agent.tool_choice.as_deref(),
-            Some("required"),
-            "free model should force tool_choice=required"
-        );
-        assert_eq!(
-            agent.stream,
-            Some(false),
-            "free model should disable streaming"
-        );
-
-        // A regular model must not pick up the workarounds.
-        let normal = AgentConfig {
-            ..test_agent_config("nousresearch", "deepseek/deepseek-v4-flash")
-        };
-        assert!(!normal.is_free_model(), "non-free model should not match");
-        let agent = normal.build_agent();
-        assert_ne!(
-            agent.tool_choice.as_deref(),
-            Some("required"),
-            "non-free model must not force tool_choice"
-        );
     }
 
     #[test]
