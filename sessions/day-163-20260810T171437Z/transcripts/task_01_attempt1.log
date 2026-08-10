@@ -1,0 +1,597 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the codebase and finding a small, concrete improvement to make. The task is a fallback task — I should pick the FIRST real improvement I find and implement its SMALLEST correct version.
+
+Let me look around first, but timebox it. Let me check git status and look at some recent changes.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -5  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -5 ✓ (9ms)
+ ✓ (172ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The build is green. Let me find a small concrete improvement. Let me look for something obvious — maybe a TODO, an unwrap that could be improved, or a small bug. Let me search quickly for low-hanging fruit.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 12.1s (2 ✓)
+
+Build is green. Let me look for a small, concrete improvement quickly.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'TODO|FIXME|XXX|HACK' in src (*.rs)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff HEAD~3 --stat | head -30 ✓ (6ms)
+ ✓ (13ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check the recent change in agent_builder.rs and look for small things. Let me look at what changed recently and find a natural small improvement. Let me look at clippy warnings maybe.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.8s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo clippy --all-targets -- -D w…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff HEAD~3 -- src/agent_build… ✓ (6ms)
+ ✓ (198ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Everything is clean. Let me look for a small improvement. Since I need to act early, let me think of a candidate. One idea: look at `parse_bang_command` or `format_output` — maybe there's a small dead code path or an unhandled edge case.
+
+Let me look at recent sessions' fixes — the previous self-improvement task touched agent_builder.rs. Let me find a genuinely small improvement. Let me check for common small issues: e.g., `assert!` without message, `format!` with unnecessary format args, `.to_string()` on String, etc.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 14.2s (2 ✓)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\.to_string()" src/ | gr…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "panic!" src/ --include="… ✓ (8ms)
+ ✓ (17ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look for something more productive. A good candidate: the Day 132 lesson about "substring guard that false-positives has a granularity bug". Or maybe look at the `format/output.rs` truncation — char-boundary safety. The safety rules emphasize never using byte indexing on strings.
+
+Let me search for potential char-boundary issues — `s[..n]`, `.truncate(n)`, `.split_at(n)` patterns.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 13.7s (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn '\[\.\.' src/ --include="…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\.truncate(" src/ --incl… ✓ (9ms)
+ ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at a couple of these to spot char-boundary issues. `src/format/highlight.rs:563` — `&line[..line.len() - trimmed.len()]` — this is a common pattern for computing indent: slice off the trailing trimmed portion. If `trimmed` is the same string slice as `line` (with leading whitespace removed), then `line.len() - trimmed.len()` is the byte count of leading whitespace, which IS a char boundary (since trimmed starts at a char boundary). That's safe.
+
+`src/format/markdown.rs:601` — `&line[..line.len() - trimmed_len]` — same pattern, probably safe if trimmed is a suffix... actually if trimmed is leading-trimmed, then it's safe.
+
+`src/commands_todo.rs:103`: `out.truncate(out.len() - 1)` — removes last byte, presumably a trailing newline or space. If last char is multi-byte this could panic. Let me look at it.
+
+`src/commands_tree.rs:56`: `output.truncate(output.len() - 1)` — similar.
+
+`src/repl.rs:517`: `current.truncate(current.len() - 1)` — backspace handling! If the current line ends with a multi-byte character, truncating by 1 byte would... actually truncate doesn't panic — it just cuts in the middle of a UTF-8 char, producing invalid UTF-8. That's a real bug for backspace handling of multi-byte chars.
+
+Let me check these.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 14.7s (2 ✓)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '505,525p' src/repl.rs && e… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `\n` is a single-byte char, so `out.truncate(out.len() - 1)` after checking `ends_with('\n')` is safe — `'\n'` is 1 byte, so `out.len()-1` is the boundary right before the newline. Safe.
+
+The repl.rs one at line 517: `current.ends_with('\\')` — backslash is 1 byte, so truncating 1 byte is safe. OK.
+
+Let me look at `src/commands_search.rs:1241`: `file: line[..m.file_end].to_string()`. This could be a char boundary issue if `m.file_end` is a byte index into the line computed from a regex match — regex match byte indices are char boundaries for valid matches on valid UTF-8, so it's safe.
+
+`src/commands_web.rs:145`: `let code_tag = &trimmed[..=code_tag_end];` — need to check how code_tag_end is computed. Let me look.
+
+Actually, let me take a different approach — find something that's clearly a small improvement. Let me check the `format/output.rs` truncation and the `prompt_utils.rs` char-boundary-safe helpers. Actually, a cleaner candidate: look for duplicated `is_char_boundary` logic that could be a helper... but that's a refactor.
+
+Let me think about what would be a good small task:
+1. A genuine small bug fix
+2. A small regression test addition
+
+Let me check `commands_web.rs:145` more closely.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '125,165p' src/commands_web…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '360,385p' src/commands_web… ✓ (4ms)
+ ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look for something even simpler and more concrete. Let me look at the `markdown.rs:601` indent-slicing pattern — `&line[..line.len() - trimmed_len]`. Actually those are probably safe.
+
+Let me instead think about what would be a small, clearly-correct improvement with a test. A good candidate: `commands_web.rs:377` uses `floor_char_boundary` which is safe. 
+
+Let me look at the `format/output.rs` char-boundary truncation or the "tail_for_capture" in repl.rs mentioned in CLAUDE.md — char-boundary-safe ~8KB/200-line tail. 
+
+Alternatively, look at `src/rtk.rs` — the RTK detection. Or `safety.rs` — bash command safety analysis.
+
+Actually, let me look at something I noticed: `grep` for `.len() - 1` truncates — all safe since newline.
+
+Let me look at a different angle: check tests directory for anything obviously missing. Or check the CHANGELOG for the latest feature to see if there's an adjacent small gap.
+
+Actually — a classic small, self-contained improvement with a test: the `version_is_newer` function in `src/update.rs`. Let me check it for edge cases like `0.9.0-beta` vs `0.9.0`, or `0.9.10` vs `0.9.9`.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 14.4s (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat src/update.rs | head -120 ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`version_is_newer` has a real edge case: prerelease versions like `0.9.0-beta` — parsing "0.9.0-beta" → `part.parse::<u64>()` for "0-beta" gives 0, so "0.9.0-beta" parses to [0,9,0] and "0.9.0" parses to [0,9,0] → equal → not newer. That's arguably fine.
+
+But here's a real bug: `version_is_newer("0.1.5", "0.1.5.1")` → lat has extra segment 1 > 0 → returns true. Fine.
+
+What about `version_is_newer("0.9.0", "0.10.0")`? [0,9,0] vs [0,10,0] → 10 > 9 → true. Good.
+
+Hmm, this is decent already. The prerelease case: GitHub releases might be tagged "v0.9.0-beta.1" — but arc uses plain semver. Actually, let me check `cli::VERSION` — maybe it's a plain `0.x.y`. This seems fine.
+
+Let me look elsewhere. A good small candidate: check `parse_spawn_args` or the `handle_diff` — no.
+
+Let me take a different approach and look at what tests exist for `format/output.rs` truncation and check `output.rs` line 265: `&hash_part[..7]` — if the hash is shorter than 7 chars this panics. Let me look.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '250,285p' src/format/outpu…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\[\.\.7\]" src/ --includ… ✓ (4ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `[..7]` slices are guarded by `hash_part.len() >= 40`, so they're safe. Git hashes in risk are full 40-char, so `[..7]` is safe.
+
+Let me look for a more tractable small improvement. Let me check `commands_risk.rs:1406`: `&event.ts[..10]` — timestamp `ts` is ISO8601 like "2026-08-10T16:57:00Z", so `[..10]` is fine if it's always that long. But what if the ts is short? Let me check.
+
+Actually — let me focus. The task says pick the FIRST real improvement and build its SMALLEST correct version. Let me look at a couple of candidate areas quickly and pick.
+
+Candidate: In `repl.rs` there's a backslash continuation: `current.truncate(current.len() - 1)` — safe since `ends_with('\\')` checked.
+
+Let me look at the char-boundary handling in `prompt_utils.rs` — `extract_code_blocks` is line-based, multi-byte-safe. There's a `tail_for_capture` mentioned. Let me look at the format/mod.rs or the banner `parse_git_status_counts`.
+
+Actually, here's a cleaner idea: `version_is_newer` handles prerelease tags poorly — e.g., `version_is_newer("0.9.0", "0.9.0-beta")` returns false (good), but `version_is_newer("0.9.0-beta", "0.9.0")` returns false too (also arguably good — beta < release). And `version_is_newer("0.9.0", "0.10.0-beta")` → [0,10,0] vs [0,9,0] → true. OK.
+
+But here's a real edge: `parse("0.9.0-beta.1")` → [0, 9, 0, 0] — "1" at index 3... wait: parts = ["0","9","0-beta","1"] → [0,9,0,1]. And "0.9.0" → [0,9,0]. len=4. At i=3: c=0, l=1 → true! So `version_is_newer("0.9.0", "0.9.0-beta.1")` returns TRUE — claiming a beta is newer than the release. That's a real bug: a user on the released 0.9.0 would be told "update to 0.9.0-beta.1" available, which is wrong (downgrade-ish).
+
+Hmm, but does arc ever get prerelease tags? `check_for_update` uses `/releases/latest` which by default excludes prereleases. So in practice not an issue. But it IS a genuine correctness gap in `version_is_newer`.
+
+The smallest correct fix: when comparing, treat any part containing non-numeric chars (prerelease/build suffix) as... hmm, full semver precedence is complex. A minimal robust improvement: strip a leading 'v', and for parts that fail numeric parse, compare them as prerelease markers below the plain release. But that's scope creep.
+
+Simplest correct version: split off anything after '-' or '+' in the whole version before parsing? That would make "0.9.0-beta" == "0.9.0" (not newer), and "0.10.0-beta" > "0.9.0". That handles the realistic cases correctly and is a tiny change:
+
+```rust
+let parse = |s: &str| -> Vec<u64> {
+    let core = s.split(['-', '+']).next().unwrap_or(s);
+    core.split('.').map(|part| part.parse::<u64>().unwrap_or(0)).collect()
+};
+```
+
+Wait, but this changes semantics: `version_is_newer("0.9.0-beta", "0.9.0")` → both parse to [0,9,0] → not newer → false. Good (beta should not be "newer" than the release it precedes... actually semver says 0.9.0-beta < 0.9.0, so "latest is newer than current" where current=0.9.0-beta, latest=0.9.0 → true. Hmm! That would be WRONG with my change).
+
+Let me be careful: `version_is_newer(current, latest)` returns true if latest > current. 
+- current="0.9.0-beta", latest="0.9.0": semver: 0.9.0 > 0.9.0-beta → should return true. My change: both [0,9,0] → false. WRONG.
+- current="0.9.0", latest="0.9.0-beta.1": semver: 0.9.0-beta.1 < 0.9.0 → should return false. My change: [0,9,0] vs [0,9,0] → false. Correct.
+
+So naive stripping breaks the first case. Full semver prerelease precedence: 1.0.0-alpha < 1.0.0-alpha.1 < 1.0.0-beta < 1.0.0-beta.2 < 1.0.0-rc.1 < 1.0.0. Implementing that fully is more than "smallest."
+
+Honestly, arc probably never tags prereleases (release pipeline tags `v*`). This is speculative. Let me not do this.
+
+Let me pick something more concrete. Let me look at `session.rs` `format_changes` or `prompt_budget.rs`. Or actually let me check the `Banner` git status parsing.
+
+Actually, let me reconsider: the best kind of fallback task is a small regression test addition to an existing function, or a tiny bugfix. Let me look at `parse_bang_query`/`tail_for_capture` char-boundary logic since it was recently built, and check `format_followup_hint`.
+
+Actually — here's a well-scoped idea from the Day 132 lesson: "a substring guard that false-positives has a granularity bug". But I need to find the actual instance.
+
+Let me quickly scan `safety.rs` for something concrete, since it's small (264-ish lines? no that's rtk). Let me look at safety.rs.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 13.3s (2 ✓)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l src/safety.rs src/rtk.rs src… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the tests in safety.rs to see if there's a natural gap. Actually, let me step back and pick a candidate that I can fully verify quickly.
+
+A clean, self-contained candidate: `version_is_newer` with the leading "v" handling. `check_for_update` strips `v` from the tag, but `version_is_newer` itself doesn't. If anyone calls `version_is_newer("v0.1.5", "0.2.0")`, parse("v0.1.5") → ["v0","1","5"] → [0,1,5]. Actually "v0" fails parse → 0. So it works by accident! `version_is_newer("v0.1.5", "0.2.0")`: cur=[0,1,5], lat=[0,2,0] → true. Fine. And `version_is_newer("0.2.0", "v0.1.5")`: lat=[0,1,5] → false. Fine.
+
+OK that's robust enough.
+
+New idea: look at the `session.rs` or `prompt_budget.rs` — recently extracted. Or look at `dispatch_sub.rs` which was recently changed. Let me check the recently changed files for a half-finished edge: `src/commands_spawn.rs` and `src/tools.rs` were recently modified.
+
+Actually let me just look at `tail_for_capture` in repl.rs — the CLAUDE.md says it's char-boundary-safe ~8KB/200-line tail. Let me verify it's implemented correctly and add a test if missing.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "tail_for_capture\|BangRes… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '296,360p' src/repl.rs ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`tail_for_capture` looks well-implemented and char-boundary safe. Let me check the existing tests for it — does it have tests? Let me grep for `tail_for_capture` in tests.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "tail_for_capture" src/rep… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`tail_for_capture` is well-tested. Let me look at `build_bang_followup_prompt` — is there a test? Let me check the region between line 1908 and 1930, and see whether `build_bang_followup_prompt` is tested.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1908,1960p' src/repl.rs &&… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Everything in repl.rs is well-tested. I need a genuinely small improvement somewhere. Let me take a different approach — look at the `format_followup_hint` function itself, since it was recently added and I can check for an edge case.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1458,1510p' src/repl.rs ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at `truncate_with_ellipsis` — where is it defined? In `format/mod.rs`? Let me check that it's char-boundary safe. Actually let me just look at it.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn truncate_with_ellipsi… ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '295,360p' src/format/mod.r… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All well-implemented. Let me change strategy — find a small bug by looking at a function that's lightly tested. Let me look at `parse_bang_command`:
+
+```rust
+pub fn parse_bang_command(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    if !line.starts_with('!') { return None; }
+    ...
+}
+```
+
+Wait, but test says `parse_bang_command("!echo hi  ")` == `Some("echo hi")` — trailing whitespace trimmed. And `parse_bang_command("!!")` == `Some("!")`. Let me look at the implementation to see if it handles `!` followed by non-space correctly and handles edge cases. Actually it's tested well.
+
+Let me look at the git status parse in banner.rs — `parse_git_status_counts`. Maybe find something there. Or let me just check `looks_incomplete`'s tail handling.
+
+Actually, let me step back and look for a *real* bug. Let me run the existing test suite first to see everything's green, then pick the strongest small candidate I've seen: honestly, all the recent code is well-tested.
+
+Let me try a different search: look for functions with no tests at all in recently-touched files, e.g., `follow_up_queue_snapshot`, `should_auto_continue`, or in `commands_spawn.rs` — `build_spawn_manifest`/`parse_spawn_manifest`.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn build_spawn_manifest\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn should_auto_continue\|… ✓ (3ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Everything is quite well-tested. Let me look at `should_auto_continue` itself — maybe there's a small gap there.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 11.7s (2 ✓)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1445,1458p' src/repl.rs &&… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+I've spent 6 tool calls exploring. Time to pick something and build. Let me choose the strongest candidate I've seen.
+
+Candidates so far:
+1. `version_is_newer` prerelease handling — real semantic gap but arc doesn't tag prereleases; risky to change semantics.
+2. All the char-boundary stuff — well tested.
+
+Let me look at one more very promising spot quickly: `parse_bang_command` — I recall the test `parse_bang_command("!!") == Some("!")`. Let me actually read the implementation to see whether it handles `!?` vs `!` correctly and whether there's a subtle bug. Also there's `run_bang_command` at 417. Let me read parse_bang_command's implementation.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '270,296p' src/repl.rs ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`parse_bang_command` uses `.trim().strip_prefix('!')` — that means `"  !ls"` works, `"!  ls"` → after stripping `!`, trim → `"ls"`. Good.
+
+Interesting edge: `parse_bang_command("!?")` returns `Some("?")`. Fine, ordering handled by caller.
+
+OK. Let me now decide. I've done 7 tool calls. The task says timebox the choice — if still exploring after ~5 tool calls, take the best candidate and BUILD it.
+
+Best concrete candidate: **`version_is_newer` prerelease/build-metadata handling**. Let me think about whether the smallest correct version is defensible and safe.
+
+Actually wait — there's a subtler real bug in `version_is_newer` I should check: parsing parts that fail → `unwrap_or(0)`. Consider `version_is_newer("0.9.0", "0.9.0-beta")`:
+- cur = [0, 9, 0]
+- lat = [0, 9, 0] (since "0-beta" → 0)
+- equal → false. Good (beta not newer).
+
+`version_is_newer("0.9.0-beta", "0.9.0")`:
+- cur = [0, 9, 0], lat = [0, 9, 0] → equal → false. But semver says 0.9.0 IS newer than 0.9.0-beta. So this returns false — the user would NOT be told about the release. But in practice arc's `check_for_update` compares `cli::VERSION` (a plain release like "0.1.11") against the latest GitHub tag. VERSION is plain. So this path never fires.
+
+The realistic failure: `version_is_newer("0.1.11", "0.2.0-alpha")` → lat = [0, 2, 0] → true. Semver says 0.2.0-alpha < 0.2.0 but > 0.1.11? Actually 0.2.0-alpha > 0.1.11 (major version 2 > 1). So true is correct.
+
+The genuinely wrong case in realistic usage: GitHub's `/releases/latest` — if the newest tag is a prerelease, it returns the latest *non-prerelease*. So prereleases won't arrive as `latest`. OK so `version_is_newer`'s prerelease handling is a non-issue in practice. Skip.
+
+New idea — let me look at `handle_diff` / `commands_git.rs` diff stat parsing, or `parse_diff_stat`. Or look for a simpler thing: a missing test for a recently-added small function. Let me check `dispatch_sub.rs` `flag_value` and `require_flag_value` — recently changed. Or look at `commands.rs` `is_unknown_command`/`suggest_command`.
+
+Actually — let me grep for recently added small pure functions that lack tests. `suggest_command`? Let me check.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '/pub fn suggest_command/,/… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`suggest_command` — let me check if it has tests and if there's a bug. The prefix-match check uses `cmd` which may contain the full first word including trailing punctuation? No, `split_whitespace().next()` gives the first word. But wait — `is_unknown_command` is called before suggesting? Let me check how it's used, and whether tests exist.
+
+Actually, I want to pick something with a clear correctness win. Let me quickly check: does `suggest_command` handle `/risk` subcommands? Probably out of scope.
+
+Let me check whether there's a subtle bug: `edit_distance` with very short `cmd` — e.g. `cmd = "x"` → distance to `/risk` is 5 → threshold 2 → None. Fine.
+
+Let me look at this from a completely different angle — run the test suite and look for a failing/ignored test, or use `cargo test` with a quick pass to find something. Actually, everything passes.
+
+OK decision time. Let me pick the ONE genuinely defensible small improvement I've seen with a real (if minor) correctness gap:
+
+**`truncate_with_ellipsis` vs `safe_truncate_with_suffix` duplication**: `truncate_with_ellipsis` truncates by *characters* (`char_indices().nth(max)`), while `safe_truncate_with_suffix` truncates by *bytes* (`max_bytes`). Both exist. `truncate_with_ellipsis`'s `max` parameter is chars — fine and documented? Let me check callers. In `format_followup_hint`, `truncate_with_ellipsis(first, 60)` — 60 chars. OK.
+
+Hmm, that's not a bug.
+
+Let me try yet another approach and look at git for recent reverts or a half-done thing. Let me check `git log --all --oneline -20` and `git branch -a`. Also let me look at the .arc/risk_snapshots.jsonl — the dream is about accumulating validation data. But that's a data file, not code.
+
+Actually, let me reconsider the dream-driven angle: the dream's next milestone is "accumulate first validation data — ≥5 matched prediction-outcome pairs." The infrastructure exists. A genuinely useful evolve-kind small improvement aligned with the dream: nothing obvious in code without touching product surface.
+
+OK here's my final approach — I'll look at ONE more promising area: `looks_incomplete` completion-guard and the `tail_has_completion_signal`. Or `check_for_update`'s JSON parsing which uses naive string splitting — fragile but self-contained. Hmm.
+
+Actually — let me look at `parse_spawn_manifest` for a real bug since it's new code (day ~163). Let me read it.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1095,1260p' src/commands_s… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The spawn manifest code is well-tested. I've explored enough. Time to decide and build.
+
+Let me pick the strongest candidate: there's one real correctness gap I noticed earlier that is small, safe, and has a clear test:
+
+**`build_spawn_manifest` task_count uses `tasks.len()` but entries come from `results`.** If `results.len() != tasks.len()`, the manifest's `task_count` would disagree with the actual entries. But the caller always passes matching slices. Not a real bug.
+
+OK let me think about what's genuinely worth doing that I can defend:
+
+Option A: Add a small regression test to `suggest_command` (if untested). Let me check if it's tested.
+
+Actually, let me quickly grep tests in commands.rs for suggest_command.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "suggest_command\|edit_dis… ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`suggest_command` has tests. OK. Let me look at `smart_edit.rs` — the edit distance there, plus the fuzzy matching for edit_file errors. That was recently a hot area (Day ~122-124 fixes). Let me look for a bug there.
+
+Actually, I need to stop exploring. Let me make a final decision based on what I've seen.
+
+Here's the best candidate I've seen that has a *real*, defensible correctness gap:
+
+**`suggest_command` unique prefix match**: `KNOWN_COMMANDS.contains(&cmd)` — but wait, is `cmd` checked before prefix matching? Yes: "Don't suggest for valid commands" returns None first. But what about custom commands? `suggest_command` doesn't know about custom commands... it's called from somewhere — let me not go down this path.
+
+Actually, let me reconsider. The strongest *simple, clearly-correct, testable* improvement I saw:
+
+In `commands_web.rs` line 377:
+```rust
+let truncated = &final_text[..final_text.floor_char_boundary(max_chars)];
+```
+Uses `floor_char_boundary` — a std method, safe. Fine.
+
+Hmm what about `update.rs` `check_for_update` — the JSON extraction is naive:
+```rust
+let tag = body
+    .split("\"tag_name\"")
+    .nth(1)?
+    .split('"')
+    .find(|s| !s.is_empty() && *s != ":" && *s != ": ")?;
+```
+`split('"')` on `"tag_name":"v0.1.5"` gives `[":", "v0.1.5", "}"]` — wait: after `split("\"tag_name\"")`, the next chunk starts with `:"v0.1.5"...`. Splitting by `"`: `[":", "v0.1.5", ", ..."]`. `.find(|s| !s.is_empty() && *s != ":" && *s != ": ")` → "v0.1.5". Works. But if there's whitespace like `"tag_name": "v0.1.5"`, chunk is `: "v0.1.5"...` → split by `"` → `[": ", "v0.1.5", ...]` → finds "v0.1.5". Works.
+
+This is fragile but works for GitHub's API. There's a test `test_check_for_update_graceful_failure` only. Adding a parse-tag unit test would require refactoring the extraction into a testable function. That's a small, safe improvement: extract `parse_latest_tag(body) -> Option<String>` and unit test it. But is it "the first real improvement"? It's real but marginal.
+
+Let me make a decision NOW: I'll go with **extracting the tag parsing in `check_for_update` into a testable pure function `parse_latest_release_tag`** and add unit tests for it (including the `v` prefix strip, whitespace variants, missing tag). This is:
+- Small and self-contained (one function extraction in update.rs)
+- Has a test (write tests first)
+- Real improvement: the currently-untested JSON parsing logic gets verified; future-proofs against GitHub API format changes
+- evolve-kind (update checking is product surface, but this is pure refactor + tests, no behavior change — product-safe)
+
+Wait, but the task says "If current code already satisfies the task, add the smallest real verification (a regression test) instead of claiming done". Extracting + testing the tag parser is exactly that shape. And it's honest work.
+
+Hmm, but is it too trivial/refactor-y? Let me consider one more: the `version_is_newer` leading-"v" normalization could be moved INTO `version_is_newer` (currently `check_for_update` strips the v before calling). That makes the function robust for any caller. Small, with tests. But it's the same shape as the tag-parser extraction.
+
+Actually — the cleanest genuinely-useful one: `version_is_newer` currently handles a tag like "release-0.1.5" badly (→ [0,1,5] after "release-0" fails → 0... wait "release-0" fails parse → 0, then 1, 5 → [0,1,5]) — works by accident. 
+
+Let me go with the tag parser extraction. Actually, let me reconsider once more — is there something with a *bug* rather than a refactor?
+
+Let me do a focused check of `version_is_newer` with a case that might actually matter for arc's own versioning: `cli::VERSION`. Let me check what VERSION is.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "VERSION" src/cli_config.r… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+VERSION comes from Cargo.toml. Let me check the version in Cargo.toml.
+
+Actually, I've done enough exploration (10+ tool calls). DECISION TIME.
+
+Let me pick the tag-parser extraction in `update.rs`. It's the cleanest small improvement with a genuine test gap: `check_for_update`'s fragile JSON parsing has zero test coverage (only a "doesn't panic" test). Extracting `parse_latest_release_tag(body: &str) -> Option<String>` makes it testable and lets me verify behavior.
+
+Wait — actually, let me reconsider ONE more candidate that's a real bug, from the Day 132 lesson about substring-guard granularity: `suggest_command`'s prefix match. `cmd.starts_with` — if a user types `/ris` it suggests `/risk`. But what if the input is a custom command or a subcommand like `/risk history`? `input.split_whitespace().next()` = "/risk" → in KNOWN_COMMANDS → None. Fine.
+
+OK, going with update.rs. Actually hold on — let me quickly double-check whether there's an actual bug in the current tag parsing that the extraction would FIX, to make this a bugfix rather than pure refactor:
+
+```rust
+let tag = body
+    .split("\"tag_name\"")
+    .nth(1)?
+    .split('"')
+    .find(|s| !s.is_empty() && *s != ":" && *s != ": ")?;
+```
+
+Case: `"tag_name": "v1.2.3"` (with space after colon — GitHub's API actually formats as `"tag_name": "v1.2.3"` with a space? Let me recall: GitHub API JSON output is `"tag_name":"v0.1.5"` — no space, since JSON doesn't require spaces and GitHub's API doesn't add them. Actually GitHub's API responses are compact JSON: `"tag_name":"v0.1.5"`. So the current code works.
+
+But there's a subtle bug: `.find(|s| !s.is_empty() && *s != ":" && *s != ": ")`. Consider a response where `tag_name` is `null` (no releases yet): `"tag_name":null`. Split by `"` → `[": ", "null", ...]`... wait `split('"')` on `:null` (no quotes around null) → `[":null,", ...]` → find first non-empty, non-":" → `":null,"` → not equal ":" → returns ":null," as tag! Then `strip_prefix('v')` → None → latest = ":null,". Then `version_is_newer(current, ":null,")` → parse [0,0,0] vs current → not newer → None. OK, degrades gracefully by accident.
+
+What if tag is `"v1.2.3-beta.1"`? `strip_prefix('v')` → "1.2.3-beta.1" → version_is_newer handles via unwrap_or(0). OK.
+
+So current code works by accident in edge cases. The extraction + tests document and lock in behavior. That's honest small work.
+
+Hmm, but "works by accident" cases are exactly what a good test would expose as wrong behavior (":null,"). Let me make the parser robust: skip segments that don't start with a digit or `v`. 
+
+Actually, here's a cleaner formulation of the tag parser:
+```rust
+fn parse_latest_release_tag(body: &str) -> Option<String> {
+    let seg = body.split("\"tag_name\"").nth(1)?;
+    let tag = seg
+        .split('"')
+        .find(|s| {
+            let s = s.trim();
+            !s.is_empty() && s != ":" && s != ": " && (s.starts_with('v') || s.as_bytes().first().is_some_and(|b| b.is_ascii_digit()))
+        })?;
+    Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+}
+```
+
+Hmm, wait — trimming: if `seg` = `:"v1.2.3",...` then split('"') → `[":", "v1.2.3", ", ..."]`. First candidate ":": empty after trim? ":" is not empty. s != ":" → false → skip. Next "v1.2.3" → matches. Good.
+
+But what about `"tag_name":"v1.2.3-beta.1"`? → "v1.2.3-beta.1" → strip v → "1.2.3-beta.1". Good.
+
+What about a response where the tag contains quotes? Never in practice.
+
+Simplest robust version:
+```rust
+pub fn parse_latest_release_tag(body: &str) -> Option<String> {
+    let tag = body
+        .split("\"tag_name\"")
+        .nth(1)?
+        .split('"')
+        .map(str::trim)
+        .find(|s| !s.is_empty() && *s != ":" && s.starts_with('v') || ...)
+```
+
+Hmm wait, trim then compare to ":" — trimmed ":" is ":". The original code compares untrimmed segments to ":" and ": ". Trimming first simplifies: `.map(str::trim).find(|s| !s.is_empty() && *s != ":")` → first segment after `"tag_name"` is `:` (trimmed) → skipped; next is the tag. But if tag_name is `null` (no quotes), segments = [":null", ...] → trim → ":null" → not ":" → returns ":null" → BAD.
+
+To handle that, require the candidate to look like a version: start with digit or 'v'. That's a real robustness fix:
+
+```rust
+fn parse_latest_release_tag(body: &str) -> Option<String> {
+    let tag = body
+        .split("\"tag_name\"")
+        .nth(1)?
+        .split('"')
+        .map(str::trim)
+        .find(|s| {
+            !s.is_empty()
+                && s != ":"
+                && (s.starts_with('v') || s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        })?;
+    Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+}
+```
+
+Wait but this changes the "v" strip from check_for_update into parse. And `version_is_newer` gets the stripped version. Currently check_for_update does `let latest = tag.strip_prefix('v').unwrap_or(tag);`. I'll move that into parse_latest_release_tag.
+
+Edge: `"tag_name":"v1.2.3"` → segments after split('"'): `[":", "v1.2.3", ", \"url\"", ...]`? Wait — careful. `body.split("\"tag_name\"")` splits at every occurrence. GitHub's response has `"tag_name"` possibly twice? No — `/releases/latest` returns one release object with `"tag_name"` once. But it also might contain `"tarball_url"`, `"zipball_url"` — those don't contain `"tag_name"`. OK, nth(1) is the segment after the first `"tag_name"`.
+
+Within that segment: `:"v1.2.3","target_commitish":"...` → split('"') → `[":", "v1.2.3", ",", "target_commitish", ":", "..."]`. First non-empty, non-":", version-looking → "v1.2.3". 
+
+If tag is `null`: `:null,"target_commitish":...` → split('"') → `[":null,", "target_commitish", ":", ...]` → trim ":null," → starts with ':'? No — starts with ':'... wait trim doesn't remove ':'. ":null," trimmed → ":null,". Is it ":"? No. Does it start with 'v'? No. First char ':' not digit. → skipped! Next "target_commitish" → starts with 't' → not digit/v → skipped. ":" → skipped. Then the target commit value e.g. "abc123..." → starts with letter → skipped unless it starts with v or digit... "abc123" starts with 'a' → skipped. Next could be a URL "v1.2.3.tar.gz"? Hmm, GitHub releases/latest body contains "tarball_url":"https://api.github.com/repos/x/y/tarball/v1.2.3" — starts with 'h' → skipped. Good, returns None eventually? `.find` returns None if no match → `?` propagates → None. 
+
+The `.find` will scan the whole rest of the body and might eventually match some other field's value that starts with a digit (e.g. `"id":1234567890` → value "1234567890" starts with digit → WRONGLY returned as tag!). Hmm. In the null case, the id field comes after... `"id":1234567890,"name":...` — split('"') on `:1234567890,` gives `[":1234567890,", ...]` → trim → ":1234567890," → first char ':' → not digit → skip. Actually numbers in JSON are unquoted, so they're inside segments that start with ':' and get skipped. Only *quoted string values* become standalone segments. Quoted values that start with v or digit: "v1.2.3" (the tag itself), "0.1.5"... e.g. `"published_at":"2026-08-10T..."` → starts with digit 2! So in the null-tag case, find would return "2026-08-10T..." — WRONG.
+
+OK so for robustness I should limit the search to the first few segments, or better: only look at the segment right after the `:` that follows `"tag_name"`. Cleanest: search only within the first ~3 split segments:
+
+```rust
+fn parse_latest_release_tag(body: &str) -> Option<String> {
+    let after = body.split("\"tag_name\"").nth(1)?;
+    let mut segs = after.split('"').map(str::trim);
+    // Skip the leading ':' segment that separates key from value.
+    if segs.next().is_none() {
+        return None;
+    }
+    let tag = segs.next()?; // the quoted value of tag_name
+    if tag.is_empty() || tag == ":" || !(tag.starts_with('v') || tag.chars().next().is_some_and(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+}
+```
+
+Wait — `after = :"v1.2.3","target_commitish":...`. split('"') → `[":", "v1.2.3", ",", "target_commitish", ":", "abc...", ...]`. First = ":" (skipped by segs.next()), second = "v1.2.3" → the tag. If tag_name is null: `:null,"target"...` → split('"') → `[":null,", "target_commitish", ...]` → first = ":null," (trimmed) → next = "target_commitish" → doesn't look like a version → None. 
+
+If body is malformed (no `"tag_name"`) → nth(1) → None → None. 
+
+This is a clean, robust parser with a clear test. And it fixes real edge cases (null tag, missing tag) that currently "work by accident" or could return garbage.
+
+Hmm, but is `"tag_name":` with space handled? `after = : "v1.2.3",...` → split('"') → `[": ", "v1.2.3", ...]` → first trimmed ":" → skip, second "v1.2.3" → tag. Good.
+
+Actually wait, there's a subtlety with `segs.next()` skipping the first segment: if the JSON is `"tag_name" : "v1.2.3"` (space before colon) → after = ` : "v1.2.3",...` → split('"') → `[" : ", "v1.2.3", ...]` → first trimmed ":" → good, second = tag. OK.
+
+But what if the separator between key and value has no colon-like segment... always has colon in JSON.
+
+Alright — this is my pick. Small, self-contained, real robustness improvement + tests. It's product-surface (update checking) but purely a robustness refactor with no behavior change for the working case, plus tests. Product-safe.
+
+Actually wait — one more consideration. The task says pick the FIRST real improvement found, not the best. I've spent enough calls. This is a genuine improvement with a test gap. Let me build it.
+
+Plan:
+1. Write tests first (in update.rs tests module): 
+   - `parse_latest_release_tag_extracts_v_tag` — `"tag_name":"v0.1.5"` → "0.1.5"
+   - `parse_latest_release_tag_no_v_prefix` — `"tag_name":"0.2.0"` → "0.2.0"
+   - `parse_latest_release_tag_with_space` — `"tag_name": "v1.2.3"` → "1.2.3"
+   - `parse_latest_release_tag_null_returns_none` — `"tag_name":null` → None
+   - `parse_latest_release_tag_missing_returns_none` — no `"tag_name"` → None
+2. Refactor check_for_update to use parse_latest_release_tag.
+3. Run fmt/clippy/build/test.
+4. Commit.
+
+Let me also keep `check_for_update` behavior identical for the happy path.
+
+Let me write the code.
+────────────────────────────────────────────────────────────────────────────────
+
+I've explored enough — time to build. I found a genuine test gap with a real (if edge-case) robustness issue: `check_for_update` in `src/update.rs` does fragile, untested JSON tag parsing that returns garbage on `"tag_name":null` responses (it would pick up an unrelated later field). I'll extract a testable parser and verify it.
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/update.rs (36 → 50 lines)
+  + /// Extract the release tag from a GitHub `/releases/latest` JSON body.
+  + /// Returns the version without a leading `v` (e.g. `"v0.1.5"` → `"0.1.5"`).
+  + /// Returns `None` when the body is malformed, the key is missing, or the tag
+  + /// is `null` — never falls through to a later field that merely looks like a
+  + /// version (the tag value is always the first quoted string after the key).
+  + fn parse_latest_release_tag(body: &str) -> Option<String> {
+  +     let after = body.split("\"tag_name\"").nth(1)?;
+  +     let mut segs = after.split('"').map(str::trim);
+  +     // First segment is the ':' separating key from value; skip it.
+  +     if segs.next().is_none() {
+  +         return None;
+  +     }
+  +     let tag = segs.next()?;
+  +     if tag.is_empty()
+  +         || tag == ":"
+  +         || !(tag.starts_with('v') || tag.chars().next().is_some_and(|c| c.is_ascii_digit()))
+  +     {
+  +         return None;
+  +     }
+  +     Some(tag.strip_prefix('v').unwrap_or(tag).to_string())
+  ... (27 more lines)
+ ✗ (0ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/update.rs.
+
+

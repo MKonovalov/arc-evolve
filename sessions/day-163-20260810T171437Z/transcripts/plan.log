@@ -1,0 +1,91 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the situation. I'm arc, the self-evolving coding agent, in the planning phase (Phase A2) of an evolution session. I need to:
+
+1. Create session_plan/ directory and clear old task files
+2. Write task files (task_01.md, task_02.md, task_03.md) based on the assessment
+3. Write issue_responses.md
+4. Commit the plan
+
+Let me look at the assessment:
+
+**Key facts:**
+- Day 163, build green, tests pass (88 passed)
+- No open issues, no agent-self backlog — community issues fully drained
+- Last night's session (free-model generalization) was REVERTED — failed to generalize the hardcoded free-model special case in `src/agent_builder.rs:731`
+- The human has shipped 4 PRs on free-model support this week (force tool_choice, non-streaming for `tencent/hy3:free`)
+- Six empty sessions (days 160-162), only 2 real task commits in 4 days
+- The free-model generalization is the highest-value, most-contested area
+
+**Dream milestone:** Accumulate the first validation data — ≥5 matched prediction-outcome pairs in the risk validation loop. The infrastructure exists (`auto_risk_snapshot`, `auto_validate_after_failure`), what's needed is enough evolve sessions with these firing.
+
+**Priority ordering:**
+0. No CI failures to fix (all green)
+1. Capability gaps — free-model generalization is the hot front
+2. Self-discovered bugs — the hardcoded free-model special case
+3. UX friction
+4-6. No human replies / agent-self / community issues
+7. Competitive improvements
+8. Release check — v0.1.16 was recently released (via human PR #19 fixing the release pipeline); probably not enough for a new release yet
+
+**Task allocation:**
+- Self-driven: at least 1 slot MUST be self-driven. The dream milestone (risk validation data) is a candidate but it's about accumulation — the lesson from Day 129 says "For milestones blocked on accumulation, automate the feed; don't add more sensors." The risk snapshot autosnapshot is opt-in (`arc_RISK_AUTOSNAPSHOT=1`). Hmm, but wait — the dream milestone is about accumulating validation data through evolve sessions firing. But actually the assessment says `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and opt-in on REPL exit — NOT in the evolve loop which commits with raw `git commit`. So the dream milestone is blocked on accumulation... The Day 129 lesson says: "For milestones blocked on accumulation, automate the feed; don't add more sensors." That suggests the right move for the dream is to automate the feed — e.g., making the evolve loop fire risk snapshots. But wait, that's an evolve-loop change which needs opt-in care... Actually the CLAUDE.md says auto_risk_snapshot does NOT fire in the evolve loop by design. Hmm, but that was a documented design decision. Actually the design says it's deliberate: "it does NOT fire in the evolve loop, which commits with raw git commit, so the snapshot half of the prediction meter accumulates only through a human/harness invocation of `arc risk snapshot`."
+
+So for the dream, the next milestone is accumulation of validation data. Since I can't accumulate data in a single session, the dream-advancing work per the Day 129 lesson would be to automate the feed — e.g., make the evolve harness record a risk snapshot after each task commit (opt-in via env var, harness-side). But scripts/evolve.sh is a protected file — "Never modify ... scripts/evolve.sh". So I can't touch that. Hmm.
+
+Actually wait — could the risk snapshot be recorded from the Rust side? The evolve loop runs `arc` with prompts... Actually the evolve loop calls the agent. The `auto_risk_snapshot` fires from `/commit` handler and REPL exit opt-in. There's `arc risk snapshot` CLI callable.
+
+Alternatively, dream-advancing could be: verify the validation loop actually works end-to-end — e.g., write a test that produces ≥1 matched prediction-outcome pair artificially, proving the measurement pipeline works so that when real data accumulates the meter will compute correctly. That's the "first test of whether the sense organ perceives something real" — well, the measurement infrastructure test.
+
+Hmm, but let me think about what's highest value. The assessment's recommendation for the planner: "the free-model generalization (config-driven tool_choice/stream overrides replacing the hardcoded tencent/hy3:free case) is the highest-value, most-contested area — the human is actively investing there and my last attempt failed. The retreat version is a minimal, well-tested extraction of the existing special case into the shared path without changing behavior."
+
+And the safety rule: "If a task has been reverted before, make it SMALLER than last time. The previous approach was too ambitious — simplify, don't retry the same scope."
+
+So Task 1: free-model generalization, but the RETREAT version — minimal extraction into a shared helper without changing behavior, well-tested. That's the assessment's explicit recommendation.
+
+Wait — but which files? `src/agent_builder.rs` primarily. Let me think about what the retreat version is:
+- Extract the existing special case (at line ~731: `provider == "nousresearch" && model == "tencent/hy3:free"` → force `tool_choice: required` + non-streaming) into a pure helper function like `is_free_model(provider, model)` plus a small function that applies the workaround — and apply it in all four provider branches (anthropic, google, bedrock, openai-compat). Actually "without changing behavior" — applying to all four branches would change behavior for the other branches, but those branches can't even reach that model currently... Hmm.
+
+Actually the previous attempt was: "extract the free-model workaround into a shared `apply_free_model_workarounds()` helper applied in all four provider branches, with a `is_free_model()` helper + test. Could not fix build after 2 eval-fix attempts."
+
+So the retreat version per the assessment: "a minimal, well-tested extraction of the existing special case into the shared path without changing behavior." So maybe: extract the hardcoded condition into a named, tested helper function `is_free_model(provider: &str, model: &str) -> bool`, keep the behavior identical (only OpenAI-compat branch uses it), add a unit test. That's small, safe, and it's a stepping stone toward the general solution. That touches 1 file + tests.
+
+Hmm, but is that really "advancing"? It's a small committed refactor — matches the recent Day 163 09:27 commit pattern (small committed refactor of same file). The task should be genuinely completable in 20 min and pass CI. The safest version: add `is_free_model()` helper + test, and use it in the OpenAI-compat branch (behavior unchanged). That's the retreat.
+
+Task 2: Dream milestone advance. The dream is about risk validation data accumulation. Options:
+a) Write a test/verification that the prediction-outcome matching pipeline computes correctly when data exists — i.e., test `parse_all_snapshots` + validation matching with synthetic data. This proves the sense organ's readout works when signal arrives. Files: `src/commands_risk_snapshots.rs` (952 lines) — has `parse_all_snapshots`, `load_validation_history_from`, `parse_validation_events`. Adding a test there.
+
+Actually wait — let me reconsider. The Day 129 lesson: "For milestones blocked on accumulation, automate the feed; don't add more sensors." The dream milestone (≥5 matched pairs) is blocked on accumulation. The feed automation options: the evolve loop doesn't record snapshots. Could I make `arc risk snapshot` run as part of the harness? scripts/evolve.sh is protected. But could the agent binary itself record a snapshot when the evolve loop commits? Hmm, there's `auto_risk_snapshot` in the `/commit` handler. The evolve loop uses raw git commit.
+
+Hmm wait, actually there IS a documented mechanism: `arc_RISK_AUTOSNAPSHOT=1` (opt-in) captures a risk snapshot on REPL exit. The evolve loop could set that env var... but evolve.sh is protected and it doesn't set it. I can't modify evolve.sh.
+
+Actually, let me re-read: "Both meter halves are now CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence." So the harness could be updated by the human, or... hmm.
+
+Actually — maybe the dream-advancing task is different: since validation data will only accumulate from real sessions, the thing I can build TODAY is the measurement itself being correct. A test that verifies `compute_accuracy_stats` / matched pairs works on synthetic data would be the "first test of whether the sense organ perceives something real" — proving the readout works when the data arrives. That's genuinely dream-advancing and completable.
+
+Alternatively, dream-advancing could be checking whether the accuracy computation exists at all — `commands_risk_accuracy.rs` has `compute_accuracy_stats`, `format_accuracy_report`. Is there a test for it? Let me check what exists. Actually I'm told not to read source files. Hmm — "Do NOT read source code files. The assessment above already contains the source architecture... Plan from the assessment." OK.
+
+So Task 2 (dream): add tests for the risk prediction→validation matching pipeline (synthetic matched pairs → `compute_accuracy_stats` output is correct). This proves the sense organ's readout works when data accumulates — the dream's "first test." Files: `src/commands_risk_accuracy.rs` (+ maybe `commands_risk_snapshots.rs`). Max 3 files. 
+
+Wait, but "Write tests before adding features" and "Never delete existing tests" — adding tests is fine.
+
+Hmm, actually, let me reconsider the dream task once more. The next milestone: "Accumulate the first validation data... Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones." The measurement function is `compute_accuracy_stats`. If it has no tests, testing it is the right dream-advancing move — when the 5 pairs accumulate, the meter must compute correctly. And it's the "first test of whether the sense organ perceives something real" in the sense of verifying the readout.
+
+Task 3: The empty-session streak / product UX? Community issues are drained. Options:
+- The six empty sessions suggest task-selection drift. But that's a planner concern, not a code task.
+- Release check: v0.1.16 was released recently (human PR #19 fixed the release pipeline). Not enough improvements for a new release — skip.
+- Maybe a product-visible small improvement? The assessment lists "arcpedia unreachable from CI (Cloudflare Access SSO)" as a blocker, but that needs human action... Actually the skill says skip silently per fail-soft. Not a code task.
+- Hmm, what about the "empty session" problem — the planner could schedule a genuinely-small product task. But what? Without community issues, I'd be guessing. The assessment says "the next session's work is self-driven."
+
+Actually, maybe Task 3 should be about the risk snapshot feeding — no wait, can't touch evolve.sh.
+
+Let me reconsider: the trajectory shows a REVERTED session (day-163 02
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+
