@@ -260,8 +260,18 @@ fn filter_noisy_patterns(s: &str) -> String {
         // ── Git commit hash abbreviation ─────────────────────────
         if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
             let hash_part = &trimmed[7..];
-            // Check that we have a 40-char hex hash
-            if hash_part.len() >= 40 && hash_part[..40].chars().all(|c| c.is_ascii_hexdigit()) {
+            // Check that we have a 40-char hex hash. Check bytes (not a slice)
+            // so a multi-byte UTF-8 char in the first 40 bytes can't panic
+            // the `[..40]`/`[..7]` slices below (char-boundary rule).
+            if hash_part.len() >= 40
+                && hash_part
+                    .as_bytes()
+                    .iter()
+                    .take(40)
+                    .all(|b| b.is_ascii_hexdigit())
+            {
+                // Bytes 0..7 are a subset of the verified ASCII hex prefix, so
+                // slicing at 7 is guaranteed to be on a char boundary.
                 result.push(format!("commit {}...", &hash_part[..7]));
                 i += 1;
                 continue;
@@ -1322,6 +1332,16 @@ mod tests {
             !result.contains(&hash),
             "should not contain full hash: {result}"
         );
+    }
+
+    #[test]
+    fn test_noisy_commit_line_unicode_no_panic() {
+        // Regression: the commit-line byte slices ([..40], [..7]) used to panic
+        // when byte 40 fell inside a multi-byte UTF-8 char (char-boundary rule).
+        // Such a line is not a real git hash, so it must pass through untouched.
+        let line = format!("commit {}", "✓".repeat(20)); // 60 bytes of 3-byte chars
+        let result = filter_noisy_patterns(&line);
+        assert_eq!(result, line, "non-hash commit line should pass through");
     }
 
     #[test]
