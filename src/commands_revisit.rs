@@ -164,11 +164,14 @@ fn is_shelved(issue: &ClosedIssue) -> bool {
 /// Format a date string for display (extract just the date part from ISO 8601).
 fn format_date(iso: &str) -> &str {
     // "2025-05-13T09:33:00Z" → "2025-05-13"
-    if iso.len() >= 10 {
-        &iso[..10]
-    } else {
-        iso
+    // Find the nearest char boundary near index 10 (dates are ASCII in
+    // practice, but byte-indexing panics on multi-byte UTF-8 — per the
+    // repo's string-safety rule).
+    let mut end = 10.min(iso.len());
+    while end > 0 && !iso.is_char_boundary(end) {
+        end -= 1;
     }
+    &iso[..end]
 }
 
 /// Format the scan output — a table of shelved/closed issues.
@@ -616,6 +619,9 @@ mod tests {
         assert_eq!(format_date("2025-05-13T09:33:00Z"), "2025-05-13");
         assert_eq!(format_date("short"), "short");
         assert_eq!(format_date(""), "");
+        // Regression: byte index 10 falls inside a multi-byte UTF-8 char
+        // ("✓" spans bytes 9..12), so slicing at [..10] would panic.
+        assert_eq!(format_date("2026-08-1✓0Z"), "2026-08-1");
     }
 
     #[test]
