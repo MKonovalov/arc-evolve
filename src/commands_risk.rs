@@ -1402,8 +1402,13 @@ fn format_recent_events(events: &[RichValidationEvent], max_events: usize) -> St
     let start = events.len().saturating_sub(max_events);
     for event in &events[start..] {
         // Shorten timestamp: prefer date portion only
+        // Find a char boundary near index 10 (ts is usually "2025-01-01T...").
+        let mut end = 10.min(event.ts.len());
+        while end > 0 && !event.ts.is_char_boundary(end) {
+            end -= 1;
+        }
         let ts_short = if event.ts.len() >= 10 {
-            &event.ts[..10]
+            &event.ts[..end]
         } else {
             &event.ts
         };
@@ -3858,5 +3863,23 @@ src/baz.rs
 
         assert_eq!(risks_reversed[0].path, "src/alpha.rs");
         assert_eq!(risks_reversed[1].path, "src/zebra.rs");
+    }
+
+    #[test]
+    fn test_format_recent_events_unicode_ts_no_panic() {
+        // Regression: the ts shortener used byte indexing (`&ts[..10]`),
+        // which panics when the first 10 bytes end inside a multi-byte
+        // UTF-8 char (the Day #250 crash class). A non-ASCII ts from the
+        // defensive rich parser must not crash the report.
+        let events = vec![RichValidationEvent {
+            ts: "2026-08-1✓0Z".to_string(), // ✓ spans bytes 9..12 → byte 10 is mid-char
+            day: 164,
+            hits: vec!["src/foo.rs".to_string()],
+            surprises: vec![],
+            accuracy_pct: 100.0,
+        }];
+        let out = format_recent_events(&events, 5);
+        assert!(out.contains("Day 164"), "should render the event day");
+        assert!(out.contains("1 hit"), "should render hit count");
     }
 }
