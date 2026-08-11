@@ -1,0 +1,78 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me evaluate this task. The task was a fallback "make one small concrete improvement and commit it" task. The diff shows a change to `src/format/output.rs` that fixes a potential panic when a "commit " line has multi-byte UTF-8 chars in the first 40 bytes.
+
+The change:
+1. Replaces `hash_part[..40].chars().all(|c| c.is_ascii_hexdigit())` (which slices at byte 40 — could panic on multi-byte char boundary) with a byte-wise check using `as_bytes().iter().take(40)`.
+2. Adds a regression test.
+
+Wait, let me check the original code carefully. The original code:
+
+```rust
+if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
+    let hash_part = &trimmed[7..];
+    // Check that we have a 40-char hex hash
+    if hash_part.len() >= 40 && hash_part[..40].chars().all(|c| c.is_ascii_hexdigit()) {
+        result.push(format!("commit {}...", &hash_part[..7]));
+```
+
+The `[..40]` slice could panic if byte 40 is inside a multi-byte char. The new code checks bytes 0..40 are all ASCII hex digits first, which guarantees bytes 0..40 are ASCII, hence 0..40 and 0..7 slices are char-boundary safe.
+
+Note: the original checked 40 chars are hex digits, then sliced `[..7]` which could also panic if byte 7 is mid-char (but if 40 chars were all ASCII hexdigits then 7 bytes is fine too). The new code is equivalent in behavior for valid inputs and safer for invalid ones.
+
+The test verifies a line with 20 checkmarks (60 bytes) passes through unchanged without panic.
+
+This is a legitimate improvement matching the task (small, concrete, committed, code-only change). Let me verify:
+- Diff is in src/ — matches "Files: src/"
+- Kind: evolve — this is a code change, not product surface (it's internal output filtering, but is it product surface? The change doesn't change any config defaults, CLI flags, setup wizard, or startup behavior — it fixes a potential panic in output filtering. This is a bug fix, not a product-surface change. No opt-in needed.)
+- Build and tests pass per harness.
+- The test was added — good.
+- Did they commit? The task says COMMIT immediately. Let me check git status/log to verify the commit exists.
+
+Let me do a quick verification: check git log to confirm the commit, and verify the test actually exists. The instructions say don't re-run the full suite. I can do a quick check of git log and maybe verify the diff is committed.
+
+Also check whether docs needed updating — the task didn't change user-facing behavior (it's a bug fix for a panic), so no docs needed.
+
+Let me run a couple of quick checks.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD | head -20 ✓ (5ms)
+ ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit exists, only touches `src/format/output.rs`, and the working tree is clean (git status shows nothing beyond the log output... actually the second command showed only the show output, no status output — wait, the first command combined log and status; the status output would have appeared after the log lines. It shows nothing after "cf75723..." lines, meaning clean tree).
+
+The change:
+- Fixes a real potential panic (char-boundary rule violation in `[..40]` slice on a multi-byte char) — this matches the repo's stated safety rule about never using byte indexing on strings.
+- Adds a regression test.
+- No product-surface change (no config defaults, CLI flags, setup, startup) — it's an internal output-filter robustness fix, so no opt-in concern for evolve-kind.
+- Build/test pass per harness.
+- No docs needed — behavior for valid inputs unchanged; it's a panic fix, not a behavior change for real git hashes.
+
+Let me quickly verify the current file content matches the diff (the committed version) — actually the diff was shown as the task's changes, and the commit stat matches (22 insertions, 2 deletions — consistent with the diff shown: ~10 lines added in filter_noisy_patterns + 10 lines test + 2 comment lines changed... the shown diff has roughly 22 insertions/2 deletions. Good enough.
+
+Verdict: PASS.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.3s (2 ✓)
+
+The commit exists and is scoped exactly to the task: `cf75723` touches only `src/format/output.rs` (+22/−2), working tree clean.
+
+**Assessment:**
+• **Matches task**: small, concrete, committed improvement — replaces a panic-prone `[..40]` byte slice (which violates the repo's char-boundary rule when byte 40 falls inside a multi-byte UTF-8 char) with a byte-wise `is_ascii_hexdigit()` check, plus a regression test.
+• **Kind: evolve, no red flag**: no config defaults, CLI flags, setup wizard, or startup behavior changed — internal output-filter robustness fix, so no opt-in requirement.
+• **Behavior equivalence**: for real 40-char ASCII hex hashes, behavior is unchanged; non-hash lines pass through untouched (the fix only affects the previously panicking case).
+• **Tests added**: yes, `test_noisy_commit_line_unicode_no_panic`. Harness reports build + tests pass.
+• **Docs**: no user-facing behavior change, so no doc update needed.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ write session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Verdict written to `session_plan/eval_task_1.md`: **PASS**. The change is a correctly-scoped, committed robustness fix (no panics on multi-byte chars in commit lines) with a regression test, build/test green, and no product-surface impact.
+
+

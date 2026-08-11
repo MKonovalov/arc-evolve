@@ -1,0 +1,411 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the repo and finding a small, concrete improvement to make. The task says: make ONE small, concrete improvement, bias toward finishing, commit quickly.
+
+Let me first check git status and look for quick wins. The rules say: timebox the choice — if still exploring after ~5 tool calls, take the best candidate and build it. Act early.
+
+Let me look at the repo state first.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short && git log --on…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 ✓ (9ms)
+ ✓ (130ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The repo builds fine. Working tree is clean. Let me find a small concrete improvement quickly. Let me look at recent changes to see what was done and find a small gap.
+
+Let me look for a small, low-risk improvement. Some ideas:
+- A small TODO/FIXME in src/
+- A missing test
+- A small bug
+
+Let me search for TODO/FIXME/XXX comments or suspicious code quickly.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.9s (2 ✓)
+
+Build is green and tree is clean. Let me quickly scan for a small concrete improvement.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "TODO\|FIXME\|XXX\|HACK" …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "unwrap()" src/ --include… ✓ (7ms)
+ ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Nothing obvious in non-test code (most unwraps are in tests). Let me look at a candidate area — maybe a small helper function that could be improved. Let me check for clippy warnings first since clippy runs with -D warnings.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.0s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo clippy --all-targets -- -D w…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "as u32\|as i32\|as usize… ✓ (4ms)
+ ✓ (16.4s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Everything's clean. Let me look for a small real improvement. Let me check the recently changed files — maybe there's a small helper in commands_revisit.rs or commands_risk.rs that lacks a test or has a gap.
+
+Let me look at a good candidate: a small pure function that lacks tests. Let me look at what's in src/commands_revisit.rs since it's recently changed.
+
+Actually, let me be more efficient. Let me look at a specific area: the `parse_bang_command` / `parse_bang_query` in repl.rs, or something with obvious test gaps. Let me check the git log to see what was done in recent sessions to avoid duplicate work.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 22.3s (2 ✓)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -30 | head -30 &… ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at a small candidate. Since this is a fallback task, I want something small and concrete. Let me look at recent activity — commands_revisit.rs was touched. Let me find a small helper in a pure function that could use a test or improvement.
+
+Let me check the `safety.rs` file — it has destructive pattern detection. Or look at `format/output.rs` which has compression. Or `update.rs` version_is_newer.
+
+Actually, a quick win: check `version_is_newer` in update.rs — it likely has tests. Let me find a small pure function without tests.
+
+Let me be pragmatic — look for a function with a clear edge case bug. Let me check `rtk.rs` or `commands_stash.rs`. Actually, let me look at a really simple thing: check the `estimate_tokens_simple` in commands_file.rs or `fuzzy_score` in commands_search.rs.
+
+Let me pick a targeted search: find pure functions with no nearby #[cfg(test)] coverage. Quick approach — pick one function, read it, add a test for an edge case if behavior is correct, or fix a small bug if found.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn is_image_extension\|f…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,60p' src/update.rs ✓ (3ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+`version_is_newer` is a nice pure function. Let me check if it has tests. Let me also look at the `check_for_update` — it uses curl and a naive JSON parse, but that's not a great target.
+
+Let me quickly check the edge cases of `version_is_newer`:
+- "0.1.5" vs "0.2.0" → true
+- "0.2.0" vs "0.1.5" → false
+- "0.1.5" vs "0.1.5" → false (equal)
+- "1.0" vs "1.0.0" → false (equal after padding)
+- "0.9" vs "0.10" → true (0.10 > 0.9) — good, handles multi-digit
+- "v1.0" vs "1.0" — the caller strips prefix, fine
+
+Hmm, a bug: "0.1" vs "0.1.5" — cur = [0,1], lat = [0,1,5]. len = 3. i=0: equal, i=1: equal, i=2: c=0 (missing → 0), l=5 → true. Correct: 0.1.5 is newer than 0.1. Good.
+
+Edge: "1.0.0" vs "1.0.0-beta"? split('.') gives ["1","0","0-beta"], parse fails → 0. So 1.0.0-beta would parse as 1.0.0. And "1.0.0" vs "1.0.0" → false. That's a semantic version issue but probably fine for this use.
+
+Let me check if there are existing tests for version_is_newer.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 7.6s (2 ✓)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "version_is_newer\|mod tes… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+version_is_newer is well-tested already. Not a good candidate.
+
+Let me find a small improvement elsewhere. Let me check something recently changed — commands_revisit.rs had a fix in the last session. Maybe there's another small pure function lacking tests, or a small edge-case bug.
+
+Let me check `parse_diff_stat` in commands_git.rs — a pure function for parsing `git diff --stat` output. It has a test for binary files already.
+
+Let me look at safety.rs destructive patterns, or `fuzzy_score` in commands_search.rs.
+
+Actually — a quick win idea: `check_for_update` parses JSON via string splitting. A more robust approach would use serde_json, but that adds a dependency maybe. Not small.
+
+Let me look at `banner.rs` parse_git_status_counts — a pure function. Check for tests.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_git_status_count…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "#\[test\]" src/format/ou… ✓ (3ms)
+ ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+parse_git_status_counts has tests. Let me try a different approach — look for something small in a recently-added feature. Let me look at commands_revisit.rs since it was just modified in the last session. Maybe there's a small gap there.
+
+Actually, let me look at the `safety.rs` destructive pattern detection — a pure function. Or check `commands_stash.rs` parse logic.
+
+Alternatively, let me look at something like `extract_code_blocks` in prompt_utils.rs or `tail_for_capture` / `parse_bang_command` in repl.rs.
+
+Let me be decisive. I'll look at one specific area: the recent fix commit e081f6b "Fix char-boundary panic when shortening unicode risk-event timestamps". This suggests there's a char-boundary-safe truncation helper somewhere. Let me check if there are similar `truncate`-style helpers elsewhere that still do unsafe truncation — that would be a small, concrete, valuable fix (the CLAUDE.md safety rule mentions this explicitly).
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.0s (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show e081f6b --stat | head -10… ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good — there's a `safe_truncate` helper already in use widely. Let me search for any remaining raw byte-slicing on strings that could still panic — e.g., `[..n]` slicing patterns outside of tests.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\[\.\.[0-9]" src/*.rs sr… ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check `src/git.rs:411` — `line[..2]` on a git porcelain line. That could panic if the line has a multi-byte char in the first 2 bytes... but git porcelain status lines are ASCII (`XY path`), so the first 2 bytes are ASCII. Let me check.
+
+Also `src/format/output.rs:264-265` — hash_part is a commit hash, ASCII hex. `hash_part[..40]` — if the line starts with "commit " and then 40 hex chars... the code checks `hash_part.len() >= 40` then `hash_part[..40].chars().all(is_ascii_hexdigit)`. But slicing `[..40]` on a string with multi-byte chars in the first 40 bytes would panic. hash_part comes from... let me look at the context. If hash_part is a git hash, it's ASCII. But if it's a commit subject line, could have unicode.
+
+Let me look at both contexts quickly.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '395,425p' src/git.rs; echo… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Analysis:
+
+1. `src/git.rs` `parse_status_files`: `line[..2]` — porcelain format is `XY filename` where X and Y are ASCII status chars, so first 2 bytes are always ASCII. And `line[3..]` — index 3 is after the space; filename starts at byte 3. Wait, porcelain format is `XY <filename>` — 2 status bytes + 1 space = filename starts at byte index 3. But the check `line.len() < 4` returns None. Hmm, if line is "?? x" then filename = "x". OK. What if the filename starts with a multi-byte char? `line[3..]` — byte 3 is the space (ASCII), so slice at byte 3 is a char boundary. Fine.
+
+2. `src/format/output.rs` line 264: `hash_part[..40]` — hash_part is `&trimmed[7..]` where trimmed starts with "commit ". `trimmed.len() >= 47` guarantees hash_part.len() >= 40. If the 40th byte is inside a multi-byte char (e.g. `git log` output with a commit subject starting with unicode), `hash_part[..40]` would panic. BUT the guard is `hash_part[..40].chars().all(|c| c.is_ascii_hexdigit())` — the slice happens BEFORE the check. If bytes 1-40 contain a multi-byte char, `hash_part[..40]` panics.
+
+Wait — but this is git log output where the hash is at the start: "commit <40-hex>". The check verifies the first 40 chars are hex. For a git log line, the 40 hex chars are ASCII so no panic. But consider `git log` output where... actually the whole point of the check is to detect lines that have a hex hash. If the line is `commit ✓...` (unicode in subject), hash_part[..40] would include multi-byte bytes → panic.
+
+But hold on — how does this code get invoked? This is `compress_tool_output` or similar in format/output.rs, filtering git log output. A line "commit <hash> <subject>" — hash is ASCII hex always (git hashes are hex). So `hash_part[..40]` is always within ASCII hex chars... unless the hash is shorter. The check `hash_part.len() >= 40` requires at least 40 bytes, and git hashes are exactly 40 hex ASCII chars. So `hash_part[..40]` is safe for real git output.
+
+Hmm, but wait: with SHA-256 repos, hashes are 64 chars. With abbreviated hashes in some contexts... `git log` default shows full 40-char hashes. If hash_part has ≥40 bytes but the 40th byte is mid-char — that would require non-ASCII in first 40 bytes, which for real git log lines means the hash is shorter than 40 (e.g. `git log --oneline` shows 7-char hashes: "commit abc1234 subject..."). Wait, does git log ever print "commit <hash>" with --oneline? No — --oneline prints just the hash, no "commit " prefix. The "commit " prefix appears in full git log output.
+
+Hmm, but there's a subtle case: `git log --format=...` could produce "commit abc1234 ✓ unicode subject" where after the 40-char hash there's a space and unicode subject. `hash_part[..40]` = exactly the hash → ASCII → safe.
+
+But what if the hash_part is `abc1234 ✓ ...` where hash is only 7 chars (abbreviated)? Then `hash_part[..40]` spans the unicode → panic! Does git output "commit <abbrev-hash>"? `git log` default shows full hashes. But `git show` / other commands? The code checks `trimmed.starts_with("commit ")`. When would a tool output line start with "commit " and have an abbreviated hash? E.g., `git log --oneline`? No. `git status`? No.
+
+Actually, let me check what context this runs in — this is in `compress_tool_output` probably, applied to arbitrary tool output. A user's tool output could literally print "commit ✓✓✓..." or a git alias that outputs "commit abc1234 some unicode...". Since this code is applied to arbitrary bash output in arc's product (tool output compression), it can hit arbitrary lines. So `hash_part[..40]` on a line like `commit 我爱你我爱你我爱你我爱你我爱你...` (a Chinese sentence starting with "commit ") would panic if byte 40 is mid-char. That's a real (if unlikely) panic bug — same class as the one just fixed in e081f6b.
+
+The fix is small: use `is_char_boundary` before slicing, or better, only slice when the first 40 bytes are ASCII. Cleanest minimal fix:
+
+```rust
+if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
+    let hash_part = &trimmed[7..];
+    // Check that we have a 40-char hex hash (byte-slice safely: only slice
+    // when byte 40 is a char boundary, so a multi-byte first char can't panic)
+    if hash_part.len() >= 40
+        && hash_part.is_char_boundary(40)
+        && hash_part[..40].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        ...
+    }
+}
+```
+
+Wait, but `hash_part[..40]` when byte 40 is a char boundary is safe. And `hash_part[..7]` — if the first 7 bytes contain a multi-byte char, that could also panic! `&hash_part[..7]` for the "commit {}..." output. If hash is 40 ASCII hex chars, [..7] is fine. But if the check passed, we know [..40] is all ASCII hex, so [..7] is fine too (subset).
+
+Actually a cleaner approach: check the first 40 bytes are all ASCII hexdigit via bytes:
+
+```rust
+if hash_part.len() >= 40 && hash_part.as_bytes()[..40].iter().all(u8::is_ascii_hexdigit) {
+```
+
+That avoids char-boundary issues entirely since byte iteration is safe. Then `hash_part[..7]` is safe because first 40 bytes are ASCII. Wait — `hash_part[..7]` needs byte 7 to be a char boundary; if bytes 0-39 are all ASCII hex, byte 7 is ASCII → char boundary. Safe.
+
+Let me check whether there's a test for this function and add a regression test.
+
+Actually, let me also verify the `line[..2]` in git.rs — porcelain XY codes are always ASCII. Even for a rename "R  old -> new", X and Y are ASCII. So safe. And `line[3..]` — byte 3 is the space separator (ASCII). Safe.
+
+Let me look at the format/output.rs context to see the function name and existing tests.
+────────────────────────────────────────────────────────────────────────────────
+
+Found a promising candidate. `format/output.rs:264` slices `hash_part[..40]` before verifying ASCII hex — a multi-byte char in the first 40 bytes would panic. Same bug class as the e081f6b fix. Let me check the function and its tests.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn " src/format/output.rs… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The function containing the bug is `filter_noisy_patterns` (line 189). Let me look at it and check existing tests for it.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '189,310p' src/format/outpu… ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me verify the panic: `hash_part[..40]` where `hash_part` has ≥40 bytes but byte 40 is inside a multi-byte char.
+
+Example: `trimmed = "commit ✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓✓"` (each ✓ is 3 bytes, so 20 ✓ = 60 bytes ≥ 47). `hash_part = "✓✓✓✓..."` (40 bytes = 13.33 chars, so byte 40 is mid-char). `hash_part[..40]` → panic!
+
+Let me confirm with a quick test. Also `&hash_part[..7]` — byte 7 would be mid-char of a 3-byte char → also panic if reached. But since [..40] panics first, fixing the boundary issue at 40 with `is_char_boundary` and requiring all-ASCII-hex would make [..7] safe too (since [..40] all ASCII ⇒ [..7] all ASCII).
+
+Minimal fix: replace the byte slicing with byte-level checks:
+
+```rust
+if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
+    let hash_part = &trimmed[7..];
+    // Check that we have a 40-char hex hash. Iterate bytes (not chars) so
+    // a multi-byte UTF-8 char in the first 40 bytes can't panic a slice.
+    if hash_part.len() >= 40
+        && hash_part
+            .as_bytes()
+            .iter()
+            .take(40)
+            .all(|b| b.is_ascii_hexdigit())
+    {
+        // Bytes 0..7 are ASCII (subset of the verified hex prefix) — safe to slice
+        result.push(format!("commit {}...", &hash_part[..7]));
+        i += 1;
+        continue;
+    }
+}
+```
+
+Wait — `b.is_ascii_hexdigit()` — u8 has `is_ascii_hexdigit` method. Yes, `u8::is_ascii_hexdigit`.
+
+Note the `trimmed.len() >= 47` requirement: "commit " is 7 bytes + 40 = 47. So hash_part.len() >= 40 is guaranteed when trimmed.len() >= 47. But keep both checks for clarity; actually the len check is redundant. I can simplify but minimal edit: keep the structure, change the check.
+
+Let me write a regression test that would panic before the fix:
+
+```rust
+#[test]
+fn filter_noisy_patterns_commit_line_unicode_no_panic() {
+    // A line starting with "commit " whose 40th byte falls inside a
+    // multi-byte UTF-8 char must not panic the byte slice (regression for
+    // the char-boundary rule).
+    let line = format!("commit {}", "✓".repeat(20)); // 40 bytes of 3-byte chars
+    let result = filter_noisy_patterns(&line);
+    assert!(result.contains("commit"));
+}
+```
+
+Wait — "✓".repeat(20) = 60 bytes. trimmed.len() = 7 + 60 = 67 ≥ 47. hash_part = 60 bytes ≥ 40. hash_part[..40] — byte 40 is inside char #14 (chars are 3 bytes: bytes 39,40,41 are char 14) → panic before fix. After fix: bytes[..40] contain multi-byte → not all hexdigit → falls through, line kept as-is. Good.
+
+Let me find where the tests are in the file and where the commit-related tests are, to add the test near them. Let me look at the tests around line 1190-1400.
+────────────────────────────────────────────────────────────────────────────────
+
+Confirmed the bug: `hash_part[..40]` slices before verifying ASCII, so a line like `commit ✓✓✓...` (40 bytes spanning a 3-byte char) panics. Same class as the e081f6b fix. Let me look at the existing commit-line tests to add a regression test.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1280,1400p' src/format/out… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's a `test_noisy_git_hash_abbreviated` test. I'll add a regression test right after it. Let me write the fix and the test.
+
+First, let me confirm the panic happens with a quick reproduction.
+────────────────────────────────────────────────────────────────────────────────
+
+Let me confirm the panic with a quick reproduction before fixing:
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat > /tmp/pan… (13 lines) ✓ (76ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Panic confirmed. Now apply the fix and add a regression test.
+────────────────────────────────────────────────────────────────────────────────
+
+Panic confirmed. Now the fix:
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/format/output.rs (9 → 19 lines)
+            if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
+                let hash_part = &trimmed[7..];
+  -             // Check that we have a 40-char hex hash
+  -             if hash_part.len() >= 40 && hash_part[..40].chars().all(|c| c.is_ascii_hexdigit()) {
+  +             // Check that we have a 40-char hex hash. Check bytes (not a slice)
+  +             // so a multi-byte UTF-8 char in the first 40 bytes can't panic
+  +             // the `[..40]`/`[..7]` slices below (char-boundary rule).
+  +             if hash_part.len() >= 40
+  +                 && hash_part
+  +                     .as_bytes()
+  +                     .iter()
+  +                     .take(40)
+  +                     .all(|b| b.is_ascii_hexdigit())
+  +             {
+  +                 // Bytes 0..7 are a subset of the verified ASCII hex prefix, so
+  +                 // slicing at 7 is guaranteed to be on a char boundary.
+                    result.push(format!("commit {}...", &hash_part[..7]));
+                    i += 1;
+                    continue;
+ ✓ (0ms)
+            if trimmed.starts_with("commit ") && trimmed.len() >= 47 {
+                let hash_part = &trimmed[7..];
+  -             // Check that we have a 40-char hex hash
+  -             if hash_part.len() >= 40 && hash_part[..40].chars().all(|c| c.is_ascii_hexdigit()) {
+  +             // Check that we have a 40-char hex hash. Check bytes (not a slice)
+  +             // so a multi-byte UTF-8 char in the first 40 bytes can't panic
+  +             // the `[..40]`/`[..7]` slices below (char-boundary rule).
+  +             if hash_part.len() >= 40
+  ... (11 more lines)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Now the regression test, right after `test_noisy_git_hash_abbreviated`:
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/format/output.rs (14 → 24 lines)
+                !result.contains(&hash),
+                "should not contain full hash: {result}"
+            );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_noisy_commit_line_unicode_no_panic() {
+  +         // Regression: the commit-line byte slices ([..40], [..7]) used to panic
+  +         // when byte 40 fell inside a multi-byte UTF-8 char (char-boundary rule).
+  +         // Such a line is not a real git hash, so it must pass through untouched.
+  +         let line = format!("commit {}", "✓".repeat(20)); // 60 bytes of 3-byte chars
+  +         let result = filter_noisy_patterns(&line);
+  +         assert_eq!(result, line, "non-hash commit line should pass through");
+        }
+ ✓ (0ms)
+                !result.contains(&hash),
+                "should not contain full hash: {result}"
+            );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_noisy_commit_line_unicode_no_panic() {
+  +         // Regression: the commit-line byte slices ([..40], [..7]) used to panic
+  ... (6 more lines)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (18.0s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --lib format::output 2>… ✓ (138ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test output:: 2>&1 | tail -1… ✓ (20.6s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `output::` filter ran 118 tests in the lib target including my new one. Let me verify my specific test ran and passed, then run the full test suite.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test test_noisy_commit_line_… ✓ (1m 0s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The grep only shows the first "test result" line — let me get the full results to confirm everything passes.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | grep -E "^test r… ✓ (48.2s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All 4294 lib tests + 88 integration tests pass. cargo fmt, clippy, build all pass. Time to commit.
+────────────────────────────────────────────────────────────────────────────────
+
+All green: 4294 lib + 88 integration tests pass, clippy/fmt clean. Committing:
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add -A && git commit -m "Day 1… ✓ (18ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Done. One small, committed improvement:
+
+**Fix a char-boundary panic in `filter_noisy_patterns` (`src/format/output.rs`).**
+
+• **The bug**: the git-log filter checked `hash_part[..40]` (and later sliced `[..7]`) *before* verifying the bytes were ASCII hex. A tool-output line like `commit ✓✓✓…` — ≥47 bytes where byte 40 falls inside a multi-byte UTF-8 char — panicked with `end byte index 40 is not a char boundary` (reproduced standalone before fixing).
+• **The fix**: check the first 40 bytes with `as_bytes().iter().take(40).all(|b| b.is_ascii_hexdigit())` instead of slicing. Since a real git hash is all-ASCII, `[..7]` is guaranteed to land on a char boundary once the byte check passes. Non-hash unicode lines now pass through untouched.
+• **The test**: `test_noisy_commit_line_unicode_no_panic` — a regression test that panics before the fix and asserts pass-through after.
+
+Verified: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo build`, `cargo test` (4294 lib + 88 integration passing) all green. Committed as `cf75723`.
+
+
