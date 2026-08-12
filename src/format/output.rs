@@ -81,13 +81,16 @@ fn strip_ansi_codes(s: &str) -> String {
                     chars.next(); // consume '['
                                   // Skip parameter bytes: digits, semicolons, and private markers
                     while let Some(&p) = chars.peek() {
+                        // Parameter bytes are 0x30..=0x3F: digits, ':' (colon-
+                        // separated SGR subparameters, ITU-T T.416), ';', '<',
+                        // '=', '>', '?'. Anything else ends the parameter run.
                         if p.is_ascii_digit()
+                            || p == ':'
                             || p == ';'
                             || p == '?'
                             || p == '>'
                             || p == '<'
                             || p == '='
-                            || p == '!'
                         {
                             chars.next();
                         } else {
@@ -2456,6 +2459,14 @@ mod tests {
         let input = "\x1b[1mbold\x1b[0m \x1b]0;title\x07 \x1bMtext";
         let result = strip_ansi_codes(input);
         assert_eq!(result, "bold  text");
+    }
+
+    #[test]
+    fn test_strip_ansi_colon_sgr() {
+        // Colon-separated SGR (ITU-T T.416): ESC[38:2::R:G:Bm
+        let input = "\x1b[38:2::255:0:0mtext";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "text");
     }
 
     #[test]
