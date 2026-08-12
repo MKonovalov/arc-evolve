@@ -128,9 +128,23 @@ fn strip_ansi_codes(s: &str) -> String {
                         }
                     }
                 }
-                // Two-character escape: ESC + single ASCII letter (@ through ~)
-                Some(&ch) if ('@'..='~').contains(&ch) => {
-                    chars.next(); // consume the letter
+                // Other ECMA-48 escape sequences:
+                // - ESC + byte in 0x40..=0x7E (F2..F4, e.g. ESC D / ESC M / ESC c)
+                // - ESC + byte in 0x30..=0x3F (FE, e.g. ESC 7 save cursor,
+                //   ESC 8 restore cursor, ESC = / ESC > keypad) — previously
+                //   the byte leaked into the output as literal text
+                // - ESC + intermediate byte in 0x20..=0x2F + final byte in
+                //   0x30..=0x7E (3-char, e.g. ESC ( B charset selection)
+                Some(&ch) => {
+                    chars.next(); // consume the byte after ESC
+                    if (' '..='/').contains(&ch) {
+                        // 3-char escape: also consume the final byte
+                        if let Some(&f) = chars.peek() {
+                            if ('0'..='~').contains(&f) {
+                                chars.next();
+                            }
+                        }
+                    }
                 }
                 // Unknown/malformed: just skip the ESC character
                 _ => {}
@@ -2406,6 +2420,34 @@ mod tests {
         let input = "before\x1bMmiddle\x1bDafter";
         let result = strip_ansi_codes(input);
         assert_eq!(result, "beforemiddleafter");
+    }
+
+    #[test]
+    fn test_strip_ansi_fe_two_char_escape_no_leak() {
+        // Regression: ESC 7 / ESC 8 (save/restore cursor) and ESC = / ESC >
+        // (keypad mode) are two-char FE sequences whose byte is in 0x30..=0x3F.
+        // The byte used to leak into the cleaned output as literal text.
+        let input = "hello\x1b7world\x1b8done\x1b=\x1b>";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "helloworlddone");
+    }
+
+    #[test]
+    fn test_strip_ansi_three_char_escape_no_leak() {
+        // Regression: ESC ( B (charset selection) is a 3-char escape
+        // (intermediate 0x20..=0x2F + final byte). "(B" used to leak through.
+        let input = "a\x1b(Bb";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "ab");
+    }
+
+    #[test]
+    fn test_strip_ansi_three_char_escape_multibyte_final_kept() {
+        // A 3-char escape whose "final byte" is actually a multi-byte char is
+        // malformed: consume only the intermediate byte, keep the char intact.
+        let input = "a\x1b(✓b";
+        let result = strip_ansi_codes(input);
+        assert_eq!(result, "a✓b");
     }
 
     #[test]
