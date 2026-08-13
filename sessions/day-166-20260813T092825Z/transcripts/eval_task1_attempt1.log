@@ -1,0 +1,106 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me analyze this task. The task was to make ONE small, concrete improvement and commit it. The diff shows a change to `src/commands_revisit.rs` that adds labels to `SHELVED_LABELS` — specifically adding "won'tfix" and "won't fix" variants, and reordering.
+
+Let me verify the diff actually matches the committed state. Let me check:
+1. The diff is small and concrete — adds "won'tfix" and "won't fix" as shelved labels
+2. There's a comment mentioning `contains_word` — I should check that function exists and matches whole words as claimed
+3. Build and tests pass (per harness)
+
+Let me quickly check the code to verify `contains_word` exists and the label matching works as described.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ search 'contains_word|SHELVED_LABELS' in src/commands_revisit.rs ✓ (2ms)
+ ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit exists (472a639). But the search found no matches for `contains_word|SHELVED_LABELS` in src/commands_revisit.rs? That's odd. Wait, maybe the working tree is different. Let me check the actual file content and whether the commit is on HEAD.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.2s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD | head -10 &&…  ▶ read src/commands_revisit.rs:14..54 ✓ (0ms)
+ ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit is on HEAD and the working tree is clean. The file contains the new labels. Now I need to verify the claim in the comment: that matching is done via `contains_word` for whole-word matching. Let me search for how SHELVED_LABELS is used — maybe the search tool failed because it searched the whole file but the pattern is there... Actually the search returned "No matches found" which is strange since SHELVED_LABELS clearly exists at line 22. Maybe the search tool had a regex issue with the apostrophe. Let me search for just `contains_word` and how labels are checked.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.1s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "contains_word\|SHELVED_LA… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's an inconsistency. The doc comment at line 20-21 claims labels are "Matched as whole words (see `contains_word`)" — but the actual matching at line 161-163 uses `lower.contains(s)` which is a substring match, NOT whole-word matching. There's no `contains_word` function in the file at all.
+
+However — this is a comment discrepancy, not a functional bug. Let me evaluate the actual behavior:
+
+The claim in the comment: "Matched as whole words (see `contains_word`) so labels like 'bilateral' or 'collateral' don't false-positive via the 'later' substring."
+
+The actual code: `SHELVED_LABELS.iter().any(|s| lower.contains(s))` — substring matching. So "bilateral" DOES contain "later" as a substring, meaning the comment's claim is false. And there's no `contains_word` function.
+
+Wait — but let me check: was this false-positive behavior pre-existing? Yes, the substring matching was pre-existing (not changed by this diff). The diff only:
+1. Added "won'tfix" and "won't fix" to the list
+2. Reordered entries
+3. Added a misleading doc comment
+
+So the actual functional change: adding "won'tfix" and "won't fix" labels. Is that correct? A label "wontfix" already existed. Adding "won'tfix" (without apostrophe in a different position) and "won't fix" (with space) covers more GitHub label naming variants. That's a reasonable, small improvement.
+
+But wait — the comment is misleading/wrong. It claims whole-word matching via `contains_word` which doesn't exist, and claims "bilateral"/"collateral" don't false-positive — which is false since the matching is substring-based. However, note: the labels are matched in `label.to_lowercase()`, and GitHub labels are typically kebab-case like "wontfix", "won't-fix"... Actually "bilateral" would contain "later"? b-i-l-a-t-e-r-a-l — yes, "later" is a substring of "bilateral". And "collateral" contains "later" too. So the comment's claim is factually wrong.
+
+But does that matter for the verdict? The task was "Make ONE small, concrete improvement and commit it." The improvement is: added "won'tfix" and "won't fix" label variants to the shelved detection. That's a real, small improvement. The comment is slightly misleading but it's just a doc comment.
+
+Hmm, is the false-positive issue a real concern? Actually the pre-existing code already had the false-positive problem with "later". The comment claims it's fixed but it isn't. But this is a comment-only issue — the actual improvement (more label variants) works fine.
+
+Should I check the tests pass? The harness said build and tests pass. Let me quickly verify there are tests covering this. There's a test at line 569 that uses "wontfix" label. The addition of new labels wouldn't break that test.
+
+Let me think about whether this is PASS or FAIL. The verdict criteria:
+- FAIL only if: implementation doesn't match task, feature clearly doesn't work, obvious bugs, security issues.
+
+The implementation: adds two new label variants + a doc comment. The doc comment is inaccurate (claims whole-word matching that doesn't exist). Is that an "obvious bug"? It's a misleading comment, not a functional bug. The functional change works.
+
+Actually, wait — the comment is genuinely wrong and could mislead future maintainers into thinking false positives like "bilateral" are prevented when they're not. But per instructions: "Do NOT fail for: Style preferences, Minor imperfections". A slightly misleading comment is a minor imperfection. The core improvement (new label variants) is correct and matches the task ("one small, concrete improvement, committed").
+
+Let me verify the tests actually pass to be thorough — actually the harness already ran them (Build: PASS, Tests: PASS) and I verified the commit is on HEAD with a clean tree. Let me do one quick check that the label matching works — actually I could write a quick reasoning: `lower.contains("won't fix")` matches label "won't fix" ✓, `lower.contains("won'tfix")` matches "won'tfix" ✓. 
+
+One more check — do GitHub labels with apostrophe get normalized? The labels are read from GitHub API and lowercased. "won't fix" as a label would match "won't fix". "wontfix" matches "wontfix". Good.
+
+Let me also quickly verify the test still exists and passes — I trust the harness. I'll do a fast focused check: run the specific revisit tests to confirm. Actually, the instructions say build and tests ALREADY PASS, don't re-run the full suite. I have enough evidence.
+
+Verdict: PASS. The diff is a small, committed improvement matching the task. Note the misleading doc comment as cleanup feedback? Actually, the comment is part of the change and it's inaccurate — worth mentioning in the Reason as minor feedback but not failing.
+
+Actually, let me reconsider — should I flag the inaccurate comment? The instructions say mention stray files as cleanup feedback, and don't fail for minor imperfections. I'll mention the comment discrepancy briefly in the Reason. Verdict: PASS.
+
+Let me write the verdict file.
+────────────────────────────────────────────────────────────────────────────────
+
+The commit is on HEAD (472a639) with a clean tree, and the diff matches the committed change. Let me do one quick sanity check on the label matching logic before verdicting.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_revisit.rs:158..170 ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The matching is substring-based (`lower.contains(s)`), so the new labels "won'tfix" and "won't fix" work correctly. The doc comment claiming whole-word matching via `contains_word` is inaccurate (no such function exists; "bilateral" still false-positives on "later"), but that's a comment-only issue — the functional change (additional label variants, already-present "wontfix" covered) works and matches the task: one small, concrete, committed improvement.
+
+The existing test at line 569 uses "wontfix" and still passes (labels list superset). Build/tests pass per harness. This is evolve-kind, product-surface untouched (internal label list, no config/CLI/startup). Verdict: PASS.
+
+Write the verdict file.
+────────────────────────────────────────────────────────────────────────────────
+
+Evidence is sufficient: commit on HEAD, clean tree, new labels present, matching logic (`lower.contains(s)`) handles the added variants correctly. Writing verdict.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p sessi… (5 lines) ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Verdict: **PASS** — written to `session_plan/eval_task_1.md`.
+
+The commit (472a639) delivers exactly what the fallback task asked: one small, concrete, committed improvement. It adds the `"won'tfix"` and `"won't fix"` label variants to shelved-issue detection in `src/commands_revisit.rs` — internal, evolve-kind behavior with no product-surface impact. The new labels function correctly under the existing substring matcher, and build/tests pass. I noted one minor cleanup item in the Reason: the new doc comment references a nonexistent `contains_word` helper and overstates whole-word matching, but that's a comment-only imperfection, not a functional bug.
+
+
