@@ -17,11 +17,14 @@ use std::process::Command;
 const REVISIT_FILE: &str = ".arc/revisit.json";
 
 /// Labels that indicate an issue was shelved rather than truly resolved.
+/// Matched as whole words (see `contains_word`) so labels like "bilateral"
+/// or "collateral" don't false-positive via the "later" substring.
 const SHELVED_LABELS: &[&str] = &[
     "wontfix",
+    "won'tfix",
+    "won't fix",
     "deferred",
     "too-complex",
-    "won't fix",
     "later",
     "shelved",
     "backlog",
