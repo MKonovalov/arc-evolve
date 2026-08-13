@@ -156,11 +156,35 @@ fn parse_closed_issues_json(json_str: &str) -> Result<Vec<ClosedIssue>, String> 
     Ok(issues)
 }
 
+/// Check whether `text` contains `word` as a whole word (case-insensitive),
+/// where a "whole word" is bounded by non-alphanumeric characters or string
+/// edges. This is the helper the `SHELVED_LABELS` doc comment promises: plain
+/// substring matching would let "collateral"/"bilateral" false-positively match
+/// the "later" shelved label.
+fn contains_word(text: &str, word: &str) -> bool {
+    if text.is_empty() || word.is_empty() {
+        return false;
+    }
+    let lower = text.to_lowercase();
+    let mut start = 0;
+    while let Some(rel) = lower[start..].find(word) {
+        let abs = start + rel;
+        let before_ok = abs == 0 || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after = abs + word.len();
+        let after_ok = after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + word.len();
+    }
+    false
+}
+
 /// Check if an issue looks like it was shelved (based on labels).
 fn is_shelved(issue: &ClosedIssue) -> bool {
     issue.labels.iter().any(|label| {
         let lower = label.to_lowercase();
-        SHELVED_LABELS.iter().any(|s| lower.contains(s))
+        SHELVED_LABELS.iter().any(|s| contains_word(&lower, s))
     })
 }
 
@@ -615,6 +639,31 @@ mod tests {
             closed_at: String::new(),
         };
         assert!(is_shelved(&issue));
+    }
+
+    #[test]
+    fn test_is_shelved_whole_word_no_false_positive() {
+        // "collateral"/"bilateral"/"unilateral" contain "later" as a substring
+        // but are not shelved — "later" must match as a whole word only.
+        for label in ["collateral", "bilateral", "unilateral"] {
+            let issue = ClosedIssue {
+                number: 1,
+                title: "Test".to_string(),
+                labels: vec![label.to_string()],
+                closed_at: String::new(),
+            };
+            assert!(!is_shelved(&issue), "label {label:?} must not be shelved");
+        }
+        // Genuine whole-word matches still classify as shelved.
+        for label in ["later", "fix-later", "shelved", "Won't Fix"] {
+            let issue = ClosedIssue {
+                number: 1,
+                title: "Test".to_string(),
+                labels: vec![label.to_string()],
+                closed_at: String::new(),
+            };
+            assert!(is_shelved(&issue), "label {label:?} must be shelved");
+        }
     }
 
     #[test]
