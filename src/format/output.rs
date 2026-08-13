@@ -916,7 +916,10 @@ pub fn smart_truncate_for_context(content: &str, max_lines: usize) -> (String, b
     }
 
     // 40% head, 20% tail — gives more context at the top (imports, types, structs)
-    let head_count = (max_lines * 2) / 5;
+    // Guard: always keep at least one head line. For tiny max_lines (e.g. 1 or 2)
+    // the 40%/20% rounding would otherwise yield zero head AND zero tail lines,
+    // replacing the entire content with just the omission marker.
+    let head_count = ((max_lines * 2) / 5).max(1);
     let tail_count = max_lines / 5;
     // Guard: if max_lines is too small for meaningful head/tail split, just take head
     let tail_count = tail_count.min(total.saturating_sub(head_count));
@@ -1952,6 +1955,25 @@ mod tests {
         assert!(result.contains("use /add file:START-END"));
         // Middle should be gone
         assert!(!result.contains("line 500"));
+    }
+
+    #[test]
+    fn test_smart_truncate_tiny_max_lines_keeps_head_line() {
+        // Degenerate case: with max_lines=1 the 40%/20% rounding used to yield
+        // zero head AND zero tail lines, replacing the whole file with just the
+        // omission marker — violating the function's "preserves head/tail" contract.
+        let content = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (result, truncated, total) = smart_truncate_for_context(&content, 1);
+        assert!(truncated);
+        assert_eq!(total, 10);
+        assert!(
+            result.contains("line 0"),
+            "head line must survive tiny max_lines, got: {result}"
+        );
+        assert!(result.contains("[... 9 lines omitted (10 total)"));
     }
 
     #[test]
