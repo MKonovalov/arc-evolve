@@ -1,0 +1,307 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the failing test to understand what's happening. The test is `commands_risk_snapshots::tests::test_auto_validate_with_synthetic_snapshot` in `src/commands_risk_snapshots.rs` at line 771.
+
+The assertion is `left == right` failed: left: Number(5), right: 10. Let me look at the test code and the surrounding implementation.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ read src/commands_risk_snapshots.rs:700..820 ✓ (1ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test at line 771 asserts `parsed["predicted_count"] == 10`. But the actual snapshot only has 5 entries in `top_10`. The `predicted_count` is coming out as 5. So the implementation is counting the actual entries in the snapshot, while the test expects the full top-10 count.
+
+Let me look at the implementation of `auto_validate_after_failure_to` to understand what `predicted_count` is set to.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'predicted_count' in src  ▶ read src/commands_risk_snapshots.rs:380..510 ✓ (1ms)
+ ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the `auto_validate_after_failure_to` implementation to see where `predicted_count` is written.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.7s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:200..380 ✓ (1ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the issue. The implementation at line 296 uses `last.predicted.len()` as the predicted_count. The test at line 771 expects `predicted_count` to be 10 (the full top-10 size), but the synthetic snapshot only has 5 entries.
+
+The comment in the implementation says "The predicted count is the real number of predictions in the snapshot (may be < 10 for small snapshots), so the ledger's denominator is honest." But the test expects 10.
+
+Let me look at the other tests at line 911 and line 224/297 of commands_risk_report.rs to understand what the expected behavior should be.
+
+Line 911: `assert_eq!(raw["predicted_count"], 5);` — so there's another test expecting 5.
+
+Let me look at both tests to understand.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:860..940 ✓ (1ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the situation:
+
+1. `test_auto_validate_with_synthetic_snapshot` (line 771): expects `predicted_count` to be 10, but the snapshot only has 5 top_10 entries. The implementation writes `last.predicted.len()` which is 5.
+2. `test_write_validation_event_cli_trigger_roundtrip` (line 911): expects `predicted_count` to be 5 when passed 5 to `write_validation_event` — the real count, not hardcoded 10.
+3. Doc comment at line 163: says `predicted_count` (always 10).
+
+So the implementation was changed to write the real count (5), but the older test `test_auto_validate_with_synthetic_snapshot` still asserts 10. The test at line 771 is the OLD test that was not updated to match the new honest-count behavior. The comment in `test_write_validation_event_cli_trigger_roundtrip` explicitly says "predicted_count must reflect the real prediction count, not a hardcoded 10 (snapshots can hold fewer than 10 predictions)."
+
+So the correct fix is to update `test_auto_validate_with_synthetic_snapshot` to expect 5 (the real number of predictions in the synthetic snapshot), matching the new intended behavior. The implementation is intentional — the other test explicitly documents that behavior.
+
+Also, I should check line 163 doc comment which says "predicted_count (always 10)" — that should be updated too.
+
+Let me look at the doc comment around line 163.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:140..185 ✓ (1ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check the git status and git log to understand what was changed. Let me check if there's a recent commit that changed this file.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -5 ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the diff of the uncommitted changes to understand what was implemented and what the intended behavior is.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk_snapsho… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the whole situation. The uncommitted change made `predicted_count` reflect the real number of predictions in the snapshot (5 in the synthetic test snapshot), instead of a hardcoded 10. The `test_write_validation_event_cli_trigger_roundtrip` test was updated to expect 5, but `test_auto_validate_with_synthetic_snapshot` (line 771) still expects 10.
+
+The fix: update `test_auto_validate_with_synthetic_snapshot` to expect `predicted_count` = 5 (the real count from the synthetic snapshot which has 5 entries in top_10), consistent with the new intended behavior documented in the other test's comment.
+
+Also, I should update the doc comment at line 163 that says `predicted_count` (always 10) → should reflect that it's the real prediction count.
+
+Let me check the commands_risk.rs diff too, since it's also modified.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk.rs ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commands_risk.rs change passes `top_10.len()` as the predicted_count from the CLI path. That's consistent with the new behavior.
+
+Now, the fix for the failing test: `test_auto_validate_with_synthetic_snapshot` asserts `parsed["predicted_count"] == 10` at line 771, but the synthetic snapshot has only 5 predictions, and the new (intended) behavior writes the real count of 5. I should update the test to expect 5, matching the intended behavior documented in `test_write_validation_event_cli_trigger_roundtrip`.
+
+Also update the doc comment at line 163: `predicted_count` (always 10) → real prediction count.
+
+Let me make these two edits.
+────────────────────────────────────────────────────────────────────────────────
+
+The uncommitted change intentionally made `predicted_count` reflect the real number of predictions in the snapshot (instead of a hardcoded 10). The failing test `test_auto_validate_with_synthetic_snapshot` still asserts the old hardcoded 10 — the synthetic snapshot only has 5 predictions. I'll update that test and the stale doc comment to match the new intended behavior.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (2 → 4 lines)
+            assert_eq!(parsed["trigger"], "watch_failure");
+  -         assert_eq!(parsed["predicted_count"], 10);
+  +         // predicted_count reflects the real number of predictions in the
+  +         // snapshot (5 here), not a hardcoded 10.
+  +         assert_eq!(parsed["predicted_count"], 5);
+  ▶ edit src/commands_risk_snapshots.rs (4 → 5 lines)
+    /// The JSON line carries `ts`, `day`, `trigger`, `hits`, `surprises`,
+  - /// `predicted_count` (always 10), and `accuracy_pct` — exactly the fields the
+  + /// `predicted_count` (the real number of predictions in the snapshot — may be
+  + /// < 10 for small snapshots), and `accuracy_pct` — exactly the fields the
+    /// accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)
+    /// consume.
+ ✓ (429ms)
+            assert_eq!(parsed["trigger"], "watch_failure");
+  -         assert_eq!(parsed["predicted_count"], 10);
+  +         // predicted_count reflects the real number of predictions in the
+  +         // snapshot (5 here), not a hardcoded 10.
+  +         assert_eq!(parsed["predicted_count"], 5);
+ ✓ (857ms)
+    /// The JSON line carries `ts`, `day`, `trigger`, `hits`, `surprises`,
+  - /// `predicted_count` (always 10), and `accuracy_pct` — exactly the fields the
+  + /// `predicted_count` (the real number of predictions in the snapshot — may be
+  + /// < 10 for small snapshots), and `accuracy_pct` — exactly the fields the
+    /// accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)
+    /// consume.
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check if there are other places that reference "predicted_count" with a hardcoded 10 in tests that might break. The search earlier showed:
+
+- src/commands_risk_snapshots.rs:163 — fixed
+- src/commands_risk_snapshots.rs:911 — already updated (expects 5)
+- src/commands_risk_report.rs:224, 297 — test data lines with predicted_count:10
+- src/commands_risk.rs:1977 — `let predicted_count = hits + v.result.clean.len();` (different thing)
+- src/commands_risk.rs:3798 — test data with predicted_count:10
+
+Those are test fixture data lines that just parse JSON — they're fine since they're just input data, not assertions about the writer's output.
+
+Now let me run fmt and the specific test.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.9s (2 ✓)
+
+Now let me format and run the failing test to verify:
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo test --bin arc … ✓ (20.9s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Hmm, it still fails at line 772 with right: 10. That means my edit didn't take effect — perhaps the test binary is cached, or my edit was at a different location. Wait, the panic is at line 772:9 now (previously 771:9). Let me look at the current file around line 770.
+
+Wait — actually it says "right: 10" still. Did my edit apply? Let me re-read the file.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:765..780 ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — the file still shows the old assertion `assert_eq!(parsed["predicted_count"], 10);` at line 772. My edit_file claimed success but the file wasn't changed? Wait, the edit tool said "Replaced 2 lines with 4 lines" — but the file at 771-772 shows the old content.
+
+Wait, maybe cargo fmt reformatted my 4 lines back? No, my change was:
+
+```
+        assert_eq!(parsed["trigger"], "watch_failure");
+        // predicted_count reflects the real number of predictions in the
+        // snapshot (5 here), not a hardcoded 10.
+        assert_eq!(parsed["predicted_count"], 5);
+```
+
+That wouldn't be reformatted back to `10`. Hmm.
+
+Wait — maybe there's a line ending issue. Let me check if there are TWO copies of this test, or my edit went somewhere else. Let me search for "predicted_count" around line 771.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "predicted_count" src/comm… ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting! The doc comment edit at line 163 did take effect, but the test edit at line 772 did NOT. My first edit_file claimed success ("Replaced 2 lines with 4 lines") but the file still has `assert_eq!(parsed["predicted_count"], 10);`.
+
+Wait, actually looking back — the two edits were applied in the same message. Maybe the first edit's replacement matched a DIFFERENT location? Let me check — the old_text I used for the first edit was:
+
+```
+        assert_eq!(parsed["trigger"], "watch_failure");
+        assert_eq!(parsed["predicted_count"], 10);
+```
+
+Hmm, but there are two places with `assert_eq!(parsed["trigger"], "watch_failure");` — line 771 (the failing test) and line 935 (`test_write_validation_event_watch_failure_trigger`). Let me look at line 933-936.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "parsed\[\"trigger\"\]" sr… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Only one occurrence of `parsed["trigger"]`. So where did my first edit go? It said "Replaced 2 lines with 4 lines" — maybe it replaced something else. Let me search for the comment text I added: "predicted_count reflects the real number of predictions in the".
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "snapshot (5 here)" src/ … ✓ (7ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The comment "snapshot (5 here)" doesn't exist anywhere! So my first edit_file somehow didn't actually persist. But the doc comment edit did persist. Strange — maybe the first edit matched a different location and wrote there, then cargo fmt... no.
+
+Wait, actually — let me re-check. Maybe the edit tool applied both edits against the same original file content, and the second edit (doc comment) was applied after the first, but the first edit's result got clobbered? The tool reported success for both.
+
+Actually, let me look at the git diff more carefully to see the current state of the changes.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk_snapsho… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The doc comment edit took effect, but the test edit at line 772 didn't. That's odd — the first edit_file call reported success but the change isn't there. Perhaps the first edit matched the doc comment context... no.
+
+Wait, actually, I think what happened: both edits were issued in the same block against the same file snapshot. The tool may have applied them in parallel and the second (doc comment) edit overwrote... no, they touched different parts.
+
+Actually, whatever the cause, the fix is simple: apply the test edit now. Let me just edit line 772 directly.
+────────────────────────────────────────────────────────────────────────────────
+
+The doc comment edit applied but the test edit didn't persist. Let me apply it directly:
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (2 → 4 lines)
+            assert_eq!(parsed["trigger"], "watch_failure");
+  -         assert_eq!(parsed["predicted_count"], 10);
+  +         // predicted_count reflects the real number of predictions in the
+  +         // snapshot (5 here), not a hardcoded 10.
+  +         assert_eq!(parsed["predicted_count"], 5);
+ ✓ (430ms)
+            assert_eq!(parsed["trigger"], "watch_failure");
+  -         assert_eq!(parsed["predicted_count"], 10);
+  +         // predicted_count reflects the real number of predictions in the
+  +         // snapshot (5 here), not a hardcoded 10.
+  +         assert_eq!(parsed["predicted_count"], 5);
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "predicted_count" src/comm… ✓ (22.7s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The module tests pass now. Let me run the full build and test suite as required.
+────────────────────────────────────────────────────────────────────────────────
+
+The module tests pass. Now running the full suite as required:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 && carg… ✓ (1m 10s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The tail shows only the last test binary. Let me check the full test output summary to confirm all passed — the earlier run had 4300+ tests. Let me get the full summary lines.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | grep -E "test re… ✓ (48.8s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All tests pass now:
+- 4301 passed, 0 failed, 1 ignored (main bin)
+- 88 passed, 0 failed, 1 ignored (integration)
+- 0 tests (safety edge cases)
+
+Let me also verify clippy passes since CI treats warnings as errors, then commit.
+────────────────────────────────────────────────────────────────────────────────
+
+All tests pass. Let me verify clippy, then commit:
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo clippy --all-targets -- -D w… ✓ (18.3s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add -A && git commit -m "Fix r… ✓ (19ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Done. All fixed and committed as `4670749`.
+
+**What was wrong:** An earlier uncommitted change (still in the working tree) made `write_validation_event` write the *real* prediction count (`last.predicted.len()`) instead of a hardcoded `10`, so the validation ledger's denominator is honest when snapshots hold fewer than 10 predictions. The call sites in `commands_risk.rs` and most tests were updated to match, but `test_auto_validate_with_synthetic_snapshot` still asserted the old hardcoded `10` — while its synthetic snapshot only contains 5 predictions.
+
+**Fix:**
+• Updated that test to expect `predicted_count == 5`, consistent with the new intended behavior (already documented in `test_write_validation_event_cli_trigger_roundtrip`).
+• Updated the stale doc comment on `write_validation_event` that claimed "`predicted_count` (always 10)".
+
+**Verification:** `cargo fmt` ✓, `cargo build` ✓, `cargo clippy --all-targets -- -D warnings` ✓, `cargo test` — 4301+88 passed, 0 failed. Committed immediately after green.
+
+
