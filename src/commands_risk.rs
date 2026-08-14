@@ -2245,6 +2245,7 @@ fn handle_risk_validate() {
             std::path::Path::new(RISK_VALIDATION_PATH),
             day as u32,
             "cli",
+            top_10.len(),
             &hits,
             &surprises,
             accuracy_pct_rounded,

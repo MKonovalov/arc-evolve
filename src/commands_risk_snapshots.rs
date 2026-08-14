@@ -160,13 +160,15 @@ pub(crate) const RISK_VALIDATION_PATH: &str = ".arc/risk_validations.jsonl";
 /// half of the prediction meter in the same shape.
 ///
 /// The JSON line carries `ts`, `day`, `trigger`, `hits`, `surprises`,
-/// `predicted_count` (always 10), and `accuracy_pct` — exactly the fields the
+/// `predicted_count` (the real number of predictions in the snapshot — may be
+/// < 10 for small snapshots), and `accuracy_pct` — exactly the fields the
 /// accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)
 /// consume.
 pub(crate) fn write_validation_event(
     validation_path: &std::path::Path,
     day: u32,
     trigger: &str,
+    predicted_count: usize,
     hits: &[String],
     surprises: &[String],
     accuracy_pct: f64,
@@ -192,7 +194,7 @@ pub(crate) fn write_validation_event(
         "trigger": trigger,
         "hits": hits,
         "surprises": surprises,
-        "predicted_count": 10,
+        "predicted_count": predicted_count,
         "accuracy_pct": accuracy_pct,
     });
 
@@ -285,11 +287,14 @@ fn auto_validate_after_failure_to(
         .unwrap_or(0);
 
     // Append the validation event via the shared writer (same shape the CLI
-    // `/risk validate` path uses).
+    // `/risk validate` path uses). The predicted count is the real number of
+    // predictions in the snapshot (may be < 10 for small snapshots), so the
+    // ledger's denominator is honest.
     if let Err(e) = write_validation_event(
         validation_path,
         day,
         "watch_failure",
+        last.predicted.len(),
         &hits,
         &surprises,
         accuracy_pct_rounded,
@@ -764,7 +769,9 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(contents.lines().next().unwrap()).expect("valid JSON");
         assert_eq!(parsed["trigger"], "watch_failure");
-        assert_eq!(parsed["predicted_count"], 10);
+        // predicted_count reflects the real number of predictions in the
+        // snapshot (5 here), not a hardcoded 10.
+        assert_eq!(parsed["predicted_count"], 5);
 
         let hits = parsed["hits"].as_array().unwrap();
         assert_eq!(hits.len(), 3, "should have 3 hits");
@@ -894,7 +901,7 @@ mod tests {
 
         let hits = vec!["src/main.rs".to_string(), "src/cli.rs".to_string()];
         let surprises = vec!["src/prompt.rs".to_string()];
-        write_validation_event(&path, 129, "cli", &hits, &surprises, 66.7)
+        write_validation_event(&path, 129, "cli", 5, &hits, &surprises, 66.7)
             .expect("write validation event");
 
         let contents = std::fs::read_to_string(&path).expect("read validation file");
@@ -902,7 +909,9 @@ mod tests {
         let raw: serde_json::Value =
             serde_json::from_str(contents.lines().next().unwrap()).expect("valid JSON");
         assert_eq!(raw["trigger"], "cli");
-        assert_eq!(raw["predicted_count"], 10);
+        // predicted_count must reflect the real prediction count, not a
+        // hardcoded 10 (snapshots can hold fewer than 10 predictions).
+        assert_eq!(raw["predicted_count"], 5);
 
         // Reader roundtrip.
         let events = parse_validation_events(&contents);
@@ -920,7 +929,7 @@ mod tests {
 
         let hits = vec!["src/tools.rs".to_string()];
         let surprises: Vec<String> = vec![];
-        write_validation_event(&path, 100, "watch_failure", &hits, &surprises, 100.0)
+        write_validation_event(&path, 100, "watch_failure", 3, &hits, &surprises, 100.0)
             .expect("write validation event");
 
         let contents = std::fs::read_to_string(&path).expect("read validation file");
@@ -941,8 +950,9 @@ mod tests {
 
         let hits = vec!["src/main.rs".to_string()];
         let surprises: Vec<String> = vec![];
-        write_validation_event(&path, 1, "cli", &hits, &surprises, 100.0).expect("first write");
-        write_validation_event(&path, 2, "cli", &hits, &surprises, 100.0).expect("second write");
+        write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0).expect("first write");
+        write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0)
+            .expect("second write");
 
         let events = load_validation_history_from(&path);
         assert_eq!(events.len(), 2, "appending twice yields two lines");
