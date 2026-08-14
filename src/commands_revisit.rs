@@ -166,16 +166,21 @@ fn contains_word(text: &str, word: &str) -> bool {
         return false;
     }
     let lower = text.to_lowercase();
+    // Lowercase the word too — the doc comment promises case-insensitive
+    // matching on both sides, and the previous version only lowercased the
+    // text (the sole call site happened to pass pre-lowercased labels, which
+    // masked the contract mismatch).
+    let word_lower = word.to_lowercase();
     let mut start = 0;
-    while let Some(rel) = lower[start..].find(word) {
+    while let Some(rel) = lower[start..].find(word_lower.as_str()) {
         let abs = start + rel;
         let before_ok = abs == 0 || !lower.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        let after = abs + word.len();
+        let after = abs + word_lower.len();
         let after_ok = after >= lower.len() || !lower.as_bytes()[after].is_ascii_alphanumeric();
         if before_ok && after_ok {
             return true;
         }
-        start = abs + word.len();
+        start = abs + word_lower.len();
     }
     false
 }
@@ -639,6 +644,22 @@ mod tests {
             closed_at: String::new(),
         };
         assert!(is_shelved(&issue));
+    }
+
+    #[test]
+    fn test_contains_word_case_insensitive_on_word_too() {
+        // The doc comment promises case-insensitive matching on both sides;
+        // the word itself used to be matched verbatim (only the text was
+        // lowercased), so an uppercase word never matched.
+        assert!(contains_word("the wontfix label", "WontFix"));
+        assert!(contains_word("WONTFIX", "wontfix"));
+        assert!(contains_word("fix-later", "LATER"));
+        // Whole-word boundaries still enforced regardless of case.
+        assert!(!contains_word("bilateral", "WontFix"));
+        assert!(!contains_word("wontfixing", "WontFix"));
+        // Empty inputs still return false.
+        assert!(!contains_word("", "wontfix"));
+        assert!(!contains_word("wontfix", ""));
     }
 
     #[test]
