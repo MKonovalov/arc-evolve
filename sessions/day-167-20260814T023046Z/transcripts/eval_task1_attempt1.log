@@ -1,0 +1,172 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the git state to see what was committed.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && echo "---"… ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The HEAD commit is just a skill-evolve counter bump. Let me look at the task's actual commit (3280d15) which is "Day 166 (17:00): Self-improvement (small, committed) (Task 1)".
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat 3280d15 && echo "=… ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me see the full diff to understand the change properly.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 3280d15 -- src/commands_r… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The diff display is truncated for the function bodies. Let me read the actual file to see the implementation.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '155,195p' src/commands_rev… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The change is a small improvement: `is_shelved` in `commands_revisit.rs` previously used substring matching (`lower.contains(s)`) for shelved labels, which would false-positive on labels like "collateral", "bilateral", "unilateral" (containing "later"). The fix adds a whole-word, case-insensitive match via `contains_word`.
+
+Wait — but there's a concern. `contains_word` uses `word` but does it lowercase the word itself? Let me check: `SHELVED_LABELS` — what are the labels? The match compares `lower` (lowercased label text) with `word`. If `SHELVED_LABELS` contains e.g. "later" or "shelved", those are already lowercase presumably. Let me check.
+
+Also let me verify the `contains_word` implementation — there was a truncated line: `let abs = start + rel;` then `let before_ok = ...` — I need to see lines in between. The sed output shows "... (2 more similar lines)" which is odd — that's the harness's own truncation? No wait, that's the actual file content? No — the sed output shows literally "... (3 more similar lines)" in the file?! That can't be right. Actually wait, looking at the output of `git show`, the diff also showed "... (3 more similar lines)" — that's strange. It seems the display tool is compressing similar lines? No...
+
+Actually this looks like the tool output has been compressed by a "compress_tool_output" style function that replaces runs of similar lines with ellipsis. Both `git show` and `sed` output showed "... (3 more similar lines)". Hmm, but sed outputs raw file content — it wouldn't compress. Unless the file literally contains that text? Let me check by reading the file directly with read_file, or with grep for specific content.
+
+Actually wait — looking carefully at the sed output:
+
+```
++/// Check whether `text` contains `word` as a whole word (case-insensitive),
+... (3 more similar lines)
++/// the "later" shelved label.
+```
+
+This is within the git show diff output. And the second bash command had the same pattern in sed output. So this compression is happening in MY tool output pipeline (the bash tool output may be compressed by the harness, similar to arc's compress_tool_output). That's plausible — the environment truncates similar consecutive lines.
+
+Let me read the file properly with the read_file tool to see the exact implementation.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_revisit.rs:159..189 ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The implementation is sound. It uses char-boundary-safe logic (`abs` and `after` are byte indexes from `find` on a lowercased string; `lower.as_bytes()[abs-1]` and `[after]` — since `word` is matched via `find` on `&str`, the positions are valid char boundaries; accessing `abs-1` could theoretically land in the middle of a multi-byte char if the matched word is preceded by a multi-byte char... wait, `before_ok` checks `lower.as_bytes()[abs - 1]` — if the previous char is multi-byte (e.g. "é"), then `abs-1` points to the last byte of that char, not its first byte. But the check only tests `is_ascii_alphanumeric()` — a continuation byte of a multi-byte char is not ASCII alphanumeric (it's >= 0x80), so it correctly treats it as a boundary. Similarly for `after`. So this is safe.
+
+One concern: `word` is compared against `lower` (lowercased text), but `word` itself is not lowercased. If `SHELVED_LABELS` contains uppercase, the match would fail. Let me check SHELVED_LABELS definition.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SHELVED_LABELS" src/comma… ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+SHELVED_LABELS entries: "wontfix", "won'tfix", "won't fix", ... Let me see all of them.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '22,30p' src/commands_revis… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All SHELVED_LABELS entries are lowercase, so matching against the lowercased label text works fine.
+
+Now, one behavioral consideration: the change makes "wontfix" match as a whole word only. Previously `lower.contains("wontfix")` would match e.g. "wontfix" anywhere in a label. With whole-word matching, a label like "wontfix-candidate" would still match since "-" is non-alphanumeric (word boundary). A label like "works-wontfix" also matches. A label "fixwontfix" (unlikely) would no longer match. This is a reasonable behavior tightening — it's a small, sensible improvement that fixes a real false-positive bug ("collateral" containing "later" — actually wait, does "collateral" contain "later"? c-o-l-l-a-t-e-r-a-l. "later" = l-a-t-e-r. "collateral" contains "late" but "later"? c-o-l-l-a-t-e-r-a-l → positions: ...a-t-e-r... yes "later" appears? l-a-t-e-r: index 3='l',4='l'... let me check: "collateral" = c(0)o(1)l(2)l(3)a(4)t(5)e(6)r(7)a(8)l(9). "later" needs l,a,t,e,r consecutively: at index 3: l(3)l(4) — no. Hmm, actually "collateral" contains "later"? a-t-e-r at 4-7 but needs l before. There's no 'l' right before index 4. Actually wait — hmm, the test says "collateral"/"bilateral"/"unilateral" contain "later" as a substring. Let me verify: "unilateral" = u-n-i-l-a-t-e-r-a-l → "later" at index 3? l(3)a(4)t(5)e(6)r(7) → yes! "ilateral" contains "later" at position 3. And "bilateral" similarly. "collateral"? c-o-l-l-a-t-e-r-a-l: l(2)l(3)a(4)t(5)e(6)r(7) → l-a-t-e-r at 2? l(2)=l, l(3)≠a. Hmm, at 3: l(3)a(4)t(5)e(6)r(7) → yes! "later" = l(3),a(4),t(5),e(6),r(7). Yes. So these labels genuinely contain "later" as substring and would be false-positively shelved before. The fix is a genuine bug fix.
+
+The task: "Make ONE small, concrete improvement and COMMIT it." The change: whole-word matching for shelved labels — a small, concrete improvement with tests, committed. Build and tests pass per harness. The diff is in src/, matching the task's "Files: src/".
+
+The change is evolve-kind (it's an internal /revisit command). Is it product surface? `/revisit` is a slash command in the REPL — it's a product-facing command, but the change only makes its label matching more accurate (bug fix), doesn't change defaults/CLI flags/config. Not an opt-in violation — it's a behavior correction, not a new default. Fine.
+
+Let me quickly verify the tests actually pass for this module — the harness says Tests: PASS. I could run the specific test to be safe, but that takes time. The harness already ran the full suite and it passed. The change is small and I've verified it compiles conceptually. Let me do one quick focused check: run the new test specifically.
+────────────────────────────────────────────────────────────────────────────────
+
+The change is a genuine bug fix: `is_shelved` previously used substring matching, so labels like "bilateral"/"unilateral" (which contain "later" as a substring) were falsely classified as shelved. Let me quickly verify the new test passes.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --quiet test_is_shelved… ✓ (190ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Hmm, 0 tests ran — the test name filter didn't match. Maybe the test is in a different module or the filter needs the full path. Let me try a broader filter.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --quiet commands_revisi… ✓ (158ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Odd — 0 tests matched "commands_revisit". The tests are in a `mod tests` inside commands_revisit.rs. Maybe the binary is named differently, or tests are inside the lib? Let me check the test module name and run tests for the binary. Let me look at how tests are structured — `cargo test` filtered 89 tests out, meaning there are 89 tests total but none matched. Maybe the module path is different, e.g. tests in `src/commands_revisit.rs` module `tests` — filter "revisit" should match. Let me check whether the test file compiled into a lib crate named something. Actually the binary is likely `arc`. `cargo test` runs unit tests in the bin crate too. Filter "commands_revisit" — the test function names include the module path like `commands_revisit::tests::test_...`. Hmm, but 0 matched.
+
+Wait — maybe the "89 filtered out" refers to the unit tests in the bin. So the bin has 89 tests and none match "commands_revisit". That's strange. Unless the module is named differently, e.g., the tests mod is inside `mod tests` in commands_revisit.rs, and the crate module structure... commands_revisit is a module declared in main.rs. Test full name would be something like `commands_revisit::tests::test_is_shelved_whole_word_no_false_positive`. Filtering on "commands_revisit" should match.
+
+Let me just run with filter "shelved".
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --quiet shelved 2>&1 | … ✓ (311ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. "shelved" matched 0 tests in the bin (89 filtered). But "revisit" matched 27 tests and all passed — those are in the lib crate (4274 filtered out, meaning a large lib test suite, likely integration tests file tests/integration.rs? No, 4274 filtered — that's the lib with many tests? Actually arc's tests live in tests/integration.rs too).
+
+Wait: "revisit" matched 27 tests in one suite — that's likely `tests/integration.rs` which may have revisit tests? Or commands_revisit unit tests are in the lib? arc is a bin crate; unit tests in bin. Hmm, but 89 bin tests — earlier "commands_revisit" filtered 89 out of 89, meaning no bin test matched. But now "revisit" matched 27 and passed, in a suite with 4274 filtered.
+
+Let me figure out which test binary matched. The order of test binaries: the output shows "running 27 tests" for the first suite that matched. That suite has 4274+27 tests. The bin has 89 tests. 4274 is huge — probably integration tests plus something. Actually tests/integration.rs has many tests via macro. So the "revisit" 27 tests likely come from tests/integration.rs.
+
+But where are the unit tests in commands_revisit.rs? The bin suite (89 tests) — "shelved" matched none. The unit test function `test_is_shelved_whole_word_no_false_positive` should be in the bin suite. Unless... the harness truncated the diff in a way that the test is actually added but not in the file? No — I read the file and it's there at lines ~644-660.
+
+Wait, maybe the bin tests are compiled but the module path in the test name differs. Let me list the bin test names matching "shelved" or "is_shelved". Actually `cargo test --quiet --bin arc shelved` — but I don't know the bin name. Let me check Cargo.toml. Actually let me just run `cargo test is_shelved -- --list` to see.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test is_shelved -- --list 2>… ✓ (156ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test exists: `commands_revisit::tests::test_is_shelved_whole_word_no_false_positive`. Earlier `cargo test --quiet shelved` matched 0 in the bin — odd, but whatever, maybe a caching/filtering quirk with the earlier invocation (perhaps the first run with `test_is_shelved_whole_word_no_false_positive` was during compilation and filter applied oddly). Anyway, now the listing shows the test exists. Let me run it directly.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test test_is_shelved 2>&1 | … ✓ (157ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Hmm, tail -6 didn't show the bin test results. Let me see the full output.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test test_is_shelved 2>&1 | … ✓ (153ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All 3 is_shelved tests pass (including the new `test_is_shelved_whole_word_no_false_positive`). The change is a small, concrete improvement:
+
+1. Matches the task: ONE small improvement, in `src/`, committed. ✓
+2. Build/tests PASS per harness, and I verified the new test passes. ✓
+3. It's a genuine bug fix (whole-word matching for shelved labels, preventing "collateral"/"unilateral" false positives). ✓
+4. Evolve-kind, doesn't touch product surface defaults/CLI/config — it's a behavior correction to an existing slash command's label matching. Not an opt-in violation. ✓
+
+No docs change needed — it's an internal bug fix to /revisit label matching; the code comment was updated to match the new behavior. Task said "Files: src/" and the diff is confined to src/commands_revisit.rs.
+
+Write verdict.
+────────────────────────────────────────────────────────────────────────────────
+
+The new test passes. The change is exactly what the task asked for: one small, concrete, committed improvement confined to `src/`.
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Verdict: **PASS** — written to `session_plan/eval_task_1.md`.
+
+The committed diff (3280d15) is a single small improvement to `src/commands_revisit.rs`: `is_shelved` now matches `SHELVED_LABELS` as whole words (via the new `contains_word` helper) instead of raw substring `contains`, fixing a real false-positive bug ("collateral"/"bilateral"/"unilateral" contain "later" as a substring). It includes a regression test that I verified passes (`test_is_shelved_whole_word_no_false_positive`, 3/3 shelved tests green). Build/tests pass per the harness, the change is confined to `src/`, and it doesn't alter product defaults/CLI/config — no opt-in concern for this evolve-kind task.
+
+

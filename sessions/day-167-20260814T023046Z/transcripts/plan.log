@@ -1,0 +1,171 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand what's being asked. I'm arc, a self-evolving coding agent, in the planning phase (Phase A) of my evolution loop. My job is to:
+
+1. Create the session_plan directory and clear old task files
+2. Analyze the assessment, trajectory, and any community issues
+3. Write task files (up to 3 tasks)
+4. Write issue responses
+5. Commit the plan
+6. STOP — no implementation
+
+Let me first check the current state — look at ISSUES_TODAY.md if it exists, check the session_plan directory, and check what's happening.
+
+The assessment says:
+- Build is green
+- No open issues
+- The dream milestone: accumulate ≥5 matched prediction-outcome pairs for risk validation. Currently 64 snapshots, 0 validation events. Cold start confirmed.
+- Candidate directions: (1) nudge the risk-validation feed (dream milestone, highest strategic value); (2) cross-session messaging; (3) better task naming; (4) descope agent_builder.rs risk.
+
+The dream (DREAM.md) says the next milestone is to accumulate the first validation data. The assessment notes that `auto_validate_after_failure` only fires on watch failures that aren't happening, and suggests "an optional offline/self-validation mode, or wiring validation to the eval-fix loop which does fail."
+
+Priority order for tasks:
+1. Self-driven work: at least 1 slot MUST be self-driven — prefer advancing DREAM.md milestone. That's the risk-validation feed nudge.
+2. Community issues: none open.
+3. Capability gaps: cross-session messaging is the biggest gap but that's huge; a lightweight variant could be a task.
+
+Let me check ISSUES_TODAY.md first, and the current session_plan state. The instructions say I MUST NOT read source code files, but I should check ISSUES_TODAY.md.
+
+Let me start by exploring the environment.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p session_plan && rm -f ses…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && echo "---"… ✓ (8ms)
+ ✓ (12ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+No community issues today. The session_plan directory only has assessment.md (from Phase A1). Let me check the assessment file to confirm it matches what I was given, and check DREAM.md to confirm the dream milestone.
+
+Actually the instructions say the assessment above already contains everything. Let me quickly check DREAM.md to confirm the next milestone, since the dream should drive my self-driven task selection. Also, let me verify the risk validation infrastructure state — the assessment says `risk_validations.jsonl` doesn't exist. Let me verify the commands_risk_snapshots.rs details on the validation functions so my plan is accurate... wait, the instructions say "Do NOT read source code files." But they also say "if the assessment section says 'NO ASSESSMENT AVAILABLE', you must read source yourself." The assessment IS available. So I should not read source.
+
+However, I can read DREAM.md (it's a state file, not source code) and the risk snapshots file to verify the cold-start claim. Let me check DREAM.md and the snapshots.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.6s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat DREAM.md 2>/dev/null | head -6…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l .arc/risk_snapshots.jsonl 2>… ✓ (4ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Confirmed:
+- No community issues today.
+- 64 snapshots accumulated, 0 validation events, `risk_validations.jsonl` doesn't exist.
+- Dream milestone: accumulate ≥5 matched prediction-outcome pairs.
+
+Now, the assessment's candidate direction #1 is the highest strategic value: nudge the risk-validation feed. The assessment says:
+
+"**Risk validation cold start (dream-blocking):** 64 snapshots accumulated, 0 validation events. The dream's next milestone (≥5 matched prediction-outcome pairs) can't progress because all sessions are green — `auto_validate_after_failure` only fires on watch failures that aren't happening. The accumulation feed needs a deliberate nudge (e.g. an optional offline/self-validation mode, or wiring validation to the eval-fix loop which does fail)."
+
+The infrastructure:
+- `auto_risk_snapshot` records predictions (fires from `/commit` and opt-in REPL exit)
+- `auto_validate_after_failure` records outcomes (fires on watch failures)
+
+The problem: watch failures aren't happening, so no validation events. The eval-fix loop in evolve.sh DOES fail sometimes (there was 1 revert in 14 days). So wiring validation into the eval-fix loop would capture failures.
+
+But wait — the evolve loop commits with raw `git commit`, and `auto_risk_snapshot` deliberately does NOT fire in the evolve loop (per CLAUDE.md). So the snapshots come from `arc risk snapshot` CLI calls or `/commit` handler. Where do snapshots actually come from? The 64 snapshots exist — from `/commit` handler usage and/or REPL exits with `arc_RISK_AUTOSNAPSHOT=1`, or `arc risk snapshot` CLI invocations.
+
+Actually the trajectory shows sessions run the agent in evolve.sh — the impl agent might use `arc` CLI? Or the snapshots accumulate from `arc risk snapshot` calls... Let me think about what would generate snapshots in the evolve loop. Actually, the assessment says "64 snapshots (64 unique git hashes, days 134–166, dedup working)". Days 134-166 = 33 days × 2-3 sessions/day ≈ 80+ sessions. Hmm, so roughly one snapshot per session or so.
+
+The key nudge idea from the assessment: "an optional offline/self-validation mode, or wiring validation to the eval-fix loop which does fail."
+
+What would be a good, small, focused task here? Options:
+
+1. **Backfill validation from git history**: The snapshots record top-10 risk files per git hash. We have 64 snapshots with git hashes. We also have a revert in the window (Day 163, agent_builder.rs). Could write an offline validation that, given a list of "failed" commits (reverts, CI failures), matches them against snapshots and writes validation events. This is "offline/self-validation mode" — `arc risk validate` already exists as a CLI subcommand though — what does it do? Per CLAUDE.md: `arc risk validate` writes validation events. So `auto_validate_after_failure` and `arc risk validate` exist.
+
+Actually wait — let me re-read: "Both meter halves are now CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`)". So `arc risk validate` exists as a command. But it records validation events — presumably from the current session/watch failure. What's missing is a way to record validation events from *historical* data (reverts/CI failures in git history).
+
+2. **A backfill/offline mode**: e.g. `arc risk validate --from-git` or a script that scans git log for revert commits and CI failures, matches them to snapshots by git hash, and writes validation events. This would directly nudge the accumulation feed toward ≥5 matched pairs.
+
+3. **Wire validation into evolve.sh eval-fix loop**: when the eval-fix loop fails and reverts, record a validation event. But the evolve.sh harness is protected — "Never modify ... scripts/evolve.sh". So that's off the table directly. Actually the safety rules say never modify scripts/evolve.sh. But we could have the impl agent's arc run record validation... Hmm, that's complicated.
+
+Actually, an offline backfill mode seems like the cleanest, most product-safe, self-contained task: scan git history for revert commits (the revert in window: Day 163 agent_builder.rs — 77 lines), and for each revert, find the nearest preceding snapshot, check whether the reverted file was in that snapshot's top-10, and record a validation event. This directly produces matched prediction-outcome pairs from data that already exists.
+
+Also CI failures — "Recurring CI errors" are all network flakes, not code failures, so those aren't useful validation signals. Reverts are the better signal. There's 1 revert in 14 days. Hmm, that's only 1 event. To get ≥5 matched pairs we'd need 5 failures. That's a lot. But the dream milestone says "≥5 matched prediction-outcome pairs". One revert gives one pair. We need more failures recorded.
+
+Alternative approach: The validation events don't have to come only from failures. A validation event could also record "predicted high-risk, no failure occurred" (true negative / false positive). That's actually important for calibration — the accuracy computation needs both. `auto_validate_after_failure` only records failures. What about recording the absence of failure over a window? Like: for a snapshot at day N with git hash H, if the files in top-10 survived N+3 days without a revert, that's a "no failure" outcome.
+
+Hmm, that's a bigger design. Let me keep the task small and focused:
+
+**Task 1 (self-driven, dream): Offline risk-validation backfill from git revert history.** Add a `arc risk validate --backfill` mode (or extend the existing validate subcommand) that scans git log for revert commits, and for each revert, looks up the nearest preceding snapshot (by git hash ancestry), checks whether the reverted file was among the snapshot's top-10 (or had a score above some threshold), and writes a validation event. This turns existing history (1 revert so far, accumulating) into matched prediction-outcome pairs without waiting for watch failures. Also consider recording "survival" outcomes: files in top-10 that were NOT reverted within X days get a non-failure validation event — this gives the accuracy stats both classes, which is what `compute_accuracy_stats` needs.
+
+Wait — I need to be careful about scope. 20 minutes per task. Let me think about what's actually implementable.
+
+Let me check what `arc risk validate` currently does... I'm told not to read source. But I know from CLAUDE.md: `commands_risk_snapshots.rs` has `auto_validate_after_failure` (records outcomes), `write_validation_event`, `ValidationEvent`, `load_validation_history_from`, `parse_validation_events`. And `arc risk validate` is routed in dispatch_sub.rs to handle_risk.
+
+The task: extend validation to be backfillable from git history. Files to touch: `src/commands_risk_snapshots.rs` (add backfill logic), `src/commands_risk.rs` (wire subcommand parsing). That's 2 source files. Good, within the 3-file limit.
+
+Actually, let me reconsider. There's a simpler and more robust framing that also matches the assessment's suggestion: "an optional offline/self-validation mode". The task:
+
+**Task: `arc risk validate --backfill` — offline validation from git revert history**
+
+- Scan `git log` for revert commits (messages containing "Revert" / "reverted" / the known revert pattern). The trajectory extractor already has REVERT_COMMIT_RE. We can use a similar heuristic.
+- For each revert, find the reverted files (git show --stat of the revert commit, or the diff).
+- Find the nearest preceding risk snapshot (by commit ancestry — walk parents until a hash matches a snapshot, or use the most recent snapshot before the revert's commit date).
+- If the reverted file was in the snapshot's top_10 (or above a threshold score, e.g. ≥0.5), record a validation event: `{"type":"validation","git_hash":...,"file":...,"predicted_high_risk":true,"failed":true,"matched":true}`.
+- Also, for the reverse signal: for each snapshot, check whether top-10 files were reverted within the next N days; if not, that's a non-failure outcome (`failed:false`). This gives both classes for accuracy stats.
+- Write events to `.arc/risk_validations.jsonl` (creating it — the dream's file).
+- Dedup: don't re-write events that already exist (check by git_hash+file).
+
+Hmm, but "survival" events might explode the count. Maybe restrict: only write non-failure events for top-10 files that appear in ≥2 snapshots? Or keep it simple: one validation event per (snapshot, top-file) pair, either failed:true (if reverted) or failed:false (if not reverted within window). That's ~10 events per snapshot × 64 snapshots = 640 events. That's a lot of data but fine for a JSONL. Actually that might be too much and dilute. Let me think about what compute_accuracy_stats needs.
+
+Actually, maybe simpler and more honest to the dream: the milestone is "≥5 matched prediction-outcome pairs" where "matched" means the prediction (high-risk flag) can be checked against an outcome (did it fail). The current cold start has 0 validation events because auto_validate only fires on watch failures. The backfill should record outcomes for existing snapshots using git history as ground truth.
+
+Let me scope it as:
+1. Failure outcomes: revert commits in git history → matched to nearest snapshot → `failed: true` events for reverted files (whether or not they were predicted).
+2. Non-failure outcomes: for each snapshot, files in top_10 that were NOT reverted within a window (say 7 days after the snapshot) → `failed: false` events.
+
+Then `arc risk accuracy` would have data for both classes.
+
+But wait — I need to be careful about the "matched" definition. A "matched prediction-outcome pair" = the file was predicted high-risk AND we have an outcome for it. The failure side: 1 revert in 14 days gives few. The non-failure side gives plenty. The accuracy computation can then measure: of files predicted high-risk, what fraction failed vs files not predicted. That's the umwelt test.
+
+OK, this is a solid Task 1. Size: moderate. Files: commands_risk_snapshots.rs (backfill logic + writing), commands_risk.rs (subcommand wiring). Maybe also need git access — commands_risk.rs already has `revert_history` (per the file summary: `fn revert_history`). So the git-revert-scanning might already partially exist! The summary lists `revert_history` in commands_risk.rs. Good — that suggests the task can reuse existing helpers.
+
+**Task 2**: Capability gap — cross-session messaging is the biggest gap but too big. A lightweight variant? The assessment lists it as "Biggest structural gap" but building live messaging is way beyond 20 minutes. Skip or do a small piece? The planner guidance: "Pick the highest-impact work." Dream task is #1. Task 2 could be one of:
+
+- Better task naming for trajectory fidelity (small, evolve-kind, helps trajectory not look stuck). The trajectory "possibly stuck" signal is because task titles repeat "Self-improvement (small, committed)". This is a harness/evolve issue. Where does the task title come from? The impl agents write it? Actually the commit messages come from evolve.sh — the impl agent commits with a message based on the task title. The fix: make the planner (me) write more descriptive titles — but that's a behavior change, not code. Hmm. Actually there might be code: `scripts/evolve.sh` picks the task title for the commit message. But evolve.sh is protected. So this would be a behavior change to planning prompts — can't do as a code task. Skip or make it a note.
+
+- Descope agent_builder.rs risk (0.76): the assessment says "future work touching it should be extra careful" — not an actionable task per se.
+
+- Piped-mode auto-watch hint fires even for one-shot output: minor UX friction, product-kind. The watch.rs gate `should_run_watch_after_prompt` skips when zero files changed. In piped mode with `echo "hello" | arc`, it emits an auto-watch hint. Fix: suppress the auto-watch hint in piped mode (output format is non-interactive). That's a small, product-safe fix. Could be Task 2 or 3.
+
+- Cross-session messaging lightweight variant: the assessment mentions stash/rewind exists. A "lightweight variant" of SendMessage could be... a `arc message <session> "text"` that writes to a file the target session reads? That's basically what /bg or file-based handoff would do. Hmm, actually there IS already a mechanism? Let me think — spawn manifests, stash... A truly minimal version: `arc send <name> <message>` writes to `.arc/inbox/<name>.md`, and REPL checks inbox at start / /inbox command. That's a product-facing feature. It's maybe 20 min with careful scoping. But is it high-value? The assessment says it's the biggest structural gap vs Claude Code. A minimal inbox primitive is the foundation. But it's also a new feature that needs tests and docs. Risky for a 20-min slot alongside a dream task.
+
+Let me prioritize: the dream task (Task 1) is the clear #1. For the remaining slots, priorities are:
+- Tier 2: self-discovered bugs/crashes — the piped-mode hint is tier 3 (UX friction). 
+- Tier 1 capability gap: cross-session messaging.
+
+Given "at least 1 slot MUST be self-driven" and dream preference, Task 1 is the dream task. Then remaining slots: capability gap (cross-session messaging lightweight) or the piped-mode hint.
+
+Actually, let me reconsider the risk-validation feed more. There's another angle the assessment raised: "wiring validation to the eval-fix loop which does fail". The eval-fix loop fails occasionally (1 revert in 14 days). If the impl agent ran `arc risk snapshot` / validation... but the evolve loop uses raw git commit and the snapshots come from... hmm, where do the 64 snapshots come from exactly? If they come from the impl agents running `arc risk snapshot` CLI (dispatch_sub routes it), then wiring `arc risk validate` into the eval-fix loop on failure would be: when a task fails after all fix attempts, run `arc risk validate` with the failing file. That's a harness change (evolve.sh is protected) — can't modify it directly. But the task could add support so that... hmm. Actually the cleaner approach: the backfill task handles it. Reverts ARE the failure signal, and backfill reads them from git history.
+
+Let me also double-check: is `arc risk validate --backfill` reasonable given `handle_risk` in commands_risk.rs and RISK_SUBCOMMANDS const? The subcommands per CLAUDE.md: `arc risk [snapshot|validate|history|predict|accuracy|effectiveness|--all]`. Adding a `--backfill` flag to validate, or a new subcommand `arc risk backfill`. Simpler: `arc risk validate --backfill`. The `flag_value`/`require_flag_value` helpers in dispatch_sub.rs exist for flags.
+
+OK let me now also think about Task 2 more concretely.
+
+**Task 2 option A: Piped-mode auto-watch hint suppression (product, small).**
+The assessment: "Piped-mode auto-watch hint fires even when the user clearly just wants one-shot output (minor friction; the hint is informational)." This is a real UX papercut — `echo "hello" | arc` in a script shouldn't emit interactive-looking hints. Fix: in piped mode, suppress the auto-watch hint (the watch hint is only useful interactively; in piped mode you can't act on it anyway). This is small, product-safe, verifiable. But — "don't read source" — the implementer will read watch.rs and repl.rs. Files: watch.rs (gate), maybe repl.rs. 2 files.
+
+**Task 2 option B: Lightweight cross-session message inbox (product, capability gap).**
+`arc send <name> <message>` → `.arc/inbox/<name>.md`; REPL startup shows pending messages; `/inbox` command to read/clear. This is the foundation of the biggest structural gap. But it's a new feature — riskier, needs docs. 20 min might be tight but with narrow scope (no fan-out, just a file-based inbox) it's doable: new command handler or extend commands_session.rs. Files: commands.rs (command discovery), commands_session.rs or a new small file, help_data.rs. Hmm, that's 3 files. And tests. It's ambitious.
+
+Given the "start at retreat size" lesson and "size the task to fit in one hand" — I should prefer smaller tasks. Option A (piped hint) is a clean 20-min task. Option B is bigger.
+
+But wait — the priority list says capability gaps (tier 1) rank above UX friction (tier 3). However, the dream task is already the self-driven slot. The guidance: "Self-driven work: at least 1 slot MUST be self-driven... Community issues: fill remaining slots". With no community issues, remaining slots are free for whatever I think is most competitive. The assessment candidate directions: (1) risk-validation nudge (dream — Task 1), (2) cross-session messaging, (3) task naming, (4) descope agent_builder.
+
+Hmm. Should I attempt a minimal messaging primitive? Let me think about what a 20-minute "lightweight variant" looks like. The gap: "Claude Code sessions can SendMessage each other live". A file-based inbox:
+- `arc send <target> <message>`: append to `.arc/inbox/<target>.md` (or ~/.arc/inbox/ for global). Also maybe just one inbox file with entries.
+- On REPL start, if `.arc/inbox/` has unread messages, print them / hint `/inbox`.
+- `/inbox` command: list messages, mark read (clear after showing? or `--clear`).
+
+That's genuinely small: one new module or extend commands_session.rs, wire into commands.rs KNOWN_COMMANDS, dispatch.rs, help_data.rs. ~4 files → exceeds 3-file limit → split. Eh.
+
+Alternative smaller version: just `arc send` writing to a file, no REPL reading yet.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 38.3s (2 ✓)
+
+
+
+
