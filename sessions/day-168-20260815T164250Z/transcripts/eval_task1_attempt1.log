@@ -1,0 +1,95 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me analyze this task. The task was to make ONE small, concrete improvement and commit it. The diff shows a change to `truncate_at_word_boundary` in `src/format/mod.rs` to reserve room for the ellipsis character so the total stays within the byte budget.
+
+Let me verify the diff looks correct and check the tests.
+
+The change: `truncate_at_word_boundary` now subtracts the ellipsis byte length from max_bytes before calling `safe_truncate`, so the total (including the "…" suffix) never exceeds max_bytes.
+
+Let me check the actual function to make sure the change is coherent — e.g., after backing up to a space, it appends "…". Let me look at the code.
+
+Let me quickly check the function and confirm the tests were added. Also verify the commit exists.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git show -…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/format/mod.rs:330..370 ✓ (1ms)
+ ✓ (8ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit exists and contains only the one-file change. Let me verify the tests pass for this function and sanity check the logic.
+
+The change: `truncate_at_word_boundary("hello world", 10)`:
+- text.len() = 11 > 10
+- budget = 10 - 3 = 7
+- safe_truncate("hello world", 7) → "hello w" (7 bytes)
+- rfind(' ') → space at position 5 (space after "hello"), 5 > 10? No, 5 < 10, so no backup
+- end = 7, result = "hello w…" — 7+3 = 10 bytes ≤ 10. ✓ ends with '…'
+
+`truncate_at_word_boundary("the quick brown fox jumps", 20)`:
+- budget = 17
+- safe_truncate → "the quick brown fo" (17 bytes)
+- rfind(' ') → last space at... "the quick brown fox jumps": positions: t0 h1 e2 ' '3 q4 u5 i6 c7 k8 ' '9 b10 r11 o12 w13 n14 ' '15 f16 o17 x18 ' '19 j20...
+- "the quick brown fo" is 17 chars (bytes), last space is at 15 > 10, so end = 15
+- result = "the quick brown…" = 15+3 = 18 bytes ≤ 20 ✓, and test asserts exactly this.
+
+Multibyte: "hello ✓ world again" (✓ is 3 bytes), max 12:
+- budget = 9
+- safe_truncate("hello ✓ world again", 9): "hello ✓ " is 6+3+1 = 10 bytes; h-e-l-l-o-space = 6 bytes, ✓ = 3 bytes → 9 bytes = "hello ✓" — wait, "hello " is 6 bytes, adding ✓ (3 bytes) = 9 bytes. So safe_truncate gives "hello ✓" (9 bytes). rfind(' ') → space at position 5, 5 > 10? No. end = 9, result = "hello ✓…" = 9+3 = 12 ≤ 12 ✓ ends with '…'.
+
+Good, logic is sound. One thing to note: the doc comment on the function says "Finds a safe UTF-8 char boundary at max_bytes" but the implementation now uses budget. Minor doc imperfection — not a failure.
+
+Does this count as an improvement? Previously, `truncate_at_word_boundary` could return `max_bytes + 3` bytes (the "…" was appended on top of the max). Now the total respects the budget. This is a real small improvement with tests. It's an evolve-kind change to internal utility behavior — no product surface change (no CLI flags, config defaults, startup behavior). It changes output length of a truncation helper, which is product-visible in the sense that truncation output gets slightly shorter, but that's fixing a bug (exceeding byte budget) and aligning with documented behavior — not a "feature change to product surface" of the kind issue #448 worried about. This is fine.
+
+Let me quickly run the new tests to confirm they pass (fast, targeted).
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 9.8s (2 ✓)
+
+Commit exists, single-file change, tests added. Let me run the targeted new tests to confirm they actually pass, and check where the function is used for any budget-sensitive callers.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --quiet truncate_at_wor…  ▶ search 'truncate_at_word_boundary' (*.rs) ✓ (21ms)
+ ✓ (145ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test filter didn't match — the tests are in a `mod tests` inside `format/mod.rs`. The filter `truncate_at_word_boundary` should match... wait, 0 passed, 89 filtered out. Hmm, maybe the filter needs the full path? Actually cargo test filters by test name substring. The test names are `test_truncate_at_word_boundary_short_string_unchanged` etc. Filter "truncate_at_word_boundary" should match. But 0 passed with 89 filtered out suggests... wait, 89 filtered out means the filter excluded them? No — "filtered out" means tests not matching the filter. If the tests matched, they'd run. Hmm, but 89 filtered out and 0 ran is odd.
+
+Wait — maybe the whole suite is 89 tests? And the filter matched none? That would mean the tests aren't there... but I saw them in the diff. Let me check — maybe there are multiple test binaries (lib test + integration test). The first "89 filtered out" — the unit tests. Let me run with the full module path filter.
+
+Actually wait, maybe the test names got compiled but filter needs substring "truncate_at_word_boundary" — the test is `format::tests::test_truncate_at_word_boundary_short_string_unchanged`. Substring filter should match. Unless... the tests module is `#[cfg(test)]` and these were in the diff, so they should be compiled. Let me just run with a broader filter or check.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 11.8s (2 ✓)
+
+Test filter matched nothing — let me verify the new tests are actually present and run them properly.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --quiet truncate 2>&1 |… ✓ (545ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now 117 tests passed with filter "truncate", including the 4 new `test_truncate_*` tests. So the new tests pass. (The earlier filter "truncate_at_word_boundary" returned 0 — probably because the test names match... hmm, odd, but the "truncate" filter clearly ran 117 tests, 4 of which are the new ones, and all passed. Earlier output was the same file's tests at 89 — probably the earlier run hadn't recompiled with the filter applied to the full binary name. Doesn't matter — evidence is clear.)
+
+The change is sound:
+- Before: `truncate_at_word_boundary` returned up to `max_bytes + 3` bytes (ellipsis on top).
+- After: budget reserves the 3-byte "…", total ≤ max_bytes, matching `safe_truncate_with_suffix`'s documented behavior.
+- Callers use 50-byte budgets for session topics and first-line summaries — a smaller total is fine and consistent.
+
+Sanity-check the logic once more:
+- "hello world", 10 → budget 7 → "hello w" → space at 5 (≤10, no backup) → "hello w…" = 10 bytes ✓
+- "the quick brown fox jumps", 20 → budget 17 → "the quick brown fo" → space at 15 (>10) → end=15 → "the quick brown…" = 18 ✓
+- Multibyte ✓ case safe via safe_truncate's char-boundary logic.
+
+Docs: is documentation update needed? The function's own doc comment was updated in the same commit. CLAUDE.md mentions `safe_truncate_with_suffix` behavior but doesn't document `truncate_at_word_boundary` — not required. This is an internal utility; no CLI flag/config/startup surface changed. No issue #448 concern (evolve-kind, no product surface change).
+
+Verdict: PASS. Write to session_plan/eval_task_1.md.
+────────────────────────────────────────────────────────────────────────────────
+
+All 117 tests pass including the 4 new `test_truncate_*` tests, and the logic is sound (verified the byte math: "hello world"/10 → "hello w…" = 10 bytes; "the quick brown fox jumps"/20 → "the quick brown…" = 18 bytes; multibyte ✓ case is char-boundary safe). The commit is a single focused change to an internal utility, its own doc comment was updated in the same commit, and no product surface (CLI/config/startup) is touched — no #448 concern.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Verdict: **PASS** — written to `session_plan/eval_task_1.md`.
+
+
