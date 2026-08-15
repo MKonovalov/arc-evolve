@@ -182,14 +182,31 @@ fn is_progress_bar_line(line: &str) -> bool {
 
 /// Returns true if `line` matches `Compiling <something> v<version>`.
 fn is_compiling_line(line: &str) -> bool {
-    let t = line.trim();
-    t.starts_with("Compiling ") && t.contains(" v")
+    is_versioned_cargo_line(line, "Compiling ")
 }
 
 /// Returns true if `line` matches `Downloading <something> v<version>`.
 fn is_downloading_line(line: &str) -> bool {
+    is_versioned_cargo_line(line, "Downloading ")
+}
+
+/// Match cargo's per-crate progress format: `Compiling <name> v<semver>` /
+/// `Downloading <name> v<semver>`. The ` v` separator must be followed by a
+/// version number (a digit then a `.`), so unrelated output that merely
+/// starts with "Compiling "/"Downloading " and contains " v" somewhere (e.g.
+/// "Compiling v2 migration notes") isn't collapsed as a cargo build run.
+fn is_versioned_cargo_line(line: &str, prefix: &str) -> bool {
     let t = line.trim();
-    t.starts_with("Downloading ") && t.contains(" v")
+    let Some(rest) = t.strip_prefix(prefix) else {
+        return false;
+    };
+    rest.split(" v").nth(1).is_some_and(|v| {
+        let mut chars = v.trim_start().chars();
+        matches!(
+            (chars.next(), chars.next()),
+            (Some(d), Some('.')) if d.is_ascii_digit()
+        )
+    })
 }
 
 /// Filter noisy CLI output patterns that waste tokens.
@@ -1273,6 +1290,43 @@ mod tests {
             !result.contains("more"),
             "no collapse for short run: {result}"
         );
+    }
+
+    #[test]
+    fn test_is_compiling_line_matches_real_cargo_format() {
+        assert!(is_compiling_line("Compiling arc v0.1.0"));
+        assert!(is_compiling_line("   Compiling foo v1.2.3 (/path/to/foo)"));
+        assert!(is_compiling_line("Compiling semver-ish v0.1.0-alpha.1"));
+    }
+
+    #[test]
+    fn test_is_compiling_line_rejects_pseudo_output() {
+        // "Compiling " + " v2" contains the old " v" substring, but this is not
+        // cargo's `Compiling <name> v<semver>` shape — must NOT be collapsed.
+        assert!(!is_compiling_line("Compiling v2 migration notes"));
+        assert!(!is_compiling_line("Compiling foo"));
+        assert!(!is_compiling_line("Compiling foo v (no version)"));
+        assert!(!is_compiling_line("note: Compiling foo v1.0.0"));
+    }
+
+    #[test]
+    fn test_is_downloading_line_matches_real_cargo_format() {
+        assert!(is_downloading_line("Downloading dep v0.1.0"));
+        assert!(!is_downloading_line("Downloading crates ..."));
+        assert!(!is_downloading_line("Downloading v2 plan"));
+    }
+
+    #[test]
+    fn test_pseudo_compiling_lines_not_collapsed_end_to_end() {
+        let input = [
+            "Compiling v2 migration notes",
+            "Compiling v3 migration notes",
+            "Compiling v4 migration notes",
+            "Compiling v5 migration notes",
+        ]
+        .join("\n");
+        let result = filter_noisy_patterns(&input);
+        assert_eq!(result, input, "non-cargo lines must pass through untouched");
     }
 
     #[test]
