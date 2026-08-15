@@ -343,11 +343,15 @@ pub fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 ///
 /// Finds a safe UTF-8 char boundary at `max_bytes`, then backs up to
 /// the last space (if one exists past position 10) to avoid splitting words.
+/// The "…" suffix counts toward `max_bytes`, so the total never exceeds the
+/// budget (mirroring `safe_truncate_with_suffix`).
 pub fn truncate_at_word_boundary(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
-    let truncated = safe_truncate(text, max_bytes);
+    // Reserve room for the ellipsis so the total stays within the budget.
+    let budget = max_bytes.saturating_sub("…".len());
+    let truncated = safe_truncate(text, budget);
     let mut end = truncated.len();
     if let Some(space_pos) = truncated.rfind(' ') {
         if space_pos > 10 {
@@ -1075,6 +1079,42 @@ mod tests {
         assert_eq!(safe_truncate_with_suffix("hello", 2, "…"), "…");
         // Zero budget.
         assert_eq!(safe_truncate_with_suffix("hello", 0, ""), "");
+    }
+
+    #[test]
+    fn test_truncate_at_word_boundary_short_string_unchanged() {
+        assert_eq!(truncate_at_word_boundary("hi", 50), "hi");
+        assert_eq!(truncate_at_word_boundary("", 50), "");
+    }
+
+    #[test]
+    fn test_truncate_at_word_boundary_honors_budget() {
+        // "…" is 3 bytes — the total result must never exceed max_bytes,
+        // matching safe_truncate_with_suffix's documented budget behavior.
+        let result = truncate_at_word_boundary("hello world", 10);
+        assert!(result.len() <= 10, "got {} bytes: {result:?}", result.len());
+        assert!(result.ends_with('…'));
+        let result = truncate_at_word_boundary("the quick brown fox jumps", 20);
+        assert!(result.len() <= 20, "got {} bytes: {result:?}", result.len());
+        assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn test_truncate_at_word_boundary_backs_up_to_space() {
+        // Space past position 10 → back up so no word is split.
+        // "the quick brown fox jumps": space before "fox" is at byte 15 (>10),
+        // so the cut lands at the word boundary, and the ellipsis fits the budget.
+        let result = truncate_at_word_boundary("the quick brown fox jumps", 20);
+        assert_eq!(result, "the quick brown…");
+        assert_eq!(result.len(), 18);
+    }
+
+    #[test]
+    fn test_truncate_at_word_boundary_multibyte_safe() {
+        // ✓ is 3 bytes (E2 9C 93) — must not panic and must honor the budget.
+        let result = truncate_at_word_boundary("hello ✓ world again", 12);
+        assert!(result.len() <= 12, "got {} bytes: {result:?}", result.len());
+        assert!(result.ends_with('…'));
     }
 
     #[test]
