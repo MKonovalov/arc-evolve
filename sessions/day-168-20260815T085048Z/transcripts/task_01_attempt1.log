@@ -1,0 +1,360 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the repo and finding a small, concrete improvement to make. The task says to act early — make my first concrete change within my first few tool calls.
+
+Let me look at recent git status and pick something small. Let me check what's recently changed and find a candidate improvement quickly.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls src/ | head -50 && grep -rn "TO… ✓ (10ms)
+ ✓ (11ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The grep found mostly TODO references in docs/help, not actual TODO comments. Let me find actual code improvement candidates quickly. Let me look for small, concrete improvements. A good candidate: find a function with an obvious inefficiency or a small missing test.
+
+Let me think about what's a good small improvement. The task says pick the FIRST real improvement and build its SMALLEST version. Let me look at something concrete and testable — e.g., a utility function that could be improved.
+
+Let me check the recent files that were changed to see if there's anything left half-done. Actually, let me just look for a small, self-contained thing. A good candidate is often a small pure function that lacks a test or has a subtle bug.
+
+Let me look at src/format/output.rs which was recently changed, or find something with clear improvement potential. Let me search for simple patterns quickly.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 4.1s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "unwrap()" src/ --include…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,80p' src/format/output.r… ✓ (4ms)
+ ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look for a small, concrete improvement. A great candidate for a small task: find a pure helper function that could use a test, or a small logic improvement. Let me check the `strip_ansi_codes` implementation — it's a hand-rolled parser. Let me look at it fully to see if there's a bug (e.g., not handling OSC sequences like `\x1b]`).
+
+Actually, a very common bug in hand-rolled ANSI strippers: they don't handle OSC (Operating System Command) sequences like `\x1b]0;title\x07` or `\x1b]8;;url\x1b\\` (hyperlinks). Let me check what this implementation handles.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.0s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '78,160p' src/format/output… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The ANSI stripper seems fairly complete. Let me find another candidate. Let me look for something concrete and small. A good candidate: check the `pluralize` or `format_duration` helpers in format/mod.rs, or look for a simple missing test.
+
+Actually, a strong candidate pattern for small self-improvement tasks: find a pure function with an edge case bug and write a regression test + fix. Let me look at `safe_byte_index` or something in format/mod.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn safe_byte_index\|fn fo…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn " src/rtk.rs | head -… ✓ (3ms)
+ ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at `safe_byte_index` and `truncate_with_ellipsis` — these are small pure functions. Maybe there's a small edge case bug worth fixing with a test.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.5s (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '295,380p' src/format/mod.r… ✓ (4ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+I found a real bug candidate: `truncate_with_ellipsis` uses `s.char_indices().nth(max)` and truncates at the `max`th character, but `s[..idx]` — wait, `idx` from `char_indices().nth(max)` is a char boundary so that's safe. But wait — if `max` is larger than the char count, it returns None and returns the full string. That's fine. Actually let me check: `s.char_indices().nth(max)` returns the char index of the `max`th character. If the string has exactly `max` characters, then `.nth(max)` is None and it returns the full string. OK.
+
+But here's the subtle bug: `truncate_with_ellipsis(s, max)` truncates by character count, not bytes. That's intentional — it says "max" chars. Hmm.
+
+Let me look at `safe_truncate_with_suffix` — there's a bug there! It appends `suffix` to the truncated string WITHOUT checking whether the result fits within `max_bytes`. So `safe_truncate_with_suffix("hello world", 5, "…")` returns "hello…" which is 6 bytes, exceeding max_bytes=5. The doc says "Truncate a string at a safe UTF-8 byte boundary and append a suffix (e.g. "…"). Returns the original string unchanged if it fits within max_bytes." The intent is clearly that the final result should fit within max_bytes. The suffix eats into the budget.
+
+That's a real, small, concrete improvement: fix `safe_truncate_with_suffix` so the suffix is included within `max_bytes` budget. But changing behavior could affect callers. Let me check callers of `safe_truncate_with_suffix`.
+
+Actually wait — I need to be careful. If I change the semantics, callers that relied on the old (buggy) behavior might change output. Let me check callers.
+
+Actually, an even safer improvement: `truncate_with_ellipsis` — `s.char_indices().nth(max)` with a `max` of 0 returns `Some((0, _))` and `&s[..0]` = "" + "…". Fine.
+
+Let me check the callers of safe_truncate_with_suffix.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "safe_truncate_with_suffi… ✓ (9ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting! Look at `src/commands_bg.rs:451`:
+
+```rust
+safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")
+```
+
+The caller already works around the bug by passing `max - 1`! That confirms the function's suffix is NOT included in the budget — the caller compensates. And `commands_retry.rs:291` passes `57` for the "…" suffix — 57 + 1 = 58, but maybe they want 57 total or 58? Unclear.
+
+Let me look at both call sites to decide the right fix:
+
+1. Option A: Fix `safe_truncate_with_suffix` to include the suffix in the max_bytes budget. This changes behavior — callers passing `max.saturating_sub(1)` would now produce shorter output (max-2 bytes effectively). That could be a regression for the display.
+
+2. Option B: Keep semantics but document better. Not really an improvement.
+
+3. Option C: Look at `truncate_with_ellipsis` — it uses char count not bytes, and `.nth(max)` — actually wait, there IS a subtle bug in truncate_with_ellipsis: if `max` == number of chars, returns full string without ellipsis, but if the string has MORE than max chars it truncates and adds "…" making max+1 chars. The suffix makes it exceed max. Same class of bug: `truncate_with_ellipsis("abcdefghij", 8)` → "abcdefgh…" (9 chars, exceeds 8). Hmm but "max" here is chars.
+
+Let me look at the two callers more carefully to figure out the intended contract.
+
+Actually, the cleanest small improvement: make `safe_truncate_with_suffix` budget-aware (suffix included in max_bytes), and update the caller in commands_bg.rs to stop doing the `saturating_sub(1)` workaround, and check commands_retry.rs.
+
+Let me look at the exact call sites.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '440,460p' src/commands_bg.… ✓ (5ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the two call sites:
+
+1. `commands_bg.rs` `truncate_command(cmd, max)`: wants the result (with "…") to fit in `max` bytes. It works around the bug with `max.saturating_sub(1)` — but that's still slightly wrong: `safe_truncate_with_suffix(cmd, max-1, "…")` truncates at max-1 bytes and appends 1 byte "…", so the total is exactly `max` bytes. OK so it does fit within max after the workaround.
+
+2. `commands_retry.rs`: `if joined.len() <= 60 { joined } else { safe_truncate_with_suffix(&joined, 57, "…") }` — wants result to fit within... 58? Or 60? The intent: names joined, if > 60 bytes, truncate to 60. The current call passes 57 and appends "…" → 58 total. So the retry side also seems to under-account: 57+1=58 ≤ 60, so it fits within 60 but wastes 2 bytes.
+
+The cleanest improvement: change `safe_truncate_with_suffix` semantics so the suffix is INCLUDED in the `max_bytes` budget. Then:
+- commands_bg.rs `truncate_command`: change `safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")` → `safe_truncate_with_suffix(cmd, max, "…")` (removing the workaround).
+- commands_retry.rs: change `safe_truncate_with_suffix(&joined, 57, "…")` → `safe_truncate_with_suffix(&joined, 60, "…")` — keeps behavior consistent with the `if joined.len() <= 60` guard (truncate to 60 bytes total including "…").
+
+Wait, but the doc says "Returns the original string unchanged if it fits within max_bytes." If we make the suffix included in budget, the behavior for short strings is unchanged (returns original). For long strings, the output becomes shorter by len(suffix) bytes. In commands_bg case: currently output = truncate(cmd, max-1) + "…" = max bytes. With the fix: truncate(cmd, max) + "…" where truncate is at most max-1 bytes (since suffix must fit) → total ≤ max. Same final size! Great, no visible change, just removes the workaround.
+
+For commands_retry: currently output = truncate(joined, 57) + "…" = 58 bytes. With fix and 60 passed: truncate(joined, 60) + "…" = 60 bytes. Slightly longer (58 → 60), arguably more correct per intent ("if > 60, truncate to fit 60"). Fine.
+
+Also there might be other callers. From grep, only those two call sites use `safe_truncate_with_suffix`. Let me double check with a fuller grep.
+
+Also `truncate_with_ellipsis` has the same class of issue but uses char counts — let me not touch it; keep the change narrow.
+
+Now, the task says "Write a test first if possible." So I should:
+1. Write a test for `safe_truncate_with_suffix` asserting the suffix fits within budget.
+2. Fix the function.
+3. Update the callers.
+4. Run fmt/clippy/build/test.
+5. Commit.
+
+Let me first check for existing tests on these functions in format/mod.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+Found a real small bug. `safe_truncate_with_suffix` truncates to `max_bytes` then appends the suffix, exceeding the budget — and one caller (`commands_bg.rs:451`) already works around it with `max.saturating_sub(1)`. Let me confirm the test area and the exact function.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "safe_truncate_with_suffi…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mod tests" src/format/mod… ✓ (5ms)
+ ✓ (6ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+There are 5 call sites total:
+1. `commands_bg.rs:451` — `safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")` — already compensates
+2. `commands_retry.rs:291` — `safe_truncate_with_suffix(&joined, 57, "…")` — the guard is `joined.len() <= 60`
+3. `commands_revisit.rs:360` — `safe_truncate_with_suffix(body, 300, "…")`
+4. `commands_revisit.rs:367` — `safe_truncate_with_suffix(last_comment, 200, "…")`
+5. `commands_skill.rs:333` — `safe_truncate_with_suffix(&r.full_name, 37, "...")`
+
+The fix: make suffix included in the `max_bytes` budget. This changes output by at most `len(suffix)` bytes at all these sites. For revisit (300/200 with "…" 3 bytes), output shrinks from 303/203 to 300/200 — arguably more correct. For skill.rs 37 with "..." (3 bytes): 37 → 37 (shrinks from 40 to 37).
+
+This is a genuine small correctness improvement: the doc contract "never exceeding max_bytes" (implied by safe_truncate's contract) should hold for the total result.
+
+Let me write the fix:
+
+```rust
+/// Truncate a string at a safe UTF-8 byte boundary and append a suffix (e.g. `"…"`),
+/// keeping the total result within `max_bytes`. The suffix is included in the budget.
+/// Returns the original string unchanged if it fits within `max_bytes`.
+pub fn safe_truncate_with_suffix(s: &str, max_bytes: usize, suffix: &str) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let suffix_len = suffix.len();
+    let budget = max_bytes.saturating_sub(suffix_len);
+    let truncated = safe_truncate(s, budget);
+    format!("{truncated}{suffix}")
+}
+```
+
+Edge case: if `max_bytes` < suffix_len, budget = 0, truncated = "", result = suffix. Reasonable.
+
+Then update callers to remove workarounds and be consistent:
+1. commands_bg.rs: `safe_truncate_with_suffix(cmd, max, "…")` (remove `.saturating_sub(1)`) — final output unchanged (was max bytes, still max bytes).
+2. commands_retry.rs: `safe_truncate_with_suffix(&joined, 60, "…")` — result now fits 60 exactly (was 58). Consistent with the `<= 60` guard.
+3. commands_revisit.rs and commands_skill.rs: leave as-is — the fix just makes them respect their stated budgets.
+
+Then add a test. Let me look at the existing tests in format/mod.rs around line 1005 to match style.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 5.6s (2 ✓)
+
+The function's doc contract implies the total should respect `max_bytes`, but it appends the suffix on top. Five call sites — one (`commands_bg.rs`) already works around it. Let me check the existing tests and then write a regression test first.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1005,1060p' src/format/mod… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me write the regression test first (test-first), then fix the function. I'll add tests after `test_safe_truncate_exact_boundary` or wherever safe_truncate tests end. Let me see what comes after line 1060 to find a good insertion point.
+────────────────────────────────────────────────────────────────────────────────
+
+Now I'll write the regression test first (test-first), then fix the function.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1060,1090p' src/format/mod… ✓ (3ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/format/mod.rs (5 → 23 lines)
+  +     #[test]
+  +     fn test_safe_truncate_with_suffix_fits_budget() {
+  +         // Suffix must be included in the max_bytes budget.
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello …");
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…").len(), 8);
+  +         // Short string unchanged.
+  +         assert_eq!(safe_truncate_with_suffix("hi", 8, "…"), "hi");
+  +         // Multibyte-safe: ✓ is 3 bytes (E2 9C 93).
+  +         let s = "hello ✓ world";
+  +         let result = safe_truncate_with_suffix(s, 9, "…");
+  +         assert_eq!(result, "hello …"); // 6 + 3 bytes = 9, never mid-char
+  +         assert_eq!(result.len(), 9);
+  +         // Budget smaller than suffix: only the suffix survives.
+  +         assert_eq!(safe_truncate_with_suffix("hello", 2, "…"), "…");
+  +         // Zero budget.
+  +         assert_eq!(safe_truncate_with_suffix("hello", 0, ""), "");
+  +     }
+  + 
+        #[test]
+        fn test_safe_byte_index_empty_string() {
+  ... (1 more lines)
+ ✓ (0ms)
+  +     #[test]
+  +     fn test_safe_truncate_with_suffix_fits_budget() {
+  +         // Suffix must be included in the max_bytes budget.
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello …");
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…").len(), 8);
+  +         // Short string unchanged.
+  +         assert_eq!(safe_truncate_with_suffix("hi", 8, "…"), "hi");
+  +         // Multibyte-safe: ✓ is 3 bytes (E2 9C 93).
+  ... (13 more lines)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now fix the function itself.
+────────────────────────────────────────────────────────────────────────────────
+
+Now the fix:
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/format/mod.rs (9 → 11 lines)
+    /// Truncate a string at a safe UTF-8 byte boundary and append a suffix (e.g. `"…"`).
+  + /// The suffix counts toward `max_bytes`, so the total result never exceeds the budget.
+    /// Returns the original string unchanged if it fits within `max_bytes`.
+    pub fn safe_truncate_with_suffix(s: &str, max_bytes: usize, suffix: &str) -> String {
+        if s.len() <= max_bytes {
+            return s.to_string();
+        }
+  -     let truncated = safe_truncate(s, max_bytes);
+  +     let budget = max_bytes.saturating_sub(suffix.len());
+  +     let truncated = safe_truncate(s, budget);
+        format!("{truncated}{suffix}")
+    }
+ ✓ (0ms)
+    /// Truncate a string at a safe UTF-8 byte boundary and append a suffix (e.g. `"…"`).
+  + /// The suffix counts toward `max_bytes`, so the total result never exceeds the budget.
+    /// Returns the original string unchanged if it fits within `max_bytes`.
+    pub fn safe_truncate_with_suffix(s: &str, max_bytes: usize, suffix: &str) -> String {
+        if s.len() <= max_bytes {
+            return s.to_string();
+        }
+  -     let truncated = safe_truncate(s, max_bytes);
+  ... (4 more lines)
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now update the callers that compensated or were inconsistent:
+
+1. `commands_bg.rs:451` — remove the `.saturating_sub(1)` workaround (result stays the same size, just simpler).
+2. `commands_retry.rs:291` — change 57 → 60 to match the `<= 60` guard (now the suffix is included, so passing 60 gives exactly 60 bytes).
+
+The revisit/skill callers can stay — the fix makes them respect their stated budgets (300 → 300, 200 → 200, 37 → 37 instead of 303/203/40).
+────────────────────────────────────────────────────────────────────────────────
+
+Now simplify the two callers that compensated for the bug:
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_bg.rs (1 → 1 lines)
+  -         safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")
+  +         safe_truncate_with_suffix(cmd, max, "…")
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs (1 → 1 lines)
+  -         safe_truncate_with_suffix(&joined, 57, "…")
+  +         safe_truncate_with_suffix(&joined, 60, "…")
+ ✓ (0ms)
+  -         safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")
+  +         safe_truncate_with_suffix(cmd, max, "…")
+ ✓ (1ms)
+  -         safe_truncate_with_suffix(&joined, 57, "…")
+  +         safe_truncate_with_suffix(&joined, 60, "…")
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.0s (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (18.2s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -15 ✓ (1m 20s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+My test assertion was wrong. `safe_truncate_with_suffix("hello world", 8, "…")` → budget = 8 - 3 = 5, truncate at 5 → "hello", + "…" → "hello…" (8 bytes). My test expected "hello …" (with a space) which would be 9 bytes. Let me fix the test assertion — "hello…" is correct: 5 + 3 = 8.
+
+Also check the multibyte case: `safe_truncate_with_suffix("hello ✓ world", 9, "…")` → budget = 9-3 = 6, truncate at 6 → "hello " (6 bytes), + "…" → "hello …" (9 bytes). That assertion was correct.
+
+Fix the first assertion.
+────────────────────────────────────────────────────────────────────────────────
+
+My test assertion was wrong (`"hello…"` is 5+3=8 bytes; `"hello …"` would be 9). The code is correct — fixing the test:
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/format/mod.rs (2 → 2 lines)
+  -         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello …");
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello…");
+            assert_eq!(safe_truncate_with_suffix("hello world", 8, "…").len(), 8);
+ ✓ (1ms)
+  -         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello …");
+  +         assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello…");
+            assert_eq!(safe_truncate_with_suffix("hello world", 8, "…").len(), 8);
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo test format::te… ✓ (1m 18s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All tests pass (4306 passed, up from 4305 — my new test is included; the first filtered run showed 0 because the test name pattern didn't match the full path, but the full run confirms 4306 passed).
+
+Now verify fmt, clippy, build are all green, then commit.
+────────────────────────────────────────────────────────────────────────────────
+
+All 4306 tests pass (my new test included). Full verification then commit:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt -- --check && cargo clip… ✓ (18.4s)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Committed as `4673ed0`. 
+
+**What I did:** Fixed a real budget-overrun bug in `safe_truncate_with_suffix` (`src/format/mod.rs`).
+
+**The bug:** the function truncated to `max_bytes` and then appended the suffix *on top* — so `safe_truncate_with_suffix("hello world", 8, "…")` returned 9 bytes, violating its own "never exceeding max_bytes" contract. One caller (`commands_bg.rs`) had already noticed and was working around it with `max.saturating_sub(1)`.
+
+**The fix:**
+• Suffix now counts toward `max_bytes` (budget = `max - suffix.len()`, `saturating_sub` handles the degenerate case).
+• Removed the `saturating_sub(1)` workaround in `commands_bg.rs` (same visible output, simpler code).
+• `commands_retry.rs` now passes the true budget (`60` instead of `57`) so the `…`-truncated names actually use the full 60 bytes the `<= 60` guard implies.
+• Other call sites (`commands_revisit.rs`, `commands_skill.rs`) now respect their stated budgets (e.g. 300 instead of 303 bytes).
+
+**Verification:** wrote a regression test first (covers short-string passthrough, multibyte `✓` safety, budget-smaller-than-suffix, zero budget) — the first draft of my own test assertion was wrong and I caught it via the failing run, which is exactly the test doing its job. All 4306 tests pass, fmt/clippy/build clean.
+
+
