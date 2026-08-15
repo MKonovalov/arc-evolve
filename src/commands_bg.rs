@@ -448,7 +448,7 @@ fn truncate_command(cmd: &str, max: usize) -> String {
     if cmd.len() <= max {
         cmd.to_string()
     } else {
-        safe_truncate_with_suffix(cmd, max.saturating_sub(1), "…")
+        safe_truncate_with_suffix(cmd, max, "…")
     }
 }
 

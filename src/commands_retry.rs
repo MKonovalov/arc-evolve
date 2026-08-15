@@ -288,7 +288,7 @@ fn format_file_list(snapshot: &[FileChange]) -> String {
     if joined.len() <= 60 {
         joined
     } else {
-        safe_truncate_with_suffix(&joined, 57, "…")
+        safe_truncate_with_suffix(&joined, 60, "…")
     }
 }
 

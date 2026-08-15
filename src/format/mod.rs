@@ -321,12 +321,14 @@ pub fn safe_truncate(s: &str, max_bytes: usize) -> &str {
 }
 
 /// Truncate a string at a safe UTF-8 byte boundary and append a suffix (e.g. `"…"`).
+/// The suffix counts toward `max_bytes`, so the total result never exceeds the budget.
 /// Returns the original string unchanged if it fits within `max_bytes`.
 pub fn safe_truncate_with_suffix(s: &str, max_bytes: usize, suffix: &str) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    let truncated = safe_truncate(s, max_bytes);
+    let budget = max_bytes.saturating_sub(suffix.len());
+    let truncated = safe_truncate(s, budget);
     format!("{truncated}{suffix}")
 }
 
@@ -1055,6 +1057,24 @@ mod tests {
         assert_eq!(safe_truncate(s, 4), "ab");
         // Truncating at 2 should give "ab"
         assert_eq!(safe_truncate(s, 2), "ab");
+    }
+
+    #[test]
+    fn test_safe_truncate_with_suffix_fits_budget() {
+        // Suffix must be included in the max_bytes budget.
+        assert_eq!(safe_truncate_with_suffix("hello world", 8, "…"), "hello…");
+        assert_eq!(safe_truncate_with_suffix("hello world", 8, "…").len(), 8);
+        // Short string unchanged.
+        assert_eq!(safe_truncate_with_suffix("hi", 8, "…"), "hi");
+        // Multibyte-safe: ✓ is 3 bytes (E2 9C 93).
+        let s = "hello ✓ world";
+        let result = safe_truncate_with_suffix(s, 9, "…");
+        assert_eq!(result, "hello …"); // 6 + 3 bytes = 9, never mid-char
+        assert_eq!(result.len(), 9);
+        // Budget smaller than suffix: only the suffix survives.
+        assert_eq!(safe_truncate_with_suffix("hello", 2, "…"), "…");
+        // Zero budget.
+        assert_eq!(safe_truncate_with_suffix("hello", 0, ""), "");
     }
 
     #[test]
