@@ -51,7 +51,9 @@ pub fn extract_tool_name_from_error(error: &str) -> Option<&'static str> {
         return None;
     }
     for &tool in KNOWN_TOOL_NAMES {
-        if let Some(pos) = error.find(tool) {
+        let mut start = 0;
+        while let Some(pos) = error[start..].find(tool) {
+            let pos = start + pos;
             // Check word boundary before
             let before_ok = pos == 0
                 || error
@@ -68,6 +70,9 @@ pub fn extract_tool_name_from_error(error: &str) -> Option<&'static str> {
             if before_ok && after_ok {
                 return Some(tool);
             }
+            // Not a standalone match here; advance past this occurrence so an
+            // embedded earlier occurrence doesn't hide a later standalone one.
+            start = end;
         }
     }
     None
@@ -482,6 +487,30 @@ mod tests {
     #[test]
     fn test_parse_with_modifier_plain_retry() {
         assert_eq!(parse_with_modifier("/retry"), None);
+    }
+
+    #[test]
+    fn test_extract_tool_name_plain() {
+        assert_eq!(extract_tool_name_from_error(""), None);
+        assert_eq!(extract_tool_name_from_error("bash failed"), Some("bash"));
+        assert_eq!(extract_tool_name_from_error("some unrelated error"), None);
+    }
+
+    #[test]
+    fn test_extract_tool_name_ignores_embedded_matches() {
+        // Substrings inside words should not count
+        assert_eq!(extract_tool_name_from_error("bashful command"), None);
+        assert_eq!(extract_tool_name_from_error("research notes"), None);
+    }
+
+    #[test]
+    fn test_extract_tool_name_skips_embedded_first_occurrence() {
+        // The first occurrence of "bash" is embedded in "bashful"; a later
+        // standalone occurrence must still be found.
+        assert_eq!(
+            extract_tool_name_from_error("bashful shell: bash exited with code 1"),
+            Some("bash")
+        );
     }
 
     #[test]
