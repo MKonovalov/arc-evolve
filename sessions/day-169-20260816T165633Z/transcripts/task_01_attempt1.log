@@ -1,0 +1,285 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by exploring the current state of the codebase to find a small, concrete improvement to make. I should act early — make my first concrete change within my first few tool calls.
+
+Let me look at the recently changed files and pick a good candidate for a small improvement.
+
+Let me start by checking git status and looking for quick wins.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short && git log --on…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -5 ✓ (10ms)
+ ✓ (174ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Clean tree, build passes. I need to find a small, concrete improvement. Let me look for something quick. The recently changed files include `src/commands_retry.rs`, `src/commands_bg.rs`, `src/format/output.rs`, `src/format/mod.rs`.
+
+Let me think about what small improvement to make. The task says: make ONE small concrete improvement, prefer a regression test if code already satisfies. Let me look at recent work to see what's freshly landed and could use a test, or find a real small gap.
+
+Let me search for something quick and low-risk. Ideas:
+- A small unit test for an existing pure function that lacks coverage.
+- A tiny bug fix.
+
+Let me not spend too long. Let me check the recently changed files quickly for a small gap.
+────────────────────────────────────────────────────────────────────────────────
+Clean tree, build green. Let me find a small concrete improvement quickly.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD~2 | head -30  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn parse_with_modifier\|… ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 4.7s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The tree is clean and building. Let me look for a small, concrete improvement. Recent files changed include `src/commands_retry.rs` and `src/commands_bg.rs`. Let me look at the retry parser — maybe there's a small bug or missing case I can fix with a test.
+
+Let me look at `parse_with_modifier` and `extract_tool_name_from_error`.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs:40..130 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how `extract_tool_name_from_error` handles single-byte vs multi-byte chars. `pos - 1` and `end` are byte indices from `error.find(tool)`. `pos - 1` could be inside a multi-byte character but that's fine since we're only inspecting that single byte with `.is_ascii_alphanumeric()` — checking the byte value of a partial char could give a false positive (e.g., a Chinese character's continuation byte might be ASCII alphanumeric? No — UTF-8 continuation bytes are 0x80-0xBF, never ASCII alphanumeric). Actually UTF-8 continuation bytes are always >= 0x80, so `is_ascii_alphanumeric()` returns false for them — that's actually the desired "not a word char" behavior, which is correct anyway (we want to check if the boundary char is a word character; for multi-byte chars the individual bytes are non-alphanumeric which is the correct answer for "is this a word boundary"). So this is fine.
+
+This looks like a solid, already-working function. Let me check the KNOWN_TOOL_NAMES and tests to see if there's a small gap I can fill. Actually, let me look at the test module for this file.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "KNOWN_TOOL_NAMES" src/com…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "#\[cfg(test)\]\|#\[test\]… ✓ (4ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.8s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the existing tests for `extract_tool_name_from_error` to see what's covered and find the smallest gap to fix. Let me look at the tests around line 467-640.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs:467..587 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There are no tests for `extract_tool_name_from_error` in this module's test suite (the tests are all about parse_with_modifier and handle_changes). Let me check if extract_tool_name_from_error has tests elsewhere.
+
+Actually, a quick idea: `extract_tool_name_from_error` returns the first match. But notice a bug: it iterates `KNOWN_TOOL_NAMES` which is longest-first ("rename_symbol" first, "bash" last). The comment at line 891 says "by KNOWN_TOOL_NAMES order, which is longest-first". But wait — is it longest-first? Let me check: "rename_symbol" (13), "shared_state" (12), "write_file" (10), "read_file" (9), "edit_file" (9), "list_files" (10), "sub_agent" (9), "ask_user" (8), "search" (6), "bash" (4), "todo" (4). Yes, longest-first.
+
+But there's a subtle bug: `error.find(tool)` — what if the error message contains e.g. "bash" inside the word "bashrc"? Then the word boundary check would catch: before char is 'h'? No wait — it does `error.find("bash")` and checks boundaries around that occurrence. If the message says "bashrc", find("bash") returns position 0, after char is 'r' which is alphanumeric → after_ok false → not matched. OK. But `error.find` only finds the FIRST occurrence — if the first occurrence of "bash" is inside a word but a later occurrence is standalone, it would return None for that tool incorrectly. But actually `find` returns first occurrence; if that failed boundary check, the loop continues to next tool — it doesn't search for later occurrences of the same tool. That's a real but minor edge: e.g., error text "created bashrc then ran bash" → find("bash") finds position 8 (bashrc), boundaries fail, and it moves on, never finding the standalone "bash" later. The tool name would be missed.
+
+That's a tiny real bug: `find` should be `match_indices` and iterate to find a word-boundary-bounded occurrence. Let me fix that — it's a small, surgical improvement.
+
+Let me verify the loop: for each tool, `if let Some(pos) = error.find(tool)` — only checks first occurrence. If first occurrence fails boundary check, skip tool entirely.
+
+Fix: use `match_indices(tool)` and return on first occurrence passing boundary checks.
+
+This is a genuine small improvement. Let me write the fix plus a regression test. Written test first per the rules — actually the rule says write a test first if possible. Let me add the test and the fix together, then run.
+
+Let me check the file at line ~627 and beyond to see existing tests end and figure where tests would fit. Actually I can just add tests in the same module. Let me check if there are already extract_tool_name tests.
+────────────────────────────────────────────────────────────────────────────────
+No tests exist for `extract_tool_name_from_error`. Let me check for a real bug in it — I suspect `error.find(tool)` only checks the first occurrence, missing a standalone tool name if an earlier occurrence is embedded in a word.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "extract_tool_name_from_e… ✓ (7ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '586,720p' src/commands_ret… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I confirmed that `extract_tool_name_from_error` has no tests. Let me analyze the actual bug: `error.find(tool)` finds the FIRST occurrence of the tool name anywhere in the string. If that first occurrence is embedded within a word (e.g. "read_file" inside "thread_file_helper"... wait, actually let me think of a realistic case.
+
+The word-boundary check: before char must not be alphanumeric/underscore, after char must not be alphanumeric/underscore. So if the first occurrence of "bash" is in "bashful", the boundary check fails. But the function only checks the FIRST occurrence — if a later occurrence of "bash" stands alone as a word, it's never found because `find` returns the first position and the code returns... wait, no. Looking at the code again:
+
+```rust
+for &tool in KNOWN_TOOL_NAMES {
+    if let Some(pos) = error.find(tool) {
+        let before_ok = ...;
+        let after_ok = ...;
+        if before_ok && after_ok {
+            return Some(tool);
+        }
+    }
+}
+```
+
+If the first occurrence doesn't have word boundaries, it just skips to the next tool name — it doesn't scan for a later occurrence of the same tool. So "tool 'bash' failed: see bashful" — first occurrence of "bash" is embedded in "bashful" → boundary check fails → returns None even though "bash" appears standalone later.
+
+That's a genuine bug: a word-boundary guard that only checks the first occurrence. The fix: iterate over all occurrences of the tool name via `match_indices` and return the first with proper boundaries.
+
+This is a small, concrete improvement with a clear test. Let me write the fix + tests.
+
+The fix:
+
+```rust
+for &tool in KNOWN_TOOL_NAMES {
+    for (pos, _) in error.match_indices(tool) {
+        let before_ok = pos == 0
+            || error
+                .as_bytes()
+                .get(pos - 1)
+                .is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_');
+        let end = pos + tool.len();
+        let after_ok = end >= error.len()
+            || error
+                .as_bytes()
+                .get(end)
+                .is_none_or(|&b| !b.is_ascii_alphanumeric() && b != b'_');
+        if before_ok && after_ok {
+            return Some(tool);
+        }
+    }
+}
+```
+
+Note: `match_indices` returns byte indices, and tool names are ASCII, so slicing is safe.
+
+Tests:
+1. Plain tool name → Some.
+2. Tool name embedded in a word (e.g. "bashful") followed by standalone appearance later → Some (the bug fix).
+3. Only embedded occurrences → None.
+4. Empty error → None.
+5. Known tools ordered longest-first — verify "rename_symbol" preferred over "edit_file" when both appear? Actually the KNOWN_TOOL_NAMES comment says "longest-first". Test that when both "read_file" and "edit_file" appear standalone, "read_file" wins? They're different tools; longest-first avoids "file" matching... there's no "file" tool. The ordering is for prefix disambiguation: "write_file" vs "read_file" vs "edit_file" — none is a prefix of another. But "sub_agent" vs ... hmm. Anyway, there's already a comment at line 891 about KNOWN_TOOL_NAMES order longest-first. Let me check that usage.
+
+Let me just write the fix with good tests, and use `match_indices` — that returns (byte_pos, &str). Actually I only need the positions.
+
+Let me implement it.
+────────────────────────────────────────────────────────────────────────────────
+Found a genuine bug: `extract_tool_name_from_error` uses `error.find(tool)` — only the **first** occurrence of each tool name is checked for word boundaries. If that first occurrence is embedded inside another word (e.g. "bashful"), a later standalone occurrence is never found. Let me write a failing test first, then fix.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs:478..493 ✓ (0ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs (4 → 28 lines)
+    #[test]
+        fn test_parse_with_modifier_plain_retry() {
+            assert_eq!(parse_with_modifier("/retry"), None);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_extract_tool_name_plain() {
+  +         assert_eq!(extract_tool_name_from_error(""), None);
+  +         assert_eq!(extract_tool_name_from_error("bash failed"), Some("bash"));
+  +         assert_eq!(extract_tool_name_from_error("some unrelated error"), None);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_extract_tool_name_ignores_embedded_matches() {
+  +         // Substrings inside words should not count
+  +         assert_eq!(extract_tool_name_from_error("bashful command"), None);
+  +         assert_eq!(extract_tool_name_from_error("research notes"), None);
+  +     }
+  + 
+  +     #[test]
+  ... (8 more lines)
+ ✓ (0ms)
+    #[test]
+        fn test_parse_with_modifier_plain_retry() {
+            assert_eq!(parse_with_modifier("/retry"), None);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_extract_tool_name_plain() {
+  +         assert_eq!(extract_tool_name_from_error(""), None);
+  ... (13 more lines)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test extract_tool_name 2>&1 … ✓ (19.5s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test fails as expected — the bug is confirmed. Now fix `extract_tool_name_from_error` to find all occurrences of each tool name.
+────────────────────────────────────────────────────────────────────────────────
+Test fails as expected — bug confirmed. Now the fix: iterate over all occurrences of each tool name, not just the first.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_retry.rs (26 → 31 lines)
+            return None;
+        }
+        for &tool in KNOWN_TOOL_NAMES {
+  -         if let Some(pos) = error.find(tool) {
+  +         let mut start = 0;
+  +         while let Some(pos) = error[start..].find(tool) {
+  +             let pos = start + pos;
+                // Check word boundary before
+                let before_ok = pos == 0
+                    || error
+  ···
+                if before_ok && after_ok {
+                    return Some(tool);
+                }
+  +             // Not a standalone match here; advance past this occurrence so an
+  +             // embedded earlier occurrence doesn't hide a later standalone one.
+  +             start = end;
+            }
+        }
+        None
+ ✓ (1ms)
+            return None;
+        }
+        for &tool in KNOWN_TOOL_NAMES {
+  -         if let Some(pos) = error.find(tool) {
+  +         let mut start = 0;
+  +         while let Some(pos) = error[start..].find(tool) {
+  +             let pos = start + pos;
+                // Check word boundary before
+  ... (12 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Note: `error[start..]` — this is a byte index. `start` is derived from `pos + tool.len()`, and `pos` came from a `.find()` on a `&str` which returns a byte index of a valid char boundary. `tool.len()` is the byte length of the tool (all ASCII), so `pos + tool.len()` is at a valid boundary (or end). `error[start..]` slicing requires `start` to be a char boundary — since `pos` was a char boundary and tool is ASCII, `pos + tool.len()` is also a char boundary. Good, no panic risk.
+
+Let me run the test.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test extract_tool_name 2>&1 … ✓ (19.8s)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_retry 2>&1 | g… ✓ (171ms)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_retry 2>&1 | t… ✓ (172ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_retry 2>&1 | g… ✓ (170ms)
+
+All 49 tests pass (was 46 + my 3 new ones). Now the full check suite:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (17.4s)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -2 && carg… ✓ (57.5s)
+
+All green: fmt, clippy, build, and 4315 + 88 tests pass. This is an internal `/retry` helper fix — no user-facing docs or behavior change, so CLAUDE.md/README don't need updating. Committing:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add -A && git commit -m "Day 1… ✓ (18ms)
+
+Committed as `9706c0f`. Done.
+
+## What I did
+
+**Bug found in `src/commands_retry.rs`:** `extract_tool_name_from_error` (used by `/retry` to give tool-specific recovery hints) only checked the *first* occurrence of each tool name in the error string. If that first occurrence was embedded inside another word (e.g. `"bashful"`), it was rejected — but the loop moved on, never checking later standalone occurrences. So an error like `"bashful shell: bash exited with code 1"` returned None instead of `Some("bash")`, silently dropping the recovery hint.
+
+**Fix:** iterate over all occurrences of each tool name per the word-boundary rules, advancing past non-matching occurrences. The earliest standalone match wins (preserving the existing longest-first tool ordering).
+
+**Process:**
+• Wrote 3 regression tests first (`plain, embedded`, `embedded-first-occurrence`) — the last one failed, confirming the bug
+• Fixed with a small surgical edit; ran full gates
+• `cargo fmt, cargo clippy --all-targets -- -D warnings, cargo build, and cargo test` (4315 + 88 pass) all green
+
+Committed immediately as a single small improvement per the fallback-task rules. No docs change needed — this is an internal helper fix with no user-facing surface change.
+
+
