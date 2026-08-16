@@ -415,10 +415,10 @@ pub fn decode_html_entities(s: &str) -> String {
         if c == '&' && chars.peek() == Some(&'#') {
             let mut entity = String::from("&#");
             chars.next(); // consume '#'
-            // Track whether the entity was properly terminated with ';'. An
-            // unterminated "&#65" (no semicolon) is NOT an entity per the doc
-            // contract (`&#NNN;` / `&#xHH;`), so it must be emitted verbatim —
-            // never decoded, and never given an invented ';'.
+                          // Track whether the entity was properly terminated with ';'. An
+                          // unterminated "&#65" (no semicolon) is NOT an entity per the doc
+                          // contract (`&#NNN;` / `&#xHH;`), so it must be emitted verbatim —
+                          // never decoded, and never given an invented ';'.
             let mut terminated = false;
             while let Some(&nc) = chars.peek() {
                 if nc == ';' {
@@ -1550,10 +1550,7 @@ mod tests {
         // not gain an invented semicolon.
         assert_eq!(decode_html_entities("&#65"), "&#65");
         assert_eq!(decode_html_entities("&#x41"), "&#x41");
-        assert_eq!(
-            decode_html_entities("run &#65 build"),
-            "run &#65 build"
-        );
+        assert_eq!(decode_html_entities("run &#65 build"), "run &#65 build");
         // Overflowing unterminated numeric — preserved without a fake ';'.
         assert_eq!(decode_html_entities("&#999999999999"), "&#999999999999");
     }
