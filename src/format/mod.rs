@@ -415,27 +415,39 @@ pub fn decode_html_entities(s: &str) -> String {
         if c == '&' && chars.peek() == Some(&'#') {
             let mut entity = String::from("&#");
             chars.next(); // consume '#'
+            // Track whether the entity was properly terminated with ';'. An
+            // unterminated "&#65" (no semicolon) is NOT an entity per the doc
+            // contract (`&#NNN;` / `&#xHH;`), so it must be emitted verbatim —
+            // never decoded, and never given an invented ';'.
+            let mut terminated = false;
             while let Some(&nc) = chars.peek() {
                 if nc == ';' {
                     chars.next();
+                    terminated = true;
                     break;
                 }
                 entity.push(nc);
                 chars.next();
             }
             let num_str = &entity[2..];
-            let parsed = if let Some(hex) = num_str.strip_prefix('x').or(num_str.strip_prefix('X'))
-            {
-                u32::from_str_radix(hex, 16).ok()
+            let parsed = if terminated {
+                if let Some(hex) = num_str.strip_prefix('x').or(num_str.strip_prefix('X')) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    num_str.parse::<u32>().ok()
+                }
             } else {
-                num_str.parse::<u32>().ok()
+                None
             };
             if let Some(ch) = parsed.and_then(char::from_u32) {
                 decoded.push(ch);
             } else {
-                // Failed to decode — emit original
+                // Failed to decode — emit original (only include ';' if the
+                // input actually had one; unterminated input stays verbatim).
                 decoded.push_str(&entity);
-                decoded.push(';');
+                if terminated {
+                    decoded.push(';');
+                }
             }
         } else {
             decoded.push(c);
@@ -1529,6 +1541,32 @@ mod tests {
     fn test_decode_html_entities_incomplete() {
         // Ampersand not part of an entity
         assert_eq!(decode_html_entities("a & b"), "a & b");
+    }
+
+    #[test]
+    fn test_decode_html_entities_unterminated_numeric_stays_verbatim() {
+        // No ';' terminator → not an entity per the doc contract. Must stay
+        // verbatim, NOT be decoded (a malformed "&#65" is not "A"), and must
+        // not gain an invented semicolon.
+        assert_eq!(decode_html_entities("&#65"), "&#65");
+        assert_eq!(decode_html_entities("&#x41"), "&#x41");
+        assert_eq!(
+            decode_html_entities("run &#65 build"),
+            "run &#65 build"
+        );
+        // Overflowing unterminated numeric — preserved without a fake ';'.
+        assert_eq!(decode_html_entities("&#999999999999"), "&#999999999999");
+    }
+
+    #[test]
+    fn test_decode_html_entities_terminated_numeric_still_decodes() {
+        // The ';' terminator is what makes it an entity — terminated forms
+        // must keep decoding exactly as before.
+        assert_eq!(decode_html_entities("&#65;"), "A");
+        assert_eq!(decode_html_entities("&#x41;"), "A");
+        // Invalid but terminated — preserved WITH its semicolon.
+        assert_eq!(decode_html_entities("&#xZZZZ;"), "&#xZZZZ;");
+        assert_eq!(decode_html_entities("&#abc;"), "&#abc;");
     }
 
     // --- Section header and divider tests ---
