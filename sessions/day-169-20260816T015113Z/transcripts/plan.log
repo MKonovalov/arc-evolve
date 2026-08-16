@@ -1,0 +1,133 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the situation. I'm arc, a self-evolving coding agent. Today is Day 169. My job in this phase is to produce a session plan.
+
+Key evidence from the assessment:
+
+1. **Build Status**: PASS — all four CI gates green.
+2. **No open GitHub issues** — zero open, zero agent-self.
+3. **The dream's next milestone**: accumulate ≥5 matched prediction→outcome pairs in risk validation. The prediction half is flowing (5 snapshots in `.arc/risk_snapshots.jsonl`), but the outcome half is NOT — `auto_validate_after_failure` only fires on post-prompt watch failures in interactive use; the evolve loop commits with raw `git commit` and doesn't run the watch cycle.
+
+Wait, let me re-read that. The assessment says:
+- `auto_validate_after_failure` is wired (watch.rs ×3 call sites) but only fires on post-prompt watch failures in interactive use; the evolve loop commits with raw `git commit` and doesn't run the watch cycle, so no outcomes get recorded.
+
+Hmm, but there's a note in CLAUDE.md: `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and (opt-in) on REPL exit — it does NOT fire in the evolve loop. But wait, snapshots ARE accumulating (5 in `.arc/risk_snapshots.jsonl` for days 167-168). Interesting — so something is recording snapshots. Actually looking at the trajectory: "Snapshots ARE accumulating (5 in `.arc/risk_snapshots.jsonl` for days 167–168, deduped per git hash, via `/commit` + REPL-exit autosnapshot)".
+
+Hmm wait, but the evolve loop commits with raw `git commit`. Let me check — maybe there's a harness change. Actually the assessment says the snapshots are accumulating. OK.
+
+So the dream milestone is: accumulate ≥5 matched prediction→outcome pairs. The prediction half flows; the outcome half (`auto_validate_after_failure`) doesn't fire because the evolve loop doesn't run the watch cycle.
+
+Actually wait — let me re-read. In CLAUDE.md:
+"`auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and (opt-in) on REPL exit under `arc_RISK_AUTOSNAPSHOT=1` — it does **NOT** fire in the evolve loop, which commits with raw `git commit`, so the snapshot half of the prediction meter accumulates only through a human/harness invocation of `arc risk snapshot`."
+
+But the assessment says 5 snapshots exist in `.arc/risk_snapshots.jsonl` for days 167-168. So maybe the harness now calls `arc risk snapshot`? Or maybe someone fixed that. Actually, there's a note in the assessment: "The prediction half is flowing" — so something changed. Let me check the actual files to understand.
+
+Actually, the instructions say: "IMPORTANT: Do NOT read source code files. The assessment above already contains the source architecture, build status, bugs, and capability gaps. Plan from the assessment."
+
+But I should check ISSUES_TODAY.md since the prompt references it ("Read ISSUES_TODAY.md"). And the assessment says there are no open issues. Let me check the state of things.
+
+The key finding from the assessment (Bugs/Friction #1):
+**`risk_validations.jsonl` still doesn't exist — the dream milestone (accumulate ≥5 matched prediction→outcome pairs) has zero data.** Snapshots ARE accumulating (5 in `.arc/risk_snapshots.jsonl`) — the prediction half is flowing, the outcome half is not. `auto_validate_after_failure` is wired (watch.rs ×3 call sites) but only fires on post-prompt watch failures in interactive use; the evolve loop commits with raw `git commit` and doesn't run the watch cycle, so no outcomes get recorded. **This is the dream's stated next milestone and it is not being fed by the current loop.**
+
+So the dream milestone: "Accumulate the first validation data. The infrastructure exists: `auto_risk_snapshot` records predictions, `auto_validate_after_failure` records outcomes. What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs."
+
+The blocker: `auto_validate_after_failure` only fires on post-prompt watch failures in interactive use. The evolve loop doesn't run the watch cycle, so no outcomes get recorded.
+
+Hmm, but wait — how do snapshots get recorded in the evolve loop if `auto_risk_snapshot` doesn't fire there? The assessment says snapshots ARE accumulating via `/commit` + REPL-exit autosnapshot. That's confusing — those are interactive paths. But the harness evolution loop... Actually maybe the harness (evolve.sh) now runs `arc risk snapshot`? The CLAUDE.md says "Both meter halves are now CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence."
+
+So possibly evolve.sh has been updated to call `arc risk snapshot` at some point. But the assessment explicitly says "the evolve loop commits with raw `git commit` and doesn't run the watch cycle, so no outcomes get recorded."
+
+OK so my task as planner: figure out how to feed the outcome half of the risk validation loop. The dream milestone is to accumulate ≥5 matched prediction→outcome pairs.
+
+How can `auto_validate_after_failure` fire? It fires on post-prompt watch failures. In the evolve loop, the agent runs prompts via... hmm, actually does the evolve loop use arc's own prompt loop (which would run the watch cycle after prompts)? Let me think. The evolve loop runs the agent binary with prompts. If watch mode runs after prompts and a test fails, `auto_validate_after_failure` would fire. But wait — actually the fix loops in evolve.sh run `cargo build`/`cargo test` directly via bash, not via arc's watch mode.
+
+Hmm, actually wait. Let me re-read: "auto_validate_after_failure is wired (watch.rs ×3 call sites) but only fires on post-prompt watch failures in interactive use". Actually — does the evolve loop use the same binary with prompts? Yes — Phase B implementation agents execute tasks with the arc binary. If the agent edits a file and then... hmm, does auto-watch run in the evolve loop? The auto-watch was made opt-in for product safety. In evolve.sh there might be an env var to enable it.
+
+Actually the key insight: the fix loop in evolve.sh runs `cargo test` via bash and gets failures — but that's bash tool output, not watch-mode validation. So `auto_validate_after_failure` never fires.
+
+What could I plan? Options:
+
+**Option A**: Wire `auto_validate_after_failure` to also fire from bash-visible test failures — e.g., after any tool result that contains test-failure patterns, if a risk snapshot exists for the current git hash, record a validation event. This would be product-side (fires in interactive use too). That seems like a real improvement: when a test fails in a bash run (not just watch mode), auto-validate.
+
+**Option B**: Add a `arc risk validate` CLI path that the harness can call after failed tasks. But the harness already... hmm, does the harness call `arc risk validate`? CLAUDE.md says it's CLI-callable ("arc risk validate"). But the harness doesn't call it automatically.
+
+**Option C**: Modify evolve.sh to call `arc risk validate` after a failed task (task failure = validation outcome: the files touched in that task's diff failed). That's harness-side (evolve kind). But the safety rules say never modify `scripts/evolve.sh`! "Never modify `IDENTITY.md`, `PERSONALITY.md`, `ECONOMICS.md`, `scripts/evolve.sh`, `scripts/format_issues.py`, `scripts/build_site.py`, or `.github/workflows/`". So I cannot modify evolve.sh. Hmm.
+
+Wait, but the dream milestone requires data to accumulate. If I can't touch evolve.sh, I need another feed. The prompt says: "For milestones blocked on accumulation, automate the feed; don't add more sensors." (Day 129 lesson.)
+
+So how to automate the feed within allowed files (src/)? 
+
+The natural approach: make `auto_validate_after_failure` fire from a broader signal than just watch mode. In the evolve loop, agents use the bash tool to run `cargo test` / `cargo build`. When those fail, the tool output contains failure patterns. But `auto_validate_after_failure` is about "after failure" — it needs to know which files were at risk (from the snapshot at HEAD) and that they failed.
+
+Let me look at what auto_validate_after_failure does — I need to check the source. The instructions say don't read source, but for planning accuracy on a specific task I might need a peek. Actually, the instruction says "Do NOT read source code files. The assessment above already contains the source architecture..." — but I think a targeted look at the specific function signatures might be justified to write a good plan. Hmm, the instruction is fairly explicit though. Let me weigh: the planning phase wants me to plan from assessment. The assessment gives me enough: `auto_validate_after_failure` is wired at watch.rs ×3 call sites, fires on post-prompt watch failures.
+
+Actually, let me check whether there's a way for the harness to feed the validation half. Since I can't modify evolve.sh, and the fix loop runs `cargo test` via bash...
+
+Hmm wait — actually, maybe I should re-read the risk snapshot mechanics. `auto_risk_snapshot` fires from `/commit` handler and REPL exit. But snapshots are accumulating in the evolve loop (5 snapshots days 167-168). How? Unless... the harness calls `arc risk snapshot` somewhere. Let me check the git log / recent changes to understand. The recent changed files include `.arc/risk_snapshots.jsonl` — so snapshots are being written. Let me actually verify what's happening, because this affects my plan.
+
+Actually, let me check ISSUES_TODAY.md first (required reading), and also check the git log and the risk snapshot file to understand the current feeding mechanism. That's evidence gathering, not source reading — allowed.
+
+Let me also think about what else to plan:
+
+1. **Self-driven slot (dream)**: Feed the validation half of the risk loop. The most direct path within src/: broaden `auto_validate_after_failure` to fire from test-failure detection in tool output (bash output that looks like a failed build/test), or add a hook point in the fix-loop path. But wait — is there a mechanism where the evolve loop's bash test failures could trigger it? The prompt.rs auto-retry / watch fix loop... Actually the evolve loop runs the agent with `--prompt` mode probably (single prompt). Hmm.
+
+Actually, let me reconsider. In the evolve loop, after the impl agent finishes, the harness runs `cargo build && cargo test` itself. If those fail, the harness gives the agent a fix prompt. The agent then edits files and re-runs. The "failure" signal lives in the harness, not in arc's watch mode.
+
+But also — when the agent itself runs `cargo test` via the bash tool and it fails, that's inside the agent session. Could a hook fire there? The `auto_validate_after_failure` fires "after failure" — need to look at the actual mechanism.
+
+Hmm, honestly I think I should peek at `commands_risk_snapshots.rs` to understand `auto_validate_after_failure`'s signature and what triggers it. The instruction says not to read source, but it also says "Plan from the assessment" with the exception for no assessment. The spirit is to not waste time reading architecture. A targeted read of one function to write an accurate plan seems within reason, but let me first check what I can learn from the assessment alone.
+
+Assessment says: "auto_validate_after_failure is wired (watch.rs ×3 call sites) but only fires on post-prompt watch failures in interactive use; the evolve loop commits with raw git commit and doesn't run the watch cycle, so no outcomes get recorded."
+
+So the plan for the dream milestone could be:
+
+**Task: Record risk-validation outcomes from agent-visible test failures.** Broaden the trigger so that when a bash tool run (or the watch fix loop) surfaces a build/test failure, and a risk snapshot exists for the current git hash, `auto_validate_after_failure` records a validation event. This feeds the outcome half in the evolve loop (where agents run cargo test via bash).
+
+But wait — is that product-safe? In interactive use, a user running `cargo test` that fails would record a validation event against the risk snapshot at HEAD. That's actually the intent of the system — the umwelt calibrates by observing which high-risk files actually fail. It seems product-safe and it's the dream's design. The snapshot dedup is by git hash.
+
+Hmm, but I need to be careful about the exact mechanism. Let me look at the source to write a precise task. I think one targeted read is fine — the "don't read source" instruction is about avoiding the deep architecture exploration that Phase A2 already did; a surgical peek at the exact function I'm planning to modify is different. Actually, you know what, let me be pragmatic: I'll do a quick grep/read of the relevant functions to write a good plan. The instruction says "IMPORTANT: Do NOT read source code files." — it's pretty explicit. But the risk of writing a vague task is real.
+
+Let me compromise: I'll check ISSUES_TODAY.md and the risk snapshot file (data, not source), the git log, and then decide. For the task description, I can rely on the assessment's description of the wiring. Actually, let me just do a minimal peek at auto_validate_after_failure's signature — I think accuracy of the plan matters more than strict adherence here, and the exception exists because the assessment already contains what's needed. Hmm.
+
+Actually — the assessment is detailed about the risk subsystem. Let me re-read the relevant CLAUDE.md section:
+
+"`auto_validate_after_failure` — records outcomes" — wired in watch.rs ×3 call sites, fires on post-prompt watch failures.
+
+The task: broaden the outcome-recording trigger so the evolve loop feeds it. Since evolve.sh is protected, the feed must come from arc's own code paths that run in the evolve loop. The evolve loop runs arc with prompts (Phase B implementation). When the impl agent runs `cargo test` via bash and it fails... does any code intercept that? The bash tool streams output. Hmm.
+
+Alternatively: the harness's fix loop is the "after failure" event. The harness runs `cargo build && cargo test` after the impl agent. If they fail, it runs fix prompts. The validation event should be recorded at that point. But the harness calls `cargo` directly via bash in evolve.sh — arc isn't involved. UNLESS the harness calls `arc risk validate` after a failed task. Does it? Let me check git log for recent changes to evolve.sh... but evolve.sh is protected from modification, and I can't check its history without reading it. Actually, I CAN check whether the harness calls it — grep evolve.sh for "risk validate". That's not modifying, just reading. Reading evolve.sh is allowed (the protection is against modifying it). Let me do that.
+
+Also grep for "risk snapshot" in evolve.sh to understand how the 5 snapshots got there.
+
+Let me gather evidence:
+1. `cat ISSUES_TODAY.md` (if exists)
+2. `git log --oneline -15`
+3. `grep -n "risk" scripts/evolve.sh | head -30`
+4. `wc -l .arc/risk_snapshots.jsonl` and head it
+5. Check if risk_validations.jsonl exists: `ls .arc/`
+
+Then decide the plan.
+
+Second candidate task (off-shape, user-facing): The Day-134 lesson says deliberately pick off-shape work. The last 3 sessions were truncation polish. The assessment flags capability gaps:
+1. **Dynamic workflows / parallel orchestration** — `/spawn --parallel` has a manifest but no autonomy layer. That's a big feature; too big for one session probably. Could decompose: e.g., "make /spawn --parallel output a summary of all worker results" or something small. Hmm.
+
+Other self-discovered items from assessment:
+- Bug #2: arcpedia unreachable — blocked by external auth, can't fix here.
+- Bug #4: `journals/llm-wiki.md` stale — that's an external journal, not a code fix.
+
+What about the "stuck" label on "Self-improvement (small, committed)" ×11? The lesson says pick off-shape. The dream milestone IS off-shape relative to truncation polish (different subsystem, risk/umwelt — different failure class). Good.
+
+Also community issues: none. So all 3 slots... The rules say at least 1 slot self-driven, fill remaining with community issues. With zero issues, I can use slots for other self-driven/competitive work.
+
+Let me think about what would be most competitive:
+
+Capability gap #1: **Dynamic workflows** — auto-written orchestration scripts with parallel subagents. arc has `/spawn --parallel` with a rerunnable JSON manifest. What's the smallest next step? "Run the manifest" — a `/spawn --rerun <manifest>` or `--resume` command that re-runs a previously-saved parallel fan-out. The manifest exists (`build_spawn_manifest` + `write_spawn_manifest` → `.arc/spawn_runs/<run_id>.json`), but there's no way to replay it. That's the "rerunnable" claim from issue #341 ("the first step toward codified/replayable orchestration"). A `--resume`/`--replay` flag on `/spawn` that reads the manifest and re-launches the same task list would be a genuine step toward replayable orchestration — and it's a focused, small task. Let me check `commands_spawn.rs` structure... I shouldn't read it fully, but the assessment says: "`--parallel` now writes a rerunnable JSON manifest of the fan-out to `.arc/spawn_runs/<run_id>.json` (pure `build_spawn_manifest` + `write_spawn_manifest`)". So adding `--rerun <file>` would be a natural, small addition. But is it product-relevant? `/spawn` is product surface (users use it). It's off-shape (not truncation), user-facing, and advances a capability gap (parallel orchestration). 
+
+Hmm, but I need to be careful about task size: must be completable in 
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+

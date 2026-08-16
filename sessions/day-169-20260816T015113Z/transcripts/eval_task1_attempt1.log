@@ -1,0 +1,92 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me analyze this task. The task was a fallback "make ONE small concrete improvement and commit it" task. The diff modifies `src/format/mod.rs` — the `decode_html_entities` function to handle unterminated numeric entities correctly.
+
+Let me evaluate:
+1. Does the diff implement what the task asked? Yes — it's a small, concrete improvement to the `decode_html_entities` function: unterminated numeric entities (`&#65` without `;`) are now kept verbatim instead of being decoded or given an invented semicolon. It adds tests. Build and tests pass.
+2. Is it user-facing? It's a behavior change in output formatting. Let me quickly verify the feature works by running the binary? The tests already cover it. Let me quickly check the logic carefully.
+
+Logic analysis:
+- Input `&#65`: `c == '&'`, `chars.peek() == Some(&'#')`. Consume `#`. Entity = "&#". Loop: peek `5`, not `;`, push `5`, consume. Peek `6`... wait, `&#65` — chars after `&#` are `65`. Loop pushes `6`, then `5`, then peek is None (end of input). Loop exits with `terminated = false`. `num_str = "65"`. Since not terminated, `parsed = None`. Decoded fails → push `entity` ("&#65") and don't push `;`. Output: `&#65`. Correct.
+
+- `&#65;`: terminates, `terminated = true`, parsed = 65 → 'A'. Correct.
+
+- `&#x41;` → hex 0x41 = 65 → 'A'. Correct.
+
+- `&#xZZZZ;`: terminated, num_str = "xZZZZ", strip_prefix('x') → "ZZZZ", from_str_radix(16) fails → None → push "&#xZZZZ" + ";" (since terminated) = "&#xZZZZ;". Correct.
+
+Wait, there's one subtlety: the original code pushed `entity` which does NOT include the `;`, then pushed `;` separately. In the new code, entity also doesn't include `;` (the `;` was consumed but not pushed into entity — `chars.next()` consumes it without pushing). So `entity` = "&#65" and then pushes ";" separately if terminated. Output "&#65;". Good.
+
+What about an entity like `&#;`? terminated = true (peek ';'), entity = "&#", num_str = "" (empty). strip_prefix('x') fails, `"".parse::<u32>()` fails → None → push "&#" + ";" = "&#;". Original behavior: same. Fine.
+
+What about edge case where `&` is followed by `#` but then a non-digit like `&#foo;`? terminated=true, num_str="foo", parse fails → "&#foo;". Fine.
+
+One more: unterminated `&#` followed by more text like `&# x`? After consuming `#`, entity="&#", peek is ` ` (space), not `;`, push ` `, consume... wait that's a bit odd — the original code did the same thing though. It would consume " x" into entity until `;` or end. Then num_str = " x"... strip_prefix fails, parse fails, emits verbatim. Same as original behavior. Fine — no regression.
+
+Now let me verify the diff is committed and matches, and check whether docs needed updating. The task says "Make ONE small concrete improvement and COMMIT it." The change is a bug fix in decode_html_entities. Does the behavior change warrant doc updates? This is a small utility function — CLAUDE.md doesn't document decode_html_entities' exact semantics. Not required.
+
+Let me quickly verify the commit exists and the diff is exactly what's shown. Let me check git log and git status.
+
+Also I should verify the tests pass — the harness says they pass. I trust that but maybe quickly run the specific tests? The instructions say don't re-run the full suite. I could run just the two new tests quickly to confirm they pass — that's a focused check. Actually, build/test already passed per harness. Let me at least verify the commit exists.
+
+Let me check git log.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD | head -20 ✓ (5ms)
+ ✓ (10ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit exists, touches only src/format/mod.rs, and matches the diff shown. Working tree is clean (git status --short shows nothing). Build and tests already pass per harness.
+
+Let me quickly verify the two new tests actually pass (focused check) — actually, the harness already ran the full suite and reported PASS. The instructions say not to re-run the full suite. The logic check I did manually confirms correctness. Let me do one quick focused run of just the new tests to be extra sure — it's fast.
+
+Actually, let me just run the two new tests quickly.
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.5s (2 ✓)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --lib format::tests::te… ✓ (140ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+The tests are in a bin target, not lib. Let me run the binary tests filtered.
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --bin arc-agent test_de… ✓ (108ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --bin arc test_decode_h… ✓ (141ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+All 9 decode_html_entities tests pass (including the 2 new ones and 7 existing). The commit is clean, scoped to src/format/mod.rs, matches the diff, and the behavior is verified correct by both my manual logic analysis and the passing tests.
+
+Verdict: PASS. The task asked for one small concrete improvement, committed. This is a genuine bug fix (unterminated `&#65` was previously decoded to "A;" — inventing a semicolon; now stays verbatim) with tests. Build and tests pass per harness, and the specific tests pass on re-run.
+
+No docs needed — this is an internal utility behavior, not documented product surface. Also not a user-facing feature change in the sense of CLI flags/config — it's a correctness fix to a helper. No product-surface concern (issue #448) — this is an output-formatting edge-case fix, not a default/flag/wizard change.
+────────────────────────────────────────────────────────────────────────────────
+
+All checks done. The commit `b787ea5` is clean, scoped to `src/format/mod.rs` only, working tree clean, and the two new tests plus existing decode tests pass (9/9 on re-run).
+
+The diff fixes a genuine bug: unterminated numeric entities like `&#65` were previously decoded to `A` with an *invented* semicolon (`A;`); now they stay verbatim, while terminated forms (`&#65;`, `&#x41;`) still decode. Logic verified manually and by tests. Not a product-surface change (no config defaults/CLI flags/wizard), so no issue #448 concern. No docs update needed for this internal helper.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+── Thinking ────────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────────────
+
+Verdict written to `session_plan/eval_task_1.md`: **PASS**.
+
+Summary: The commit implements a small, correct improvement (unterminated numeric HTML entities preserved verbatim rather than decoded with an invented semicolon), adds tests for both new and regression cases, passes build + full test suite, and is scoped to `src/format/mod.rs` only. No product-surface changes, no security issues. Done.
+
+
