@@ -1,0 +1,104 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me analyze this task. The task was a fallback "self-improvement" task: make ONE small, concrete improvement to `src/` and commit it.
+
+The diff:
+1. Fixed a UTF-8 slicing bug in `format_project_index` in `src/commands_search.rs` — instead of blindly slicing at `entry.path.len() - 49`, it uses `safe_byte_index` to round down to a char boundary.
+2. Added a test for the multibyte path truncation case.
+
+Let me verify:
+1. Does the diff implement what the task asked? Yes — it's one small concrete improvement to `src/`, committed. It fixes a potential panic on multi-byte UTF-8 paths (a real bug).
+2. Is `safe_byte_index` available in `commands_search.rs`? The function is defined in `src/format/mod.rs` per the repository structure. Let me check that it's imported/accessible in `commands_search.rs`.
+3. Was the change committed? Let me check git log.
+
+Let me quickly verify the import of `safe_byte_index` in commands_search.rs and confirm the commit exists.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "safe_byte_index" src/comm… ✓ (3ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.9s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit exists. Let me verify the change: it uses `safe_byte_index`. Let me check that function exists in the file (it should be imported from format/mod.rs). Let me check imports and the function.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD | head -10 &&… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The diff uses `safe_byte_index` which is exported via `crate::format::*`. Let me verify it exists in format/mod.rs. It was in the repo structure listing: `fn safe_byte_index` in format/mod.rs. Good.
+
+The diff:
+1. Fixes a real bug: slicing `&entry.path[entry.path.len() - 49..]` could panic if byte falls mid-UTF-8 char. Now uses `safe_byte_index`.
+2. Adds a test.
+
+Check test name ordering — test was added inside the right module (tests mod in commands_search.rs, near format_project_index tests at line ~1758). Let me quickly verify the test placement and that `safe_byte_index` signature matches (takes &str and usize, returns usize). Also verify the test passes — but tests already passed per harness. Let me just verify the logic quickly.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pub fn safe_byte_index" s… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check `safe_byte_index` in format/mod.rs to confirm it rounds down to the nearest char boundary (doesn't panic and doesn't return > len).
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 295,320p src/format/mod.rs ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The change uses `safe_byte_index` which is the correct existing helper. The diff fixes a potential mid-UTF-8 slice panic in `format_project_index`. The test verifies a multibyte path truncation works without panicking and produces valid output.
+
+Let me quickly verify the test actually passes (it says tests pass, but let me just run the specific test to confirm functionality — actually the task says don't re-run full suite; harness already ran them. But a single focused test run is cheap and gives evidence the feature works). Let me run just that one test.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test format_project_index_mu… ✓ (147ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --bin arc format_projec… ✓ (118ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test passes. Let me verify the fix logic is correct.
+
+The original buggy code: `format!("…{}", &entry.path[entry.path.len() - 49..])` — if `len - 49` falls mid-UTF-8, panic.
+
+The fix: `let start = safe_byte_index(&entry.path, entry.path.len() - 49);` which rounds down to a char boundary. That's correct — it changes the tail length slightly but avoids the panic. The test verifies with a path where byte 1 is `é` (2 bytes), so `len - 49` lands at byte 2 which is mid-`é`. Actually let me check: `long_path = "xé" + "a"*48` = 1 + 2 + 48 = 51 bytes > 50. `len - 49` = 2. Byte 1-2 is é (2 bytes, from byte 1 to 3). So byte index 2 is mid-char → old code panics. New code rounds down to 1, slices `[1..]` = `éaaaa...`.
+
+The task: make ONE small concrete improvement and commit. This is an evolve-kind task. Is the change product surface? The change is a bug fix in `format_project_index` — it fixes a panic on multibyte paths. It's not changing defaults/CLI flags/setup. It's a bug fix, safe for product. Not opt-in concern — it fixes a crash, safe.
+
+The improvement matches the task: small, concrete, committed, build/tests pass, test added (write tests before adding features — test present). Docs: it's a bug fix, no docs needed for the /index command behavior change. CLAUDE.md has a "Never use byte indexing on strings" rule — this fix aligns with it.
+
+Is this a real improvement? Yes — the original code had a genuine UTF-8 panic risk (`&entry.path[entry.path.len() - 49..]`). The fix uses the existing helper `safe_byte_index`. Clean, minimal, correct.
+
+One consideration: the fix changes the path display length to be variable (may show 48-50 chars) but that's fine.
+
+The test is a valid unit test and passes. Build passes per harness; I verified the targeted test passes.
+
+Verdict: PASS.
+
+Let me quickly verify the test actually would have failed on old code — the comment says `len - 49` = 2 lands mid-é. Yes: x=byte0, é=bytes1-2, so byte index 2 is the second byte of é → not a char boundary → old code panics. Test is meaningful.
+
+Write the verdict.
+────────────────────────────────────────────────────────────────────────────────
+Targeted test passes, fix is correct, commit is clean. Verdict:
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+Done. Verdict: **PASS** — wrote to `session_plan/eval_task_1.md`.
+
+The change is a small, correctly-scoped improvement: `src/commands_search.rs format_project_index` previously sliced `&entry.path[entry.path.len() - 49..]` blindly, which would panic on paths whose byte offset lands inside a multi-byte UTF-8 char. The fix routes through the existing `safe_byte_index` helper (rounds down to a char boundary), and the added regression test uses a path where the cut lands mid-`é` — it passes locally, confirming the fix actually prevents the panic. Committed as a single clean commit, no docs needed (bug fix, no behavior contract changed).
+
+
