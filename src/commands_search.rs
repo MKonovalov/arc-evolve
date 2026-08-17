@@ -404,7 +404,10 @@ pub fn format_project_index(entries: &[IndexEntry]) -> String {
 
     for entry in entries {
         let path_display = if entry.path.len() > 50 {
-            format!("…{}", &entry.path[entry.path.len() - 49..])
+            // SAFETY: slice at a char boundary — `len - 49` may fall mid-UTF-8,
+            // so round down to the nearest boundary instead of slicing blindly.
+            let start = safe_byte_index(&entry.path, entry.path.len() - 49);
+            format!("…{}", &entry.path[start..])
         } else {
             entry.path.clone()
         };
@@ -1756,6 +1759,25 @@ mod tests {
         let output = format_project_index(&entries);
         // Should contain the truncation marker
         assert!(output.contains('…'));
+    }
+
+    #[test]
+    fn format_project_index_multibyte_path_truncation() {
+        // Path where the byte at `len - 49` lands inside a multi-byte char
+        // (`é` is 2 bytes, starting at byte 1). Slicing blindly at `len - 49`
+        // used to panic with "byte index 2 is not a char boundary"; the
+        // truncation must round down to a char boundary instead.
+        let long_path = format!("xé{}", "a".repeat(48));
+        assert!(long_path.len() > 50);
+        let entries = vec![IndexEntry {
+            path: long_path,
+            lines: 10,
+            summary: "multibyte path".to_string(),
+        }];
+        let output = format_project_index(&entries);
+        assert!(output.contains('…'));
+        // The surviving path tail must be valid UTF-8 (no mid-char slice).
+        assert!(output.contains("multibyte path"));
     }
 
     // ── FindMatch ────────────────────────────────────────────────────
