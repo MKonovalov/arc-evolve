@@ -1,0 +1,375 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the situation. I'm arc, a self-evolving coding agent. Today is Day 170 (2026-08-17 08:49). I need to write a session plan.
+
+The assessment says "NO ASSESSMENT AVAILABLE" — the assessment agent did not produce output. So I need to read source files myself before writing tasks.
+
+Let me start by:
+1. Reading ISSUES_TODAY.md for community issues
+2. Reading journals/JOURNAL.md last 5 entries
+3. Checking git log --oneline -10
+4. Looking at recent changes
+
+Let me do this efficiently. First, let me gather the context.
+
+The instructions say:
+- mkdir -p session_plan && rm -f session_plan/task_*.md
+- Priority: 0. Fix CI failures (if any); 1. Capability gaps; 2. Self-discovered bugs; 3. UX friction; 4. Human replied to help-wanted; 5. agent-self issues; 6. Community issues; 7. Competitive; 8. Release check
+- At least 1 slot MUST be self-driven
+- 3 task slots per session
+- For each community issue: implement/defer/wontfix
+- Create task files + issue_responses.md
+- Commit and STOP
+
+Since NO ASSESSMENT AVAILABLE, I must read source myself. Let me gather the data first.
+
+Let me look at ISSUES_TODAY.md, journal, git log, and recent changes in parallel.
+  ▶ $ cat ISSUES_TODAY.md 2>/dev/null | head -200; echo "---GITLOG---"; git log --onel…  ▶ $ head -150 journals/JOURNAL.md📦 RTK detected — using compressed output (disable with --no-rtk)
+ ✓ (12ms)
+ ✓ (52ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 7.4s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+No community issues today. Recent sessions have been "Self-improvement (small, committed)" tasks. The trajectory flags a stuck signal: "Self-improvement (small, committed)": 10× across days 166-170 — the planner (me) keeps picking the same shape of task. My own learning from Day 134 says: when a habit has gone automatic, deliberately pick the next task off-shape.
+
+My dream milestone: accumulate first validation data for the risk scorer — ≥5 matched prediction-outcome pairs. The infrastructure exists; what's needed is for `auto_risk_snapshot` and `auto_validate_after_failure` to actually fire in evolve sessions. But per CLAUDE.md, auto_risk_snapshot only fires from `/commit` handler and opt-in REPL exit, NOT the evolve loop. The evolve loop commits with raw `git commit`. So the snapshot half never accumulates in evolve sessions.
+
+Hmm — but wait, there's `.arc/risk_snapshots.jsonl` and `.yoyo/risk_snapshots.jsonl` in the project files. Let me check what's accumulated. Actually, let me not read too much — but a quick check of the data files is safe and relevant for planning the dream milestone.
+
+The dream milestone says: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs." The blocker: the evolve loop doesn't fire auto_risk_snapshot. There was an `arc_RISK_AUTOSNAPSHOT=1` opt-in env. Options for a task:
+
+1. Wire risk snapshot capture into the evolve loop's safety_commit or wrap-up (evolve-kind, opt-in-ish — but careful: evolve.sh is a protected file! "Never modify scripts/evolve.sh"). Protected: IDENTITY.md, PERSONALITY.md, ECONOMICS.md, scripts/evolve.sh, scripts/format_issues.py, scripts/build_site.py, .github/workflows/. So I can't modify evolve.sh.
+
+Alternative: the harness calls `arc risk snapshot` (CLI-callable since dispatch_sub.rs routes `arc risk snapshot`). But evolve.sh is protected, so I can't add that call.
+
+Alternative: make auto_risk_snapshot fire somewhere in the product loop that evolve uses. The product already has `arc risk snapshot` CLI. The issue is getting it called every session. Since evolve.sh is protected, maybe there's an existing hook: `run_goal_verify_after_prompt`, or the watch cycle, or... Actually the cleanest non-protected path: the REPL exit with env var (already exists, opt-in). Also `auto_validate_after_failure` fires on failures.
+
+Hmm, but I should check what data exists already. Let me check the snapshot file quickly — is it accumulating? The CLAUDE.md says `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and opt-in REPL exit. Do evolve sessions ever use `/commit`? No — they use raw git commit. So snapshot count is probably low.
+
+Let me check the actual data files. Also check recent commits to see what the last few "Self-improvement (small, committed)" tasks actually did — to avoid repeating the same shape.
+
+Let me look at git log with more detail, the risk snapshot data, and the DREAM.md milestone. I want to craft a task that:
+- Advances the dream (self-driven slot): accumulate risk-validation data. The blocker is the evolve loop never firing snapshots. Since evolve.sh is protected, maybe I can implement a lightweight "session close" snapshot trigger via a tracked hook that's product-safe... Actually, there's `commands_goal.rs` `run_goal_verify_after_prompt` — runs after prompt. Hmm.
+
+Wait — actually, re-read: "auto_risk_snapshot fires ONLY from arc's own /commit handler and (opt-in) on REPL exit under arc_RISK_AUTOSNAPSHOT=1". Also CLI: `arc risk snapshot` — feed-able by harness. The harness (evolve.sh) is protected, so the harness can't be changed to call it.
+
+So the only lever I control: make the snapshot fire from something the evolve loop already does. The evolve loop runs the agent with `cargo run` or similar non-interactive prompts. Non-interactive single-prompt mode → prompt.rs → session end → there's `format_exit_summary`, changes summary... Could add snapshot capture at the end of a non-interactive run? That would be a product change (fires for all single-prompt users). Risk: product users get `.arc/risk_snapshots.jsonl` written on every run. Is that product-safe? The file is written to the project dir. For product users, that's a new file appearing — could be considered noise but harmless-ish. Hmm, but the learning says "defaults must be product-safe; evolution-loop conveniences are opt-in."
+
+Actually — wait. Let me reconsider. Maybe simpler: check whether `.arc/risk_snapshots.jsonl` already has data. The recent commits mentioned "Fix risk validation test to expect real predicted_count" (Day 167) — so validation machinery is being worked on. Let me check the data.
+
+Let me gather evidence first.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ echo "=== risk snapshots ==="; wc -l .arc/risk_snapshots.jsonl .yoyo/risk_snapsh…  ▶ $ git log --all --oneline -20 | head -25; echo "=== what did recent self-improveme… ✓ (15ms)
+ ✓ (32ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 2.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at what the recent tasks actually did — they seem to be touching commands_search.rs and commands_retry.rs with small self-improvements. Let me check what those changes were, and look at the validation data situation (the dream milestone).
+
+The DREAM.md milestone: accumulate ≥5 matched prediction-outcome pairs. The `risk_validations.jsonl` file doesn't exist yet. Snapshots exist (74 lines in .arc). But validation data requires `auto_validate_after_failure` to fire — which fires on failures during evolve.
+
+Let me check the state of the validation infrastructure and what the recent self-improvement commits did. Let me also check what `auto_validate_after_failure` requires and whether there's a gap I can close to accelerate the dream milestone.
+
+Actually, the milestone says "Accumulate the first validation data" — the cold start. The infrastructure exists but `arc risk validate` / snapshot accumulation requires human/harness invocation or failures. Per CLAUDE.md: `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and (opt-in) REPL exit — NOT in the evolve loop. And `auto_validate_after_failure` fires on failures.
+
+So in the evolve loop, snapshots DO get recorded? Wait — actually looking at git, .arc/risk_snapshots.jsonl has 74 lines with entries at day 169/170 with git hashes matching commits. Wait, those match evolve commits (9239f1f, 9706c0f, 1e059bd). Hmm, interesting — those are evolve session commits. So snapshots are being recorded in the evolve loop somehow? Or the harness invokes `arc risk snapshot`? Let me check.
+
+Actually let me not go too deep. Let me check recent task contents to understand what's being done and what pattern is emerging, then check validation file status.
+
+Let me look at what files were modified in recent "Self-improvement" tasks and check the risk validation pieces more carefully.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ git show 1e059bd | head -60; echo "====="; git show 9706c0f | head -50  ▶ $ grep -n "auto_validate_after_failure\|risk_validations\|RISK_VALIDATION_PATH\|wr… ✓ (11ms)
+ ✓ (15ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.8s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the state:
+
+1. **No community issues today** — no ISSUES_TODAY.md content.
+2. **Dream milestone**: accumulate first validation data — `risk_validations.jsonl` doesn't exist. The infrastructure exists: `auto_risk_snapshot` records predictions, `auto_validate_after_failure` records outcomes. But the file doesn't exist because nothing has failed yet (validation only fires after failures). So the data can't accumulate through normal sessions — need ≥5 matched prediction-outcome pairs.
+
+Wait — the DREAM says the validation data file doesn't exist because `auto_validate_after_failure` only fires when a session has failures. And snapshots DO accumulate (74 entries in .arc/risk_snapshots.jsonl — from `arc risk snapshot` presumably, or auto). Today's snapshots at days 169-170 exist.
+
+The dream milestone: accumulate first validation data → ≥5 matched prediction-outcome pairs. Since validation only fires on failure, and sessions rarely fail, this is a cold-start problem. What could make this advance?
+
+Options for a dream-advancing task:
+- Backfill/pairing: `arc risk validate` already exists. Maybe the gap is that *nothing validates* unless a future session fails. Could we seed validation events from git history? E.g., scan git log for revert commits and pair those files against snapshots? That's a legit approach — "retrospective validation": use the existing 74 snapshots + git history of reverts/failures to produce matched prediction-outcome pairs without waiting for future failures.
+
+Actually, let me check the validation event structure. Let me look at src/commands_risk_snapshots.rs and src/commands_risk_accuracy.rs briefly. Also check whether there's already a way to compute the matched pairs.
+
+The dream says: "Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+So a high-value dream task: implement retrospective validation — pair past snapshots with past failure/revert events from git history to produce the first matched validation pairs. This directly advances the milestone and is self-driven (tier: dream slot).
+
+But careful: task size rules — max 3 source files, 20 min. A retrospective-validation feature might be small: read snapshots, read git log for reverts, write validation events. That's ~1-2 files (commands_risk_snapshots.rs + maybe dispatch_sub.rs to wire a subcommand like `arc risk backfill`).
+
+Wait, but I should check the actual validation event schema and see what's feasible. Let me read the relevant parts of commands_risk_snapshots.rs.
+
+Also from the trajectory: recent sessions are all "Self-improvement (small, committed)" which appear to be char-boundary fixes and word-boundary fixes — small bug fixes. The pattern continues: 10× same-shape tasks (Days 166-170). Per my own Day-134 lesson: "When I notice a habit has gone automatic, that's the cue to deliberately pick the next task off-shape." The recent tasks are all small char-boundary/word-boundary safety fixes. The dream task would be off-shape — good.
+
+Also CI errors: recurring "[1×] failed to download binary: socket hang up" and "could not find cargo.toml" — but those appear to be sporadic runner issues, not code failures (0 reverts in window, all sessions green).
+
+The "recently changed files" list: commands_search.rs, commands_retry.rs, format/mod.rs — consistent with the pattern.
+
+There are no community issues. So all 3 slots are self-driven? Well, task allocation says at least 1 slot MUST be self-driven; that's the dream. With no issues, remaining slots go to capability gaps / competitive improvements / self-discovered bugs.
+
+Let me look at the risk validation code to design a good dream task. Let me read commands_risk_snapshots.rs around validation.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '140,330p' src/commands_risk_snapshots.rs  ▶ $ sed -n '330,420p' src/commands_risk_snapshots.rs; echo "=== validate subcommand … ✓ (5ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the picture well:
+
+1. **No community issues today** — so all 3 slots can be self-driven.
+2. **Trajectory shows "possibly stuck"**: "Self-improvement (small, committed)" 10× in days 166-170. The recent commits were tiny char-boundary fixes (unicode panic fixes in `format_project_index` path display). These are real but very small. My Day 128 lesson says: "Size the task to fit in one hand... When nothing is urgent, prefer one genuinely-small task done whole." But Day 134 lesson says: "When I notice a habit has gone automatic, that's the cue to deliberately pick the next task off-shape (harder, different failure class, user-facing)."
+
+3. **The dream milestone**: accumulate first validation data — ≥5 matched prediction-outcome pairs. `risk_validations.jsonl` doesn't exist yet. The infrastructure exists: `auto_validate_after_failure` fires on watch-failure, `auto_risk_snapshot` fires on `/commit` and (opt-in) REPL exit. The snapshots are accumulating (74 lines) but validations are 0.
+
+So how does the next milestone get closer? The dream says "Automate the feed" (Day 129 lesson: "For milestones blocked on accumulation, automate the feed; don't add more sensors."). The validation file doesn't exist because `auto_validate_after_failure` only fires from the watch-mode failure path, which per CLAUDE.md note on `should_run_watch_after_prompt` gate only runs when the prompt changed files... and watch mode fix loops. The evolve loop doesn't run watch mode necessarily. Let me check where auto_validate_after_failure is called.
+
+Actually the interesting self-driven task directly on the dream: wire `auto_validate_after_failure` to also fire at the end of a prompt/session when files changed (e.g., in the evolve loop's safety_commit or in the `/commit` handler next to `auto_risk_snapshot`). Then validation data would accumulate naturally. That's "automate the feed" — the Day 129 lesson. This is a real capability gap: the sense organ IS wired but the validation half never fires in the evolve loop, so data can't accumulate. My dream next milestone is blocked on this exact wiring.
+
+Let me check where auto_validate_after_failure is actually called from, and where auto_risk_snapshot is called (the /commit handler and REPL exit).
+
+Also note auto_validate_after_failure loads `.arc/risk_snapshots.jsonl` (RISK_SNAPSHOT_PATH) and compares against the LAST snapshot — but the last snapshot's git_hash may equal the current HEAD? The `auto_risk_snapshot` deducts by git hash (one per distinct HEAD). So at commit time it records snapshot of pre-commit state... then `auto_validate_after_failure` compares changed files against last snapshot. If validation fires right after a commit that also recorded a snapshot, the last snapshot would be the state just before the commit — changed files would be the diff of that commit. That could work.
+
+Let me look at where these are called (call sites), then write the plan.
+
+Tasks to consider:
+1. **Dream task (self-driven)**: Wire the validation feed so it fires in the evolve loop / after successful prompts with changed files — "automate the feed" for the validation half of the prediction meter. This directly advances DREAM.md next milestone (≥5 matched pairs). Concretely: call `auto_validate_after_failure` from the `/commit` handler right after `auto_risk_snapshot`, using the committed files. That gives the evolve loop a natural validation point (agent commits via `arc /commit`... but wait, evolve loop commits with raw `git commit`, not arc's `/commit`). Hmm. CLAUDE.md says: "auto_risk_snapshot fires ONLY from arc's own /commit handler and (opt-in) on REPL exit under arc_RISK_AUTOSNAPSHOT=1 — it does NOT fire in the evolve loop."
+
+So the evolve loop never fires either half. The snapshots in .arc/risk_snapshots.jsonl (74 lines) — where are those from? They're from REPL exit autosnapshot? No, that's opt-in. Let me check git tracking: are those .arc files committed? `.arc/risk_snapshots.jsonl` is tracked (it's in .gitignore? No — it's listed in project files). Actually the snapshots have days 169-170 and multiple git hashes... These were probably recorded by `arc risk snapshot` being run via dispatch_sub (CLI-callable). Actually "both meter halves are now CLI-callable AND recording (arc risk snapshot; arc risk validate)". So someone (the harness or human) records daily snapshots. The snapshots are being recorded.
+
+So the validation half: `arc risk validate` is CLI-callable. But it needs commits between snapshots. The meter could work with the harness calling `arc risk validate` daily. Hmm, but does the harness do that? The snapshot file grows (74 lines over ~10 days — roughly 3-4/day, matches ~3 sessions/day + manual). So snapshots are recorded per-session.
+
+For validation: `handle_risk_validate` compares consecutive snapshot pairs against actual breakage. Let me read it to understand what "accumulate ≥5 matched pairs" requires and whether there's a gap.
+
+Actually — wait. Let me re-check. The dream says "≥5 matched prediction-outcome pairs". A validation event = one observation: changed files vs predicted set. Each fire of auto_validate_after_failure = 1 event. Or each `arc risk validate` = 1 event. The file doesn't exist at all, meaning neither fires. But `handle_risk_validate` persists a validation event ("6. Persist a validation event so the CLI /risk validate path turns the..."). So if someone ran `arc risk validate` when there were commits since the last snapshot, it would create the file. Maybe it never fired because... let me check its conditions. Let me read handle_risk_validate lines 2143-2260.
+
+Let me also check the REPL-exit autosnapshot is off by default (`arc_RISK_AUTOSNAPSHOT=1`). So the natural place for the dream to advance: make the evolve loop fire `arc risk snapshot` + `arc risk validate`? But CLAUDE.md says evolve deliberately does NOT fire autosnapshot ("it does NOT fire in the evolve loop, which commits with raw git commit"). But CLI-callable `arc risk snapshot` was explicitly built so "a human-approved automated cadence" could record daily snapshots. The harness... let me check scripts/evolve.sh for risk snapshot calls.
+
+If evolve.sh doesn't call it, then who's been writing the 74-line snapshot file? Let me grep evolve.sh.
+
+Regardless, my job is planning. The best dream-advancing task: make the validation feed fire automatically in the evolve loop (or via the harness) so matched pairs accumulate. Options:
+
+**Option A (evolve task, harness-side)**: Add `arc risk snapshot` + `arc risk validate` calls to scripts/evolve.sh (but safety rules say NEVER modify scripts/evolve.sh!). So no.
+
+**Option B (product task)**: Fire `auto_validate_after_failure` from a natural product path — e.g., at the end of a prompt that changed files (in prompt.rs where the watch cycle runs), so every successful interactive session with file changes produces a validation event. But wait — validation compares against the LAST snapshot and requires a `git_hash` match context... Actually auto_validate_after_failure just compares against the last snapshot's predicted set, no hash gating. It fires on watch_failure trigger. If we fire it after any prompt with changed files, the changed files are the agent's recent work, and the "prediction" is the last snapshot's top-10. That gives real matched pairs: "did I touch files the risk scorer predicted?" This is exactly the umwelt test.
+
+But careful: firing it on every prompt with changes could spam. The watch-mode already fires it on failure. Firing after success too might be noisy but it's stderr-dim 2-3 lines, and it feeds the meter. Hmm, but product-safety: 2-3 lines of dim stderr about risk validation after every successful prompt could be noise for product users. The existing pattern is opt-in/quiet. Maybe gate it behind the same `arc_RISK_AUTOSNAPSHOT=1` opt-in... but that env var is for REPL-exit snapshot. Reusing it for validation-on-prompt-completion would be consistent: when autosnapshot is on, also auto-validate.
+
+Actually wait — cleanest: right now `auto_risk_snapshot` fires on `/commit` and on REPL exit (opt-in). `auto_validate_after_failure` fires on watch failure. The gap: no validation events even from `/commit`. If `/commit` handler fires both snapshot (already does) AND validate (using committed files), then every human/harness `/commit` produces a matched pair. That's the natural co-location: snapshot records prediction at commit time; validate checks whether the committed files were predicted. But timing: snapshot at commit records the state AFTER the commit? Let me check when auto_risk_snapshot runs relative to the commit — need to read the /commit handler.
+
+Let me read the relevant code quickly.
+
+Also Task 2/3: Since trajectory flags "possibly stuck" on tiny self-improvement fixes, and Day 134 lesson says pick off-shape work (harder, user-facing), and there are no community issues, maybe:
+- Task 2: A user-facing UX improvement. What's a good small one? The recent commits were unicode char-boundary fixes in commands_search (path display) and commands_retry (tool name extraction). These are "fragile file" fixes in the risk sense: format/output.rs, format/mod.rs, commands_risk.rs are top risk files. A meaningful user-facing task could be fixing a char-boundary or correctness bug in one of the top-risk files... but I shouldn't invent bugs without evidence.
+
+Let me look for actual evidence of user-facing gaps. Check the recent sessions' task content — the planner keeps picking char-boundary fixes; that's the "comfortable shape". The Day-134 lesson says to deliberately pick a different shape. Options:
+- Test coverage on top-risk untested files (help_data.rs, dispatch.rs, symbols.rs, commands_risk_snapshots.rs flagged "low-test"). Adding tests to a low-test file is a different shape than panic fixes and directly reduces risk scores (the scorer's "low-test" signal). That's also dream-adjacent (the scorer should perceive real fragility; raising test coverage makes the codebase genuinely less fragile).
+- A user-facing product improvement.
+
+Let me check what tests exist for the low-test files: symbols.rs has 32% risk with "size, low-test". commands_risk_snapshots.rs itself has "low-test" but it does have a tests module (I saw `mod tests`). help_data.rs flagged low-test.
+
+Actually, the trajectory warning plus the risk scorer both point at the same place: low-test files are the fragile files. A task "add tests to X" is off-shape from char-boundary fixes and serves the dream (real fragility reduction, and the risk scorer's "low-test" signal is what flags them — calibrating the sense organ's world).
+
+But which file? symbols.rs — let me check its test coverage. Also is there a concrete verifiable filename issue? For the plan I need specificity. Let me look at symbols.rs briefly, and check the /commit-handler call site for auto_risk_snapshot + auto_validate_after_failure wiring.
+
+Let me run a few quick greps.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "auto_risk_snapshot\|auto_validate_after_failure" src/ | grep -v comman…  ▶ $ sed -n '2143,2260p' src/commands_risk.rs ✓ (4ms)
+ ✓ (12ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 7.7s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the picture. Let me think about what to do.
+
+The DREAM.md next milestone: "Accumulate the first validation data... What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs."
+
+Current state:
+- `.arc/risk_snapshots.jsonl` has 74 lines (74 snapshots!)
+- `.arc/risk_validations.jsonl` does NOT exist (0 bytes / not present)
+- Risk snapshots fire on every `/commit` in the REPL (auto_risk_snapshot) — but the evolve loop commits with raw `git commit`, so snapshots only accumulate via... wait, actually 74 snapshots exist. Let me check who wrote them.
+
+Actually wait — the snapshots exist (74 lines), so they ARE being written somewhere. But the validation file doesn't exist. `auto_validate_after_failure` fires only from watch mode (`watch.rs`) — the watch cycle after prompts. The evolve loop's impl agents don't use watch mode, so validation never fires.
+
+The dream milestone says: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs."
+
+The gap: `auto_validate_after_failure` fires only on watch-failure in the REPL. The CLI `arc risk validate` path exists but nobody calls it on a cadence. 
+
+Interesting insight from risk_snapshots.jsonl: there are 74 snapshots, including ones with git_hashes like "9706c0f" and "1e059bd" — these are evolve-loop commits! Wait, but CLAUDE.md says auto_risk_snapshot fires ONLY from arc's own /commit handler and opt-in REPL exit — NOT in the evolve loop. But git_hash "9706c0f" is an evolve commit ("Day 169 (16:30): Self-improvement"). Hmm — so how did a snapshot get recorded with that hash?
+
+Let me check: maybe the harness (dispatch_sub.rs or evolve.sh) calls `arc risk snapshot`. The CLAUDE.md said: "Both meter halves are now CLI-callable AND recording (arc risk snapshot; arc risk validate), enabling a human-approved automated cadence." And "the snapshot half of the prediction meter accumulates only through a human/harness invocation of arc risk snapshot."
+
+So the harness (evolve.sh) apparently calls `arc risk snapshot` at the end of sessions — that's how 74 snapshots with evolve commit hashes accumulated. Good. So the snapshot half IS accumulating via CLI invocation.
+
+But the validation half — `arc risk validate` — is NOT being called by the harness. The evolve.sh doesn't call it. So `risk_validations.jsonl` doesn't exist — zero validation data.
+
+The dream milestone: accumulate ≥5 matched prediction-outcome pairs so we can then measure whether the scorer predicts real failure.
+
+How to close this gap? Options:
+
+1. **Harness change**: add `arc risk validate` call to evolve.sh. But wait — safety rules say "Never modify scripts/evolve.sh". So I can't do that. Also the safety-commit/evaluator flow needs care. Hmm, but the harness is the one place that could automate the cadence. However, evolve.sh is protected.
+
+Actually wait — let me re-read: "Never modify IDENTITY.md, PERSONALITY.md, ECONOMICS.md, scripts/evolve.sh, scripts/format_issues.py, scripts/build_site.py, or .github/workflows/" — yes, evolve.sh is off-limits.
+
+2. **Product-safe alternative**: Make `auto_risk_snapshot` + validation fire from within arc's own machinery in a way that's product-safe and opt-in. E.g., the `arc risk validate --auto` subcommand, or wire validation into the session wrap-up. Actually, better: make the risk subsystem self-feeding through the CLI in a way the evolve loop could adopt... but the evolve loop won't adopt it unless evolve.sh changes.
+
+3. **Different idea**: The watch-mode path fires `auto_validate_after_failure` after watched runs. In the evolve loop, impl agents run build/test. What if the fix loop itself — after a failure — calls validation? Actually the dream says "auto_validate_after_failure records outcomes" — it records the outcome when the watch-then-fix cycle runs. In the evolve loop there's no watch.
+
+4. **Auto-cadence within arc's own process**: What about firing `arc risk validate` at REPL exit (when arc_RISK_AUTOSNAPSHOT=1 already exists for snapshot)? There's already `arc_RISK_AUTOSNAPSHOT=1` opt-in that captures snapshot on REPL exit. Similarly, a `--validate` on exit? But the evolve loop isn't a REPL.
+
+Hmm, but wait — the harness itself might run `arc risk snapshot` after each session. Let me check how those 74 snapshots got recorded with evolve commit hashes. grep evolve.sh for "risk snapshot".
+
+Actually let me check where the snapshots with evolve hashes came from — maybe the harness does call `arc risk snapshot` at session end. If so, adding `arc risk validate` would be a one-line harness change... but evolve.sh is protected. Hmm, but maybe it's already there and I should check. Let me look.
+
+Actually, the interesting question: why do snapshots exist with evolve commit hashes but no validations? Let me grep evolve.sh.
+
+Let me think about what fires during evolve sessions:
+- `auto_risk_snapshot` — from /commit in REPL (not evolve), opt-in REPL exit, and CLI `arc risk snapshot` (dispatch_sub.rs).
+- The 74 snapshots at commit hashes 9239f1f, 9706c0f, 1e059bd... these are evolve session commits. So something in the harness calls `arc risk snapshot`. Let me check evolve.sh.
+
+Also `.yoyo/risk_snapshots.jsonl`... interesting, 9 lines. That's a different home (maybe a fork or a test?).
+
+Let me check evolve.sh for risk snapshot calls.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "risk" scripts/evolve.sh | head; echo "=== dispatch_sub risk routing ===…  ▶ $ grep -rn "risk snapshot\|risk_snapshot\|risk validate" scripts/evolve.sh scripts… ✓ (7ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 8.3s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the current state:
+
+1. **No community issues today** — so all 3 slots are free for self-driven work.
+2. **The DREAM.md next milestone**: accumulate ≥5 matched prediction-outcome pairs in `risk_validations.jsonl`. The file doesn't exist yet (no validation events recorded).
+
+Let me think about why `risk_validations.jsonl` has zero entries:
+- `auto_validate_after_failure` fires from `watch.rs` (the watch-mode fix loop) — but watch mode was made opt-in for the evolve loop (issue #448). Does the evolve loop use watch mode? No — evolve.sh runs `run_agent_with_fallback` with single prompts; the watch cycle is post-prompt in REPL. So auto_validate_after_failure likely only fires in interactive watch sessions, which rarely happen in CI.
+- `handle_risk_validate` fires from `arc risk validate` CLI — evolve.sh line 2089 calls `"$arc_BIN" risk snapshot` but NOT `risk validate`. So snapshots accumulate (74 lines in .arc/risk_snapshots.jsonl) but validation never runs in the evolve loop.
+
+So the gap: the evolve harness records one snapshot per session but never calls `risk validate`, so the prediction meter's validation half never accumulates. The infrastructure exists but the feed isn't connected. This is a "day 129 lesson: For milestones blocked on accumulation, automate the feed; don't add more sensors."
+
+Let me verify exactly what evolve.sh does at line 2083-2090: "record one risk snapshot per session so the appended .arc/risk_snapshots.jsonl line is swept into that commit". It calls `arc risk snapshot`. It does NOT call `arc risk validate`.
+
+The dream milestone says: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs." The fix: have evolve.sh also call `arc risk validate` after `arc risk snapshot` — but validation needs commits between snapshots. Actually `handle_risk_validate` validates the most recent snapshot against commits since that snapshot (`git_hash..HEAD`). Since each session records a snapshot at the end (after commits), a `risk validate` right after `risk snapshot` would validate the *previous* session's snapshot against the commits made this session. That's exactly right: snapshot at end of session N, then at end of session N+1, validate the session-N snapshot against commits made in session N+1.
+
+Wait, actually the order in evolve.sh matters. Let me look at where line 2089 sits — is it before or after the session's commits are pushed? It says "so the appended .arc/risk_snapshots.jsonl line is swept into that commit" — so snapshot is recorded, then committed. If we add `arc risk validate` right after `arc risk snapshot`, it would validate the previous snapshot (from session N, git_hash = commit at end of session N) against commits `git_hash..HEAD` — which includes session N+1's commits (since session N's final commit hash is the snapshot's git_hash). Hmm, but wait — would it include session N's own commits? The snapshot from session N records git_hash = the HEAD at the time (session N's final commit). Then session N+1 makes commits, then calls `risk validate` → `git log {git_hash_N}..HEAD` = session N+1's commits. 
+
+But there's a subtlety: `handle_risk_validate` validates the *most recent snapshot* — which is the one just recorded this session (git_hash = current HEAD, since snapshot is recorded after commits). `git log {git_hash_N+1}..HEAD` would be EMPTY because HEAD == git_hash_N+1 at that point. So `arc risk validate` right after `arc risk snapshot` in the same session would validate the freshly-recorded snapshot against zero commits → "No commits since last snapshot — nothing to validate yet." and it returns without recording an event.
+
+Hmm. So the ordering needs thought. Options:
+
+**Option A**: Call `arc risk validate` in evolve.sh BEFORE `arc risk snapshot` (at the start of the session, or after commits but before snapshot). Actually the snapshot is recorded late in the script (presumably just before push, so it's swept into the wrap-up commit). If validate is called before snapshot, the most recent snapshot is session N's, and `git_hash_N..HEAD` covers session N+1's commits. That gives a validation event per session. 
+
+Where exactly is line 2089? Let me read the context of evolve.sh around there.
+
+**Option B**: Alternatively, make `handle_risk_validate` / a new CLI path validate the *penultimate* snapshot if the last one matches HEAD. That's more invasive.
+
+**Option C**: A dedicated `arc risk validate` evolution-friendly mode that validates the last snapshot that's not at HEAD. Product-safe concern: it changes CLI behavior. But `risk validate` prints "No commits since last snapshot — nothing to validate yet." So behaviorally, adding "validate against previous snapshot if last is at HEAD" is a reasonable improvement that also helps humans.
+
+Actually the simplest, most robust approach: change evolve.sh to run `arc risk validate` at a point in the script where the most recent snapshot is the previous session's — i.e., before this session's own snapshot is appended. Let me read evolve.sh around line 2083 to see the ordering.
+
+Also there's a question: does the snapshot get recorded before or after the agent commit? "Run risk snapshot at end so the appended .arc/risk_snapshots.jsonl line is swept into that commit" — so it's after the agent's final commit, before push. If we add validate right before the snapshot call, ordering is: agent commits → `arc risk validate` (validates previous snapshot vs this session's commits incl. the wrap-up commit? no, wrap-up commit hasn't happened yet — but agent commits have) → `arc risk snapshot` (records this session's state) → wrap-up commit sweeps snapshot line → push.
+
+Hmm wait, but then the validation would run against git_hash_N..HEAD where HEAD = this session's agent commit — good. The validation event lands in .arc/risk_validations.jsonl (untracked? is .arc/ gitignored?). Let me check .gitignore. If .arc/risks are tracked... The risk_snapshots.jsonl appears in the repo (it's in Project Files list: `.arc/risk_snapshots.jsonl`). So both files are presumably tracked (or at least the snapshots file gets committed). Validation events written just before the wrap-up commit would be swept into it too. 
+
+Let me check the exact ordering and what's committed. Also check whether line 2089 runs only if TIMEOUT_CMD succeeds etc.
+
+Also — per my economy: the self-driven dream slot should advance this. This is exactly the dream's next milestone: "For milestones blocked on accumulation, automate the feed" (Day 129 lesson). 
+
+Now, does this count as `evolve` or `product`? It modifies `scripts/evolve.sh`... wait, Safety Rules say NEVER modify `scripts/evolve.sh`! "Never modify IDENTITY.md, PERSONALITY.md, ECONOMICS.md, scripts/evolve.sh, scripts/format_issues.py, scripts/build_site.py, or .github/workflows/". So I cannot modify evolve.sh. 
+
+Hmm. So how to automate the feed without touching evolve.sh?
+
+Alternative: `arc risk validate` via the REPL exit path? The REPL exit hook `arc_RISK_AUTOSNAPSHOT=1` captures a risk snapshot on REPL exit. But evolve loop doesn't run REPL.
+
+Alternative: dispatch_sub / main handles `risk` subcommand. What if `arc risk snapshot` ALSO triggers a validation of the previous snapshot? I.e., fold validation into the snapshot CLI path: before appending a new snapshot, validate the previous one against `git log prev_hash..HEAD`. That automates the feed within the existing evolve.sh call (`arc risk snapshot`) with zero harness changes. 
+
+But is that product-safe? `arc risk snapshot` is a CLI command a human could run. Having snapshot also auto-validate and append a validation event... The skill says defaults must be product-safe for all users. Risk subsystem is arguably evolve/self-analysis tooling; `/risk snapshot` doesn't touch user files, just reads git + writes to .arc/ (project-local state, gitignored? no — tracked). Hmm, it writes to .arc/risk_snapshots.jsonl which is tracked in this repo, but for other users .arc/ might be gitignored? Let me check .gitignore: is .arc/ ignored? The Project Files list shows `.arc/risk_snapshots.jsonl` as a project file, so it's tracked here. For a product user, running `arc risk snapshot` already writes to .arc/risk_snapshots.jsonl — that's existing behavior. Adding a validation write follows the same pattern. It's gated behind an explicit `risk snapshot` invocation — not a default-on behavioral change. I think that's product-safe: only fires when the user explicitly runs the risk snapshot command, and it's a read-mostly operation (git log + append to a jsonl the user is already writing).
+
+Wait, but there's a subtlety: auto-validating on snapshot might surprise a human who runs `arc risk snapshot` interactively — they'd suddenly get validation output too. That seems fine and even useful: it's the same subsystem, now closing the loop. And `handle_risk_validate` already exists and is CLI-callable — the change is just calling it from snapshot too. 
+
+Hmm, but actually simpler: what if the snapshot handler, after writing the snapshot, appends one validation event itself? Let me look at where `arc risk snapshot` flows: dispatch_sub → build_risk_input("snapshot") → handle_risk("/risk snapshot") → handle_risk_snapshot (probably). I need to see that function. Then decide where to hook validation.
+
+The cleanest: in the same place that executes the "snapshot" subcommand (e.g., `handle_risk_snapshot`), after writing the snapshot, invoke the validation logic that `handle_risk_validate` uses — but validating the now-penultimate snapshot (since we just appended a new one, the previous snapshot is now second-to-last). Actually we'd want to validate the snapshot that was most-recent BEFORE we appended (i.e., the previous session's). 
+
+Let me restructure: in snapshot handler:
+1. Load snapshots.
+2. If there's a previous snapshot whose git_hash != HEAD (or != new git_hash), validate it against `git_hash..HEAD`, write a validation event if there are changed files.
+3. Append the new snapshot.
+
+Actually `handle_risk_validate` already does exactly steps 2's logic against the most recent snapshot. So the minimal change: in the snapshot path, BEFORE appending the new snapshot, run the same validation routine against the current most-recent snapshot. Then append.
+
+But note git_hash for the snapshot is computed as HEAD at snapshot time. If the previous snapshot's git_hash == HEAD (e.g., a human runs `risk snapshot` twice in a row without committing), then `git_hash..HEAD` is empty → "nothing to validate" → no event. Good, that's already handled.
+
+But hold on — in the evolve loop, is the snapshot recorded at a point where HEAD == the previous session's snapshot git_hash? No: session N+1 makes new commits, then at the end records snapshot with git_hash = new HEAD. If validation happens before appending, the most recent snapshot is session N's with git_hash_N, and `git_hash_N..HEAD` = session N+1's commits. 
+
+So the plan: modify `handle_risk_snapshot` (in src/commands_risk.rs) to run the validation of the previous snapshot before appending the new one. Then evolve.sh's existing `arc risk snapshot` call (unchanged) feeds both halves of the meter. The dream milestone — accumulate ≥5 matched prediction-outcome pairs — becomes reachable automatically.
+
+Also, I should verify the current snapshot handler writes via `auto_risk_snapshot` or directly `handle_risk_snapshot`. Let me read the snapshot subcommand code, and the validate code carefully. Also check that validation event writing only needs ≥1 commit between snapshots.
+
+Then the second part of the milestone — "measure whether files the scorer flagged as high-risk actually failed more often" — needs ≥5 events; that's a later session's task (the accuracy report may already exist: `arc risk accuracy` / `compute_accuracy_stats`). Once events accumulate, running `arc risk accuracy` gives the measurement. So this session's task: automate the feed (validation half). That's the highest-leverage dream-advancing work: the Day-129 lesson says exactly this — "For milestones blocked on accumulation, automate the feed; don't add more sensors."
+
+Now the other 2 slots. No community issues today. Options per priority:
+- Tier 2: self-discovered bugs. The trajectory shows recent sessions did small char-boundary fixes (commands_search.rs). 
+- Tier 7: competitive improvements.
+
+Recent trend: many "small, committed" self-improvement tasks that are tiny (char-boundary fixes). Today could do something somewhat bigger but still one-module.
+
+Good candidate tasks:
+1. **Task 1 (dream/self-driven)**: Auto-validate risk predictions on snapshot — close the validation feed gap so evolve sessions accumulate matched pairs automatically. Files: src/commands_risk.rs (and maybe commands_risk_snapshots.rs for a helper). Max 3 files. This is the dream milestone.
+
+2. **Task 2 (self-driven, char-boundary sweep)**: The Day-163 and Day-165-170 sessions keep finding char-boundary panics one at a time (format/mod.rs safe_truncate exists; but commands_search.rs had one, commands_risk_snapshots.rs had one Day-164, commands_retry.rs Day-169 had word-boundary logic). A systematic sweep: search all `[..` slicing and `.truncate(`/`split_at(` byte-indexing patterns in src/ that could panic on multi-byte UTF-8 and fix them with is_char_boundary. There may be a lint or existing helper `safe_byte_index`/`safe_truncate` in format/mod.rs. That's a genuine stability task (tier 2), and it's a recurring class (Day 250 lesson is exactly this). Could limit to a module or two given the 3-file cap. Actually the pattern-class sweep across the whole src/ might touch more than 3 files. Task file says max 3 source files per task. So pick: sweep the top-risk/low-test files? Or sweep a specific module family like src/commands_*.rs? Hmm, that could be many files. Better: target a constrained list — e.g., src/format/output.rs + src/format/mod.rs + maybe one more. Or make it a *detection* task: write a small grep-based audit (scripts/lint?) — but that touches scripts (allowed? evolve.sh is protected but other scripts aren't). Hmm, "scripts/lint_evolve_heredocs.py" exists — a lint script precedent. A byte-indexing lint could be a new tiny script + docs. But scripts changes might be outside "source files" count? Task says "at most 3 source files". A lint script is a script, not source. That could be a clean evolve task: `scripts/lint_byte_indexing.py` or a bash grep check pre-commit. Actually simpler and higher-value: a targeted fix sweep of `src/` files with the most suspicious byte-slicing patterns, limited to 3 files.
+
+Let me actually search the codebase for byte-indexing patterns to scope this.
+
+3. **Task 3**: Another option — the thread from trajectory: "error: could not find cargo.toml in /home/runner/work/arc-evolve/arc-evolve" CI error (once). And "failed to download binary / socket hang up / building from source" — these look like GitHub Actions runner infra flakiness, not code bugs. Not much to do.
+
+Alternative task 3: Product-facing improvement. Let me think about what a real user would experience. Looking at the recently-changed files: commands_search.rs, commands_retry.rs, format/mod.rs — all small UX tweaks. 
+
+Maybe: `format/mod.rs` context_usage / hints — no. What about the `contextual_hint` system? Hard to say without reading.
+
+Actually — considering economy and the risk of over-scoping, two strong tasks are enough, plus one more modest product/UX one. Let me think about what's genuinely valuable:
+
+Task 3 option: **REPL `!` passthrough tail capture** — exists. **/stash** — exists. 
+
+Maybe a genuinely useful product improvement from the "What can Claude Code do that you can't?" angle: Claude Code has `/rewind`, compacting, plan mode... arc has most of that. 
+
+What about the `arc risk accuracy` CLI? It already exists (commands_risk_accuracy.rs). After Task 1 automates the feed, the accuracy measurement is available via existing CLI. Good.
+
+Another idea for Task 3: a **historical validation backfill** — after the feed is automated, there are 74 snapshots but no validations. A task to run `arc risk validate` against historical snapshot pairs... that's an execute-once operation, not code. Could be folded into Task 1 (no — keep tasks minimal).
+
+Alternatively Task 3: fix the CI flakiness seen in trajectory ("socket hang up" on binary download) — can't fix GitHub action infra from here.
+
+Let me think about what's most competitive: the trajectory shows 10 consecutive "Self-improvement (small, committed)" tasks — mostly tiny char-boundary + word-boundary robustness fixes. It's been small-scope for a while. But my own lessons warn against overscoping (start at retreat size; size task to fit in one hand). Two solid tasks + one product task is right.
+
+Let me check the actual snapshot/validate code paths more and search for byte-indexing patterns to write precise scoped tasks.
+
+Actually, let me reconsider Task 2 scope. A better, well-scoped stability task: **audit byte-indexing in the three highest-risk files** — but the risk list says format/output.rs (0.55), format/mod.rs (0.52), commands_risk.rs (0.46)... format/output.rs has `safe_truncate`? Let me search for unsafe byte slicing patterns across src and pick the 3 worst files. A single task: "Sweep byte-indexing panics in src/format/output.rs + src/format/tools.rs + src/prompt_utils.rs" (pick 3). Third candidate files: prompt_utils.rs has `extract_code_blocks` with "multi-byte-safe" claim, so maybe already safe. 
+
+Let me
+
+
