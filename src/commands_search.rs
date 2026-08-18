@@ -314,8 +314,7 @@ pub struct IndexEntry {
 }
 
 /// Extract the first meaningful line from file content.
-/// Skips blank lines, then grabs the first doc comment (`//!`, `///`, `#`),
-/// module declaration, or any non-empty line.
+/// Skips blank lines, then returns the first non-empty line, truncated.
 pub fn extract_first_meaningful_line(content: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -363,9 +362,115 @@ pub fn build_project_index() -> Vec<IndexEntry> {
 /// Check if a file extension suggests a binary/non-text file.
 pub fn is_binary_extension(path: &str) -> bool {
     let binary_exts = [
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".ico", ".svg", ".woff", ".woff2",
-        ".ttf", ".otf", ".eot", ".pdf", ".zip", ".gz", ".tar", ".bz2", ".xz", ".7z", ".rar",
-        ".exe", ".dll", ".so", ".dylib", ".o", ".a", ".class", ".pyc", ".pyo", ".wasm", ".lock",
+        // Images
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".webp",
+        ".ico",
+        ".svg",
+        ".heic",
+        ".heif",
+        ".avif",
+        ".tif",
+        ".tiff",
+        ".psd",
+        ".ai",
+        ".eps",
+        ".raw",
+        ".cr2",
+        ".nef",
+        // Audio
+        ".mp3",
+        ".wav",
+        ".flac",
+        ".aac",
+        ".ogg",
+        ".m4a",
+        ".wma",
+        ".opus",
+        ".mid",
+        ".midi",
+        // Video
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".webm",
+        ".m4v",
+        ".wmv",
+        ".flv",
+        ".mpg",
+        ".mpeg",
+        ".3gp",
+        // Fonts
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".ttc",
+        // Archives & installers
+        ".zip",
+        ".gz",
+        ".tar",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".dmg",
+        ".iso",
+        ".deb",
+        ".rpm",
+        // Docs
+        ".pdf",
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".ppt",
+        ".pptx",
+        ".odt",
+        ".ods",
+        ".epub",
+        ".mobi",
+        // Compiled & binary formats
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".o",
+        ".a",
+        ".class",
+        ".jar",
+        ".war",
+        ".apk",
+        ".ipa",
+        ".pyc",
+        ".pyo",
+        ".wasm",
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+        ".sqlite3",
+        // ML model weights & data
+        ".onnx",
+        ".pt",
+        ".pth",
+        ".gguf",
+        ".safetensors",
+        ".ckpt",
+        ".npy",
+        ".npz",
+        ".pkl",
+        ".parquet",
+        ".arrow",
+        ".h5",
+        ".hdf5",
+        ".lock",
     ];
     let lower = path.to_lowercase();
     binary_exts.iter().any(|ext| lower.ends_with(ext))
@@ -1704,6 +1809,36 @@ mod tests {
         assert!(is_binary_extension("main.pyc"));
         assert!(is_binary_extension("lib.so"));
         assert!(is_binary_extension("app.exe"));
+    }
+
+    #[test]
+    fn is_binary_extension_media() {
+        assert!(is_binary_extension("clip.mp4"));
+        assert!(is_binary_extension("intro.mov"));
+        assert!(is_binary_extension("song.mp3"));
+        assert!(is_binary_extension("voice.flac"));
+        assert!(is_binary_extension("photo.heic"));
+        assert!(is_binary_extension("photo.avif"));
+        assert!(is_binary_extension("scan.tiff"));
+    }
+
+    #[test]
+    fn is_binary_extension_ml_weights() {
+        assert!(is_binary_extension("model.onnx"));
+        assert!(is_binary_extension("weights.gguf"));
+        assert!(is_binary_extension("checkpoint.safetensors"));
+        assert!(is_binary_extension("embeddings.npy"));
+        assert!(is_binary_extension("data.parquet"));
+        assert!(is_binary_extension("db.sqlite3"));
+    }
+
+    #[test]
+    fn is_binary_extension_office_docs() {
+        assert!(is_binary_extension("report.docx"));
+        assert!(is_binary_extension("spreadsheet.xlsx"));
+        assert!(is_binary_extension("slides.pptx"));
+        assert!(is_binary_extension("book.epub"));
+        assert!(is_binary_extension("disk.iso"));
     }
 
     // ── IndexEntry & format_project_index ────────────────────────────
