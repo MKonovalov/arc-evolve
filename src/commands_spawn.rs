@@ -243,17 +243,9 @@ impl SpawnTracker {
                     }
                     SpawnStatus::Failed(msg) => {
                         t.notified = true;
-                        // char-boundary-safe truncation (CLAUDE.md safety rule;
-                        // byte slicing caused #250 crashes on multi-byte chars).
-                        let mut end = msg.len().min(120);
-                        while end > 0 && !msg.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        let truncated = if end < msg.len() {
-                            format!("{}…", &msg[..end])
-                        } else {
-                            msg.clone()
-                        };
+                        // char-boundary-safe truncation via the shared helper
+                        // (CLAUDE.md safety rule; byte slicing caused #250 crashes).
+                        let truncated = safe_truncate_with_suffix(msg, 120, "…");
                         out.push(format!(
                             "✗ background spawn #{} failed: {}",
                             t.id, truncated
@@ -2084,6 +2076,31 @@ mod tests {
         // background: false — user already blocked on it, nothing to notify.
         let id = tracker.register_with_bg("fg task", None, false);
         tracker.complete(id, "done".to_string());
+        assert!(tracker.newly_finished_background().is_empty());
+    }
+
+    #[test]
+    fn test_newly_finished_background_failure_truncates_char_boundary_safe() {
+        let tracker = SpawnTracker::new();
+        let id = tracker.register_with_bg("bg task", None, true);
+        // 200 multi-byte ('✓' = 3 bytes) chars — exceeds the 120-byte cap.
+        let long_msg = "✓".repeat(200);
+        tracker.fail(id, long_msg);
+
+        let first = tracker.newly_finished_background();
+        assert_eq!(first.len(), 1);
+        assert!(first[0].contains("failed"));
+        assert!(first[0].contains('…'));
+
+        // Truncation must not panic and the message must be length-capped:
+        // the notification includes the "✗ background spawn #N failed: " prefix,
+        // so the full line stays well under 120 + prefix regardless.
+        let failed_len = first[0].len();
+        assert!(
+            failed_len < 400,
+            "truncated notification unexpectedly long: {failed_len}"
+        );
+        // Reported only once.
         assert!(tracker.newly_finished_background().is_empty());
     }
 
