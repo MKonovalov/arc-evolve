@@ -1,0 +1,264 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by examining the relevant code in src/commands_risk.rs to understand the current implementation.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1240,1320p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_last_snap… ✓ (6ms)
+ ✓ (4ms)
+  2 tools completed in 32.8s (2 ✓)
+
+Let me find the definitions of `replay_validate_last_snapshot`, `auto_validate_by_replay, and ReplayValidated`.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn replay_validate_last_s… ✓ (4ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2130,2330p' src/commands_r… ✓ (5ms)
+
+I have a clear picture. Now let me check the existing tests in mod tests and the `ValidationResult` struct, plus imports at the top of the file.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,30p' src/commands_risk.r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct ValidationResult" … ✓ (3ms)
+ ✓ (5ms)
+  2 tools completed in 3.4s (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2336,2470p' src/commands_r… ✓ (4ms)
+
+Let me look at existing validation-related tests and understand `build_risk_snapshot_json, compute_validation, parse_git_log_name_only`, and existing tests around replay_validate_core.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1760,1820p' src/commands_r… ✓ (5ms)
+
+Let me check existing tests around `replay_validate_core and the FileRisk` struct, and `parse_all_snapshots/build_risk_snapshot_json`. Let me look at lines 4100-4140 where there's already a second.recorded test.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '4040,4138p' src/commands_r… ✓ (4ms)
+
+There are already existing tests for the replay_validate_core dedup semantics. Let me look at the helper functions `snapshot_jsonl, temp_validation_file`, `git_log_output, and write_validation_event` to understand the test scaffolding, and check the mod tests scope.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn snapshot_jsonl\|fn tem… ✓ (4ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '3955,4010p' src/commands_r… ✓ (3ms)
+
+There is already comprehensive test coverage for the dedup/order semantics. Now let me understand `last_validation_association and the RISK_VALIDATION_PATH / RISK_SNAPSHOT_PATH` constants to write my test using the real path mechanism. Let me look at `last_validation_association in commands_risk_snapshots.rs`.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '150,230p' src/commands_ris… ✓ (3ms)
+
+Now I understand everything. The test task asks me to build a test using `build_risk_snapshot_json/write_risk_snapshot_to` with two fake snapshot lines and verify the snapshot→validate accumulation flow in a temp dir. The existing tests already cover the replay_validate_core dedup semantics well. But the task specifically wants a test that:
+1. Writes two fake snapshot lines via `build_risk_snapshot_json` or `write_risk_snapshot_to` in a temp `.arc` dir
+2. Calls `replay_validate_core` pointing at a temp validation path
+3. Asserts a validation event is recorded and dedup works
+4. Asserts `last_validation_association` returns expected (from,to)
+
+Let me check the `FileRisk` struct needed for `build_risk_snapshot_json`.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '32,100p' src/commands_risk… ✓ (3ms)
+
+Let me look at the FileRisk struct definition to build snapshots correctly with `build_risk_snapshot_json`.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct FileRisk" src/comm… ✓ (7ms)
+
+Now I have all I need. Let me first make the main change to `handle_risk_snapshot()` to add validation before writing the new snapshot, then add the test.
+
+First, the primary behavior change:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (3 → 29 lines)
+    /// Handle `/risk snapshot` — save current risk predictions to JSONL.
+    fn handle_risk_snapshot() {
+  +     // Validate the PRIOR snapshot against commits since its git_hash BEFORE
+  +     // writing the new one. Order matters: replay_validate_last_snapshot treats
+  +     // the currently-last snapshot as the prediction and replays it against
+  +     // commits since its hash. If we recorded the new snapshot first, git log
+  +     // <newhash>..HEAD would be empty (no-op). This yields one matched
+  +     // prediction-outcome pair per session the loop runs, closing the
+  +     // validation cold-start.
+  +     if let Some(v) = replay_validate_last_snapshot() {
+  +         if v.recorded {
+  +             let total_changed = v.result.hits.len() + v.result.surprises.len();
+  +             let accuracy_pct = if total_changed > 0 {
+  +                 (v.result.hits.len() as f64 / total_changed as f64) * 100.0
+  +             } else {
+  +                 0.0
+  +             };
+  +             println!(
+  +                 "  {DIM}📊 Risk validation: replayed {}..{} — {} hit / {} predicted ({:.1}% accuracy){RESET}",
+  +                 v.git_hash,
+  ... (9 more lines)
+ ✓ (1ms)
+    /// Handle `/risk snapshot` — save current risk predictions to JSONL.
+    fn handle_risk_snapshot() {
+  +     // Validate the PRIOR snapshot against commits since its git_hash BEFORE
+  +     // writing the new one. Order matters: replay_validate_last_snapshot treats
+  +     // the currently-last snapshot as the prediction and replays it against
+  +     // commits since its hash. If we recorded the new snapshot first, git log
+  +     // <newhash>..HEAD would be empty (no-op). This yields one matched
+  +     // prediction-outcome pair per session the loop runs, closing the
+  ... (13 more lines)
+
+Now let me add the test. Let me add a test after `test_replay_validate_core_distinct_hash_records_each` (the last test in the module, before the closing }). Let me find the exact end.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "test_replay_validate_core… ✓ (3ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '4142,4175p' src/commands_r… ✓ (3ms)
+
+Now I'll add a test using `build_risk_snapshot_json/write_risk_snapshot_to in a temp .arc` dir, verifying the snapshot→validate accumulation flow including dedup and `last_validation_association`. Let me add it before the final }.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (7 → 80 lines)
+            assert_eq!(event_lines.len(), 2, "two distinct spans → two events");
+    
+            let _ = std::fs::remove_file(&path);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_risk_snapshot_validate_accumulation_tmpdir() {
+  +         // Locks in the snapshot→validate accumulation flow that makes
+  +         // `risk snapshot` also validate the PRIOR snapshot. Uses a temp .arc
+  +         // dir so no real repo state is touched, and fake git-log strings so
+  +         // no destructive git call runs from the project root.
+  +         let dir = std::env::temp_dir().join(format!(
+  +             "arc-risk-snapshot-acc-{}-{}",
+  +             std::process::id(),
+  +             std::time::SystemTime::now()
+  +                 .duration_since(std::time::UNIX_EPOCH)
+  +                 .unwrap_or_default()
+  +                 .as_nanos()
+  +         ));
+  +         let snap_path = dir.join("risk_snapshots.jsonl");
+  ... (58 more lines)
+ ✓ (2ms)
+            assert_eq!(event_lines.len(), 2, "two distinct spans → two events");
+    
+            let _ = std::fs::remove_file(&path);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_risk_snapshot_validate_accumulation_tmpdir() {
+  +         // Locks in the snapshot→validate accumulation flow that makes
+  ... (13 more lines)
+
+Now let me run the checks. First build and test:
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -20 ✓ (7.9s)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test risk 2>&1 | tail -40 ✓ (23.4s)
+
+The test caught a real subtlety. `replay_validate_core` loads the last snapshot from the content. Since I wrote snapshots abc123 then def456, the last snapshot is def456, not `abc123`. My test wrote two snapshots but then replayed with content where the last is def456.
+
+Wait — but this is exactly the ordering semantics the task describes. In the real flow:
+1. Session at HEAD abc123 writes snapshot abc123.
+2. Next session: validate prior (abc123) against commits since it, then write new snapshot at new HEAD.
+
+So the validation happens against the last snapshot at the time. My test's construction is wrong — I wrote both snapshots upfront, then tried to validate "prior" but the last is now `def456`. 
+
+The task description says "Build a temp .arc dir; write two fake snapshot lines via build_risk_snapshot_json (or write_risk_snapshot_to) with two distinct git hashes and a predicted list". The intent is to have a last snapshot (def456) be validated against commits since def456. Actually the task wants to validate "the prior snapshot". Let me reconsider — but the important semantics to lock in per the task: "call replay_validate_core(...) pointing at the temp validation path; assert a validation event is recorded and that calling it a second time with the same (from,to) association does NOT write a duplicate".
+
+The dedup and order semantics are what matters. My test incorrectly assumed it validates `abc123` (the first line) but replay always uses the *last* snapshot. So the correct expectation: with last snapshot being `def456`, validating against commits touching `src/mod_b.rs` (def456's predicted file) gives a hit with git_hash `def456`.
+
+The task's real intent: verify that when `risk snapshot` runs, it validates the prior (currently-last) snapshot. My main code change does that correctly because in the real flow, at the moment `handle_risk_snapshot` runs, the last snapshot IS the prior session's one. 
+
+Let me fix the test to match reality: the last snapshot (`def456`) is validated against commits since its hash. That gives a hit on src/mod_b.rs. Let me rewrite the test accordingly.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (21 → 23 lines)
+            write_risk_snapshot_to(&snap_path, &build_risk_snapshot_json(&[risk_b], 173, "def456"))
+                .unwrap();
+    
+  -         // Now the "new session" validates the PRIOR snapshot (last line =
+  -         // abc123) against commits since its hash. A fix commit touches the
+  -         // prior snapshot's predicted file → a matched hit pair.
+  +         // Now the "new session" validates the CURRENTLY-last snapshot — the
+  +         // prior session's (def456) — against commits since its hash. This is
+  +         // the ordering `risk snapshot` relies on: replay treats the last line
+  +         // as the prediction and must run BEFORE a new snapshot is appended. A
+  +         // fix commit touches def456's predicted file → a matched hit pair.
+            let content = std::fs::read_to_string(&snap_path).unwrap();
+  -         let log = git_log_output(&[("feed12 fix: patch a", &["src/mod_a.rs"])]);
+  +         let log = git_log_output(&[("feed12 fix: patch b", &["src/mod_b.rs"])]);
+            let v = replay_validate_core(&content, &log, None, &val_path, "feed12").unwrap();
+            assert!(v.recorded, "prior snapshot must record a validation event");
+  -         assert_eq!(v.git_hash, "abc123", "validates the PRIOR snapshot's hash");
+  -         assert!(v.result.hits.iter().any(|h| h == "src/mod_a.rs"));
+  +         assert_eq!(v.git_hash, "def456", "replays the currently-last (prior) snapshot");
+  +         assert!(v.result.hits.iter().any(|h| h == "src/mod_b.rs"));
+ ✓ (2ms)
+            write_risk_snapshot_to(&snap_path, &build_risk_snapshot_json(&[risk_b], 173, "def456"))
+                .unwrap();
+    
+  -         // Now the "new session" validates the PRIOR snapshot (last line =
+  -         // abc123) against commits since its hash. A fix commit touches the
+  -         // prior snapshot's predicted file → a matched hit pair.
+  +         // Now the "new session" validates the CURRENTLY-last snapshot — the
+  +         // prior session's (def456) — against commits since its hash. This is
+  ... (12 more lines)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (5 → 5 lines)
+            assert_eq!(
+                last_validation_association(&val_path),
+  -             Some(("abc123".to_string(), "feed12".to_string())),
+  +             Some(("def456".to_string(), "feed12".to_string())),
+                "association should be (prior snapshot hash, current HEAD)"
+            );
+ ✓ (1ms)
+            assert_eq!(
+                last_validation_association(&val_path),
+  -             Some(("abc123".to_string(), "feed12".to_string())),
+  +             Some(("def456".to_string(), "feed12".to_string())),
+                "association should be (prior snapshot hash, current HEAD)"
+            );
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test risk 2>&1 | tail -15 ✓ (24.9s)
+
+Tests pass. Now run the full suite plus clippy and fmt:
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt 2>&1 | tail -5 && cargo … ✓ (18.7s)
+
+fmt and clippy clean. Let me run the full test suite to confirm nothing else broke:
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -25 ✓ (1m 17s)
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+
