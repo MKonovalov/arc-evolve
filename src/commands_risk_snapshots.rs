@@ -154,6 +154,16 @@ fn auto_risk_snapshot_to(path: &std::path::Path) {
 /// Default path for risk validation JSONL file.
 pub(crate) const RISK_VALIDATION_PATH: &str = ".arc/risk_validations.jsonl";
 
+/// Returns the `(git_hash_from, git_hash_to)` association of the last recorded
+/// validation event, or None if none exists / unparseable. Used by the
+/// auto-replay validator to avoid double-counting the same snapshot association.
+pub(crate) fn last_validation_association(
+    validation_path: &std::path::Path,
+) -> Option<(String, String)> {
+    let content = std::fs::read_to_string(validation_path).ok()?;
+    last_validation_pair(&content)
+}
+
 /// Append a validation event to the given JSONL path. Reused by both the
 /// watch-failure auto-validate path (`trigger: "watch_failure"`) and the CLI
 /// `/risk validate` path (`trigger: "cli"`), so both accumulate the validation
@@ -164,6 +174,19 @@ pub(crate) const RISK_VALIDATION_PATH: &str = ".arc/risk_validations.jsonl";
 /// < 10 for small snapshots), and `accuracy_pct` — exactly the fields the
 /// accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)
 /// consume.
+/// Returns the `git_hash_from`/`git_hash_to` association of the last
+/// validation event in the given JSONL content, or None if empty/unparseable.
+/// Used to dedup auto-replay validations: re-running on the same HEAD must not
+/// double-count a snapshot association that's already recorded.
+fn last_validation_pair(content: &str) -> Option<(String, String)> {
+    let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(last).ok()?;
+    let from = v.get("git_hash_from")?.as_str()?.to_string();
+    let to = v.get("git_hash_to")?.as_str()?.to_string();
+    Some((from, to))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_validation_event(
     validation_path: &std::path::Path,
     day: u32,
@@ -172,6 +195,8 @@ pub(crate) fn write_validation_event(
     hits: &[String],
     surprises: &[String],
     accuracy_pct: f64,
+    git_hash_from: &str,
+    git_hash_to: &str,
 ) -> std::io::Result<()> {
     let ts = std::process::Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -196,6 +221,8 @@ pub(crate) fn write_validation_event(
         "surprises": surprises,
         "predicted_count": predicted_count,
         "accuracy_pct": accuracy_pct,
+        "git_hash_from": git_hash_from,
+        "git_hash_to": git_hash_to,
     });
 
     if let Some(parent) = validation_path.parent() {
@@ -298,6 +325,8 @@ fn auto_validate_after_failure_to(
         &hits,
         &surprises,
         accuracy_pct_rounded,
+        &last.git_hash,
+        "HEAD",
     ) {
         eprintln!("  {DIM}(warning: could not write risk validation entry: {e}){RESET}");
     }
@@ -901,8 +930,10 @@ mod tests {
 
         let hits = vec!["src/main.rs".to_string(), "src/cli.rs".to_string()];
         let surprises = vec!["src/prompt.rs".to_string()];
-        write_validation_event(&path, 129, "cli", 5, &hits, &surprises, 66.7)
-            .expect("write validation event");
+        write_validation_event(
+            &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456",
+        )
+        .expect("write validation event");
 
         let contents = std::fs::read_to_string(&path).expect("read validation file");
         // Raw JSON shape check: trigger and predicted_count.
@@ -929,8 +960,18 @@ mod tests {
 
         let hits = vec!["src/tools.rs".to_string()];
         let surprises: Vec<String> = vec![];
-        write_validation_event(&path, 100, "watch_failure", 3, &hits, &surprises, 100.0)
-            .expect("write validation event");
+        write_validation_event(
+            &path,
+            100,
+            "watch_failure",
+            3,
+            &hits,
+            &surprises,
+            100.0,
+            "abc123",
+            "def456",
+        )
+        .expect("write validation event");
 
         let contents = std::fs::read_to_string(&path).expect("read validation file");
         let raw: serde_json::Value =
@@ -944,14 +985,41 @@ mod tests {
     }
 
     #[test]
+    fn test_last_validation_pair_basic() {
+        let jsonl =
+            "{\"day\":1,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"bbb\"}\n{\"day\":2,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"ccc\"}";
+        assert_eq!(
+            last_validation_pair(jsonl),
+            Some(("aaa".to_string(), "ccc".to_string())),
+            "should return the last event's from/to hashes"
+        );
+    }
+
+    #[test]
+    fn test_last_validation_pair_empty() {
+        assert_eq!(last_validation_pair(""), None);
+    }
+
+    #[test]
+    fn test_last_validation_pair_missing_field() {
+        let jsonl = "{\"day\":1,\"hits\":[]}";
+        assert_eq!(
+            last_validation_pair(jsonl),
+            None,
+            "missing from/to fields → None"
+        );
+    }
+
+    #[test]
     fn test_write_validation_event_appends() {
         let dir = tempfile::tempdir().expect("create temp dir");
         let path = dir.path().join("validations.jsonl");
 
         let hits = vec!["src/main.rs".to_string()];
         let surprises: Vec<String> = vec![];
-        write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0).expect("first write");
-        write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0)
+        write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
+            .expect("first write");
+        write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
             .expect("second write");
 
         let events = load_validation_history_from(&path);

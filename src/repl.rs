@@ -1391,6 +1391,11 @@ pub async fn run_repl(
     // Dedups by git hash → at most one snapshot per HEAD.
     if crate::commands_risk::risk_autosnapshot_enabled() {
         crate::commands_risk::auto_risk_snapshot();
+        // Opt-in companion: replay-validate the pre-exit snapshot against
+        // commits since it, so the validation half of the prediction meter
+        // accumulates in lockstep with the snapshot half. Also gated by the
+        // same flag; deduped so re-running on one HEAD records at most once.
+        crate::commands_risk::auto_validate_by_replay();
     }
 
     // Show session summary (files, tokens, cost, duration)

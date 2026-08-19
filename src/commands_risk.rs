@@ -11,9 +11,9 @@ use crate::format::*;
 // module's own scoring/reporting code) remain unchanged.
 pub(crate) use crate::commands_risk_snapshots::{
     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
-    load_validation_history_from, parse_all_snapshots, parse_validation_events,
-    risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
-    RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    last_validation_association, load_validation_history_from, parse_all_snapshots,
+    parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+    write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
 };
 
 // Report/context formatting lives in `commands_risk_report.rs`.
@@ -2140,117 +2140,160 @@ fn handle_risk_history() {
     print!("{report}");
 }
 
-/// Handle `/risk validate` — compare past predictions against actual breakage.
-fn handle_risk_validate() {
-    // 1. Load the most recent snapshot
-    let path = std::path::Path::new(RISK_SNAPSHOT_PATH);
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) if !c.trim().is_empty() => c,
-        Ok(_) => {
-            println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
-            return;
-        }
-        Err(_) => {
-            println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
-            return;
-        }
-    };
+/// Result of replaying the last snapshot against commits since its git_hash.
+/// Enough to both persist a matched prediction-outcome pair and (in the CLI
+/// path) render a human-readable report.
+struct ReplayValidated {
+    day: u64,
+    git_hash: String,
+    head_hash: String,
+    predicted: Vec<String>,
+    result: ValidationResult,
+    /// true if a validation event was actually persisted (not deduped/no-op)
+    recorded: bool,
+}
 
-    // Take the last non-empty line (most recent snapshot)
-    let last_line = match contents.lines().rev().find(|l| !l.trim().is_empty()) {
-        Some(l) => l,
-        None => {
-            println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
-            return;
-        }
-    };
-
-    let snapshot: serde_json::Value = match serde_json::from_str(last_line) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("  {RED}Error parsing snapshot: {e}{RESET}");
-            return;
-        }
-    };
-
-    let git_hash = snapshot["git_hash"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
-    let day = snapshot["day"].as_u64().unwrap_or(0);
-
-    // Extract predicted top-10 file paths
-    let top_10: Vec<String> = snapshot["top_10"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v["path"].as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    if top_10.is_empty() {
-        eprintln!("  {RED}Snapshot has no top_10 predictions.{RESET}");
-        return;
+/// Replay the last risk snapshot against commits since its git_hash.
+///
+/// Shared core used by BOTH the `/risk validate` CLI path and the opt-in
+/// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`), so the two paths
+/// share one implementation. Quietly returns None when:
+/// - no snapshots exist, or the last snapshot has no top_10 predictions
+/// - there are no commits since the snapshot (nothing to validate)
+///
+/// When hits or surprises exist, appends a validation event (trigger "replay",
+/// shared writer sets `predicted_count` honestly) so the prediction meter's
+/// validation half accumulates — unless the same snapshot association is
+/// already recorded (dedup: re-running on the same HEAD must not double-count,
+/// mirroring the `last_snapshot_git_hash` discipline). A matched pair is only
+/// recorded once per snapshot-to-HEAD span.
+fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+    // Load the most recent snapshot
+    let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+    let snapshots = parse_all_snapshots(&content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
     }
 
-    // 2. Check if there are commits since the snapshot
-    let log_output = match crate::git::run_git(&[
+    // Check if there are commits since the snapshot
+    let log_output = crate::git::run_git(&[
         "log",
-        &format!("{git_hash}..HEAD"),
+        &format!("{}..HEAD", last.git_hash),
         "--name-only",
         "--oneline",
-    ]) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("  {RED}Error running git log: {e}{RESET}");
-            return;
-        }
-    };
-
+    ])
+    .ok()?;
     if log_output.trim().is_empty() {
-        println!("  No commits since last snapshot ({git_hash}) — nothing to validate yet.");
-        return;
+        return None;
     }
 
-    // 3. Parse commits and classify breakage
+    // Parse commits and classify breakage
     let entries = parse_git_log_name_only(&log_output);
     let commit_count = entries.len();
     let broke_files = classify_broke_files(&entries);
 
-    // 4. Get current full risk ranking for rank info on surprises
+    // Get current full risk ranking for rank info on surprises
     let all_risks = compute_file_risk_scores();
     let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
 
-    // 5. Compute and display validation
-    let result = compute_validation(&top_10, &broke_files, Some(&all_ranked), commit_count);
-    let report = format_validation_report(&result, day, &git_hash);
-    print!("{report}");
+    // Compute validation
+    let result = compute_validation(
+        &last.predicted,
+        &broke_files,
+        Some(&all_ranked),
+        commit_count,
+    );
+    let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
 
-    // 6. Persist a validation event so the CLI `/risk validate` path turns the
-    //    prediction meter's crank the same way the watch-failure path does.
-    //    hits = predicted files that broke; surprises = files that broke but
-    //    weren't predicted. Only record when there was something to validate.
+    // Persist a validation event (deduped by snapshot association).
+    // hits = predicted files that broke; surprises = files that broke but
+    // weren't predicted. Only record when there was something to validate.
     let hits: Vec<String> = result.hits.clone();
     let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+    let mut recorded = false;
     if !hits.is_empty() || !surprises.is_empty() {
-        let total_changed = hits.len() + surprises.len();
-        let accuracy_pct = if total_changed > 0 {
-            (hits.len() as f64 / total_changed as f64) * 100.0
-        } else {
-            0.0
-        };
-        let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
-        if let Err(e) = crate::commands_risk::write_validation_event(
-            std::path::Path::new(RISK_VALIDATION_PATH),
-            day as u32,
-            "cli",
-            top_10.len(),
-            &hits,
-            &surprises,
-            accuracy_pct_rounded,
-        ) {
-            eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+        let already = last_validation_association(std::path::Path::new(RISK_VALIDATION_PATH))
+            .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+        if !already {
+            let total_changed = hits.len() + surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
+            if let Err(e) = write_validation_event(
+                std::path::Path::new(RISK_VALIDATION_PATH),
+                last.day as u32,
+                "replay",
+                last.predicted.len(),
+                &hits,
+                &surprises,
+                accuracy_pct_rounded,
+                &last.git_hash,
+                &head_hash,
+            ) {
+                eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+            } else {
+                recorded = true;
+            }
+        }
+    }
+
+    Some(ReplayValidated {
+        day: last.day,
+        git_hash: last.git_hash.clone(),
+        head_hash,
+        predicted: last.predicted.clone(),
+        result,
+        recorded,
+    })
+}
+
+/// Opt-in auto-replay validation on session exit.
+///
+/// Gated by the SAME `arc_RISK_AUTOSNAPSHOT=1` flag as `auto_risk_snapshot`
+/// (off by default, product-safe), so the validation half of the prediction
+/// meter accumulates in lockstep with the snapshot half whenever the flag is
+/// set. Runs the shared replay core; emits a brief stderr note only when a
+/// validation event was actually recorded. Never panics.
+pub(crate) fn auto_validate_by_replay() {
+    if let Some(v) = replay_validate_last_snapshot() {
+        if v.recorded {
+            let total_changed = v.result.hits.len() + v.result.surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (v.result.hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            eprintln!(
+                "  {DIM}📊 Risk validation: replayed {}..{} — {} hit / {} predicted ({:.1}% accuracy){RESET}",
+                v.git_hash,
+                v.head_hash,
+                v.result.hits.len(),
+                v.predicted.len(),
+                accuracy_pct,
+            );
+        }
+    }
+}
+
+/// Handle `/risk validate` — compare past predictions against actual breakage.
+/// Shares its replay core with `auto_validate_by_replay` (the opt-in REPL-exit
+/// auto-replay hook), so both the manual CLI path and the automatic hook turn
+/// the prediction meter's crank identically.
+fn handle_risk_validate() {
+    match replay_validate_last_snapshot() {
+        Some(v) => {
+            let report = format_validation_report(&v.result, v.day, &v.git_hash);
+            print!("{report}");
+        }
+        None => {
+            println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
         }
     }
 }
