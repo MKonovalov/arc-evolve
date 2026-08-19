@@ -1,0 +1,93 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll verify the diff against the task requirements. Build/tests already pass, so let me focus on judging the implementation.
+
+Let me check the key changes in the actual code to verify correctness.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "total_scored\|scored_brok… ✓ (7ms)
+
+Let me check the `compute_validation` logic to verify `scored_broke/surprises` are correctly filtered to scored files, and that `predicted_count` is consistent.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2230,2300p' src/commands_r… ✓ (4ms)
+
+Let me verify the `compute_validation` function filters surprises to scored files (the `is_scored_file` predicate) — this is critical to `scored_broke = hits + scored surprises` being correct.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|fn… ✓ (4ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1814,1880p' src/commands_r… ✓ (4ms)
+
+Confirmed: `surprises` are filtered to scored files via `is_scored_file` (src/**.rs), and hits are always predicted scored files. So `scored_broke = hits.len() + surprises.len()` correctly counts scored source breaks. The task's assumption holds.
+
+Now let me verify the `predicted_count (the last.predicted.len()`) and lift consistency. The task says `flagged_rate = hits / predicted_count`. In the test they use `predicted_count = 4 == last.predicted.len()`. In `replay_validate_core the predicted_count` persisted is `last.predicted.len()`. Good.
+
+Let me verify the accuracy stats aggregation reads the fields and the backward compatibility. Also confirm the `..Default::default()` works since ValidationEvent now derives `Default`.
+
+Let me quickly check the accuracy aggregation and the `predicted_count` semantics. Note: in `compute_accuracy_stats`, the flagged_rate = hit_sum / predicted_sum where predicted comes from `e.predicted_count`. But for OLD events (before Task 1 landed `predicted_count` write), `predicted_count` may be absent. The task says the lift only aggregates events carrying `total_scored/scored_broke`. Since those are new fields, they only appear with the lift writer together. Good — the check requires all three (`predicted_count, total_scored, scored_broke`) to be Some. That's fine.
+
+Let me verify `predicted_count` is being written as an optional field to JSONL too, so it's Some on new events. Let me check write_validation_event keeps predicted_count in the JSON.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '195,245p' src/commands_ris… ✓ (4ms)
+
+The implementation matches the task. `predicted_count` is already persisted, and the new total_scored/`scored_broke` fields are added as optional. Parsing is backward-compatible via `.as_u64().map()` returning None for absent fields. `ValidationEvent` derives Default.
+
+Now let me verify the `overall_lift computation in compute_accuracy_stats` and the report rendering. The diff shows this clearly. Let me just confirm `total_scored/scored_broke` fields exist on the struct and there are no obvious issues with the lift aggregation (guarding division by zero).
+
+The diff shows:
+• `lift_scored_broke_sum > 0` and `lift_total_scored_sum > 0 and lift_predicted_sum > 0` guards
+• baseline_rate > 0.0 guard → else None
+• `overall_lift is Some` only when it makes sense
+
+This is all correct. Also `total_scored` could be 0 if all_ranked is empty — but the guard `lift_total_scored_sum > 0` prevents division-by-zero there.
+
+Let me run the two specific new tests quickly to confirm they pass (fast, targeted).
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --lib lift 2>&1 | tail … ✓ (145ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test lift 2>&1 | tail -25 ✓ (152ms)
+
+All three new lift tests pass.
+
+This is an evolve-kind task measuring arc's own sense organ — no product-facing surface, so the #448 red flag doesn't apply. No user-facing CLI feature added. No docs change strictly required (internal measurement), though CLAUDE.md wasn't updated — but this is an internal metric, not necessarily required and not a fail condition.
+
+The implementation fully matches the task:
+1. ✅ `total_scored` (= all_ranked.len()), `scored_broke` (= hits + scored surprises) computed and persisted as optional fields, backward-compatible parsing
+2. ✅ Lift aggregation in `compute_accuracy_stats` with proper division-by-zero guards
+3. ✅ Report line "Lift: X.X×" with "—" when no data
+4. ✅ Unit tests for both as required
+5. ✅ Existing fields (`predicted_count, hit_count, total_changed, accuracy_pct`) unchanged
+6. ✅ Events only affected on new writes, not rewriting old JSONL
+
+Build and full tests already pass per the harness.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_pla… (5 lines) ✓ (6ms)
+
+Verdict written to `session_plan/eval_task_2.md`.
+
+Verdict: PASS
+
+The implementation correctly delivers the discriminative breakage-rate lift signal:
+• `total_scored (= all_ranked.len()`) and `scored_broke` (= hits + scored surprises, correctly filtered since compute_validation already restricts surprises to `src/*/.rs via is_scored_file`) are computed in `replay_validate_core` and persisted as **optional** JSONL fields.
+• Parsing is backward-compatible (absent fields → `None); ValidationEvent` derives `Default`; old events without the fields are skipped without panic.
+• `compute_accuracy_stats` aggregates the lift with division-by-zero guards (predicted_sum, `total_scored_sum, scored_broke_sum > 0`, `baseline_rate > 0.0), and format_accuracy_report` renders Lift: X.X× or — when no usable data.
+• Existing fields (predicted_count, `hit_count, total_changed, accuracy_pct`) are unchanged; no previously-recorded JSONL events are rewritten.
+• All three targeted new tests pass, and build/full tests are green per the harness.
+
+Kind is evolve (internal sense-organ measurement) — no product-facing surface, so the #448 red flag doesn't apply.
+
+

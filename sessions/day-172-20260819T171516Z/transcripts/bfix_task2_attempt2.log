@@ -1,0 +1,390 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll look at the errors and fix them. Let me start by examining the relevant files.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git diff --stat ✓ (13ms)
+
+Let me look at the current state of the changes and understand the errors.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk_snapsho… ✓ (5ms)
+
+Let me look at the full error locations. The first error is at line 332 in `commands_risk_snapshots.rs`. Let me look at that call site.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '300,360p' src/commands_ris… ✓ (4ms)
+
+This is `auto_validate_after_failure` - the call needs `total_scored and scored_broke`. Let me compute these. The function computes src_files, `predicted_set, hits, and surprises`. Let me look at the start of this function to understand the context.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '230,310p' src/commands_ris… ✓ (4ms)
+
+This is `auto_validate_after_failure`, which is a different function from `replay_validate_core`. This function validates against predicted files. Here, the broke set is `src_files, hits` are src files that were predicted, `surprises` are src files not predicted. predicted_count = `last.predicted.len()`.
+
+For this call, `total_scored` would be the whole population of files the scorer could rank (`all_ranked.len()`), but this function doesn't have access to all_ranked. The task says this is for the replay path (`replay_validate_core`). Here we just need to provide the arguments to fix the build.
+
+Since this is `auto_validate_after_failure`, `total_scored` (the whole scored population) isn't readily available. The task says not to change the meaning of existing fields and to keep things backward compatible. For this call site, I'll pass None for both since it's a different context (watch-failure path, not the replay path with scored population).
+
+Wait, but the task is specifically about `replay_validate_core/compute_validation`. Let me look at the actual functions in `commands_risk.rs` to see where the real lift computation should go.
+
+Let me look at the error at line 421 too, and understand the current state of my implementation.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '405,445p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '445,480p' src/commands_ris… ✓ (3ms)
+
+Now let me look at `replay_validate_core and compute_validation in commands_risk.rs` to understand where the real lift computation should be. Let me search.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_validation\|repla… ✓ (5ms)
+
+The replay_validate_core implementation looks complete. The errors are compilation issues. Let me look at the specific error sites. First, let me look at line 2258-2290 in commands_risk.rs to see the replay_validate_core implementation.
+
+Wait, actually the errors are reported in `commands_risk_snapshots.rs` at line 332 (the `auto_validate_after_failure_to` call) and line 421 (the ValidationEvent initializer). Let me check both. The line 421 error says "missing field `predicted_count` in initializer". Wait, but line 421 is in `parse_validation_events`. Let me re-read.
+
+The error says:
+```
+error[E0063]: missing field `predicted_count` in initializer of `ValidationEvent`
+   --> src/commands_risk_snapshots.rs:421:21
+421 |         events.push(ValidationEvent {
+```
+
+But the code I see at line ~421 is the `parse_validation_events` which has `events.push(ValidationEvent { day, hit_count, total_changed, accuracy_pct, total_scored, scored_broke })`. The error mentions `predicted_count` missing. Hmm — did the ValidationEvent struct gain a predicted_count field? Let me look at the struct definition.
+
+Wait, the error message says "missing field `predicted_count` in initializer". But maybe the struct defines `predicted_count` and the parse_validation_events doesn't set it. Let me look at the struct.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '373,395p' src/commands_ris… ✓ (3ms)
+
+The struct has a `predicted_count` field that is not being set in `parse_validation_events`. Let me look at the full struct and the parse function.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '373,420p' src/commands_ris… ✓ (4ms)
+
+Let me see the full `day` field and what fields existed. Let me look at lines 393-400.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '393,405p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '406,425p' src/commands_ris… ✓ (3ms)
+
+I need to add parsing of predicted_count and set it in the initializer. Let me look at how `predicted_count` is stored in the JSON. Let me check the `write_validation_event` function which writes the event.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '186,230p' src/commands_ris… ✓ (3ms)
+
+So the JSON has `predicted_count`. The struct has a `predicted_count` field. I need to parse it in `parse_validation_events` and set it. Let me fix that.
+
+Let me look at the current initializer block (lines 417-425).
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '417,426p' src/commands_ris… ✓ (3ms)
+
+Now let me fix the parse function to include `predicted_count`. Let me add the parse line and set it in the initializer.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (12 → 14 lines)
+            let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+  +         let predicted_count = val["predicted_count"].as_u64().map(|v| v as usize);
+            let total_scored = val["total_scored"].as_u64().map(|v| v as usize);
+            let scored_broke = val["scored_broke"].as_u64().map(|v| v as usize);
+    
+  ···
+                hit_count: hits,
+                total_changed,
+                accuracy_pct,
+  +             predicted_count,
+                total_scored,
+                scored_broke,
+            });
+ ✓ (1ms)
+            let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+  +         let predicted_count = val["predicted_count"].as_u64().map(|v| v as usize);
+            let total_scored = val["total_scored"].as_u64().map(|v| v as usize);
+            let scored_broke = val["scored_broke"].as_u64().map(|v| v as usize);
+    
+  ···
+                hit_count: hits,
+                total_changed,
+  ... (5 more lines)
+
+Now let me fix the first error at line 332 in `auto_validate_after_failure_to`. This call needs `total_scored and scored_broke`. Let me compute them here.
+
+Looking at the context of `auto_validate_after_failure_to`:
+• `src_files` = changed src/ files (the broke set)
+• hits = src_files that were predicted
+• `surprises` = src_files not predicted
+• `predicted_count = last.predicted.len()`
+
+The task's lift computation uses `all_ranked` (whole scored population). But `auto_validate_after_failure_to` doesn't have access to `all_ranked`. This function validates against a snapshot's predictions directly. Since we don't have the whole scored population here, we should pass None for both total_scored and `scored_broke` to keep it safe.
+
+Wait, but the lift fields need total_scored = whole population. Without `all_ranked`, we genuinely don't know it. Passing `None` is the correct honest fallback per the task ("guard... report as n/a"). Let me pass None, None here.
+
+Actually, let me reconsider. We can compute `scored_broke` = hits + scored surprises. But without `total_scored`, having only `scored_broke` isn't enough for the lift. The write function only writes the optional fields when both are provided (it checks `if let Some(ts_) = total_scored` and `if let Some(sb) = scored_broke` separately, so partial is possible). But the task says persist when both are known. Since we don't know total_scored here, pass None, None.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (11 → 13 lines)
+            accuracy_pct_rounded,
+            &last.git_hash,
+            "HEAD",
+  +         None,
+  +         None,
+        ) {
+ ✓ (1ms)
+            accuracy_pct_rounded,
+            &last.git_hash,
+            "HEAD",
+  +         None,
+  +         None,
+        ) {
+
+Now let me check the other call sites of `write_validation_event` that may be missing the new args. Let me search for all call sites.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "write_validation_event("… ✓ (7ms)
+
+Let me look at the `commands_risk.rs:2277` call site to verify it has the correct args.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2240,2300p' src/commands_r… ✓ (4ms)
+
+This call site already passes total_scored, scored_broke. Good.
+
+Now let me handle the warning about `predicted_count_sum in commands_risk_accuracy.rs`. Let me look at that file, including how the lift is computed in `compute_accuracy_stats/format_accuracy_report`.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '120,220p' src/commands_ris… ✓ (4ms)
+
+The predicted_count_sum variable is unused (warning). Let me look at the diff to understand what was added. Let me see the full git diff of commands_risk_accuracy.rs.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk_accurac… ✓ (7ms)
+
+Let me look at the full lift computation block that was added in the diff, and understand the `predicted_count_sum` unused variable issue and the correctness of the lift computation.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '112,175p' src/commands_ris… ✓ (4ms)
+
+The variables shown with ... are the ones added by my earlier implementation (using the ... placeholder style from the diff). Let me see the actual full content of this section (not skipped).
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:112..177 ✓ (1ms)
+
+The implementation is messy and has an incorrect lift computation. The `predicted_count_sum` variable is unused (warning). Let me think about the correct math and clean this up.
+
+The task says:
+• flagged breakage rate = `hits / predicted_count` (predicted_broke / predicted population)
+• baseline breakage rate = `scored_broke / total_scored`
+• lift = flagged_rate / baseline_rate
+
+So for each event we need predicted_count (the flagged population). The struct has `predicted_count: Option<usize>` which I just added parsing for! That's the right denominator for the flagged rate.
+
+So the correct lift computation:
+• flagged_rate = sum(hit_count) / sum(predicted_count)
+• baseline_rate = sum(scored_broke) / sum(total_scored)
+• lift = flagged_rate / baseline_rate
+
+Let me rewrite the whole lift block cleanly. I'll use `e.predicted_count` where available.
+
+Let me rewrite lines 115-180.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:175..205 ✓ (0ms)
+
+Now let me rewrite the lift computation cleanly. I'll replace lines 115-180 with a correct implementation using `predicted_count`.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (66 → 41 lines)
+        //   flagged_rate = sum(hit_count) / sum(predicted_count)
+        //   baseline_rate = sum(scored_broke) / sum(total_scored)
+        //   lift = flagged_rate / baseline_rate  (guard division by zero → None)
+  -     let mut lift_predicted_sum: f64 = 0.0;
+        let mut lift_hit_sum: usize = 0;
+  +     let mut lift_predicted_sum: usize = 0;
+        let mut lift_total_scored_sum: usize = 0;
+        let mut lift_scored_broke_sum: usize = 0;
+  -     let mut lift_uvents_used = 0usize;
+  +     let mut lift_events_used = 0usize;
+        for e in events {
+  -         match (e.total_scored, e.scored_broke) {
+  -             (Some(_total_scored), Some(_scored_broke)) => {
+  -                 lift_predicted_sum += e.hit_count as f64;
+  +         // A usable event needs the flagged population (predicted_count), the
+  +         // whole scored population (total_scored), and the scored-broke count.
+  +         match (e.predicted_count, e.total_scored, e.scored_broke) {
+  +             (Some(pred), Some(total_scored), Some(scored_broke)) => {
+                    lift_hit_sum += e.hit_count;
+  -                 lift_total_scored_sum += _total_scored;
+  ... (50 more lines)
+ ✓ (1ms)
+        //   flagged_rate = sum(hit_count) / sum(predicted_count)
+        //   baseline_rate = sum(scored_broke) / sum(total_scored)
+        //   lift = flagged_rate / baseline_rate  (guard division by zero → None)
+  -     let mut lift_predicted_sum: f64 = 0.0;
+        let mut lift_hit_sum: usize = 0;
+  +     let mut lift_predicted_sum: usize = 0;
+        let mut lift_total_scored_sum: usize = 0;
+        let mut lift_scored_broke_sum: usize = 0;
+  ... (13 more lines)
+
+Now `surprise_count_from` may be unused now. Let me check if it's used elsewhere. It was only used in the removed `predicted_count_sum` line. Let me check.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "surprise_count_from" src/… ✓ (3ms)
+
+Now `surprise_count_from` is defined but unused, which will cause a dead-code warning. Let me remove it since it's no longer needed.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (13 → 6 lines)
+            worst_day,
+            overall_lift,
+        }
+  - }
+  - 
+  - /// Count of surprise (non-predicted scored) files for a validation event.
+  - /// ValidationEvent does not persist `surprises` count directly; we recover it
+  - /// by subtracting hits from total_changed (total_changed = hits + surprises).
+  - fn surprise_count_from(e: &ValidationEvent) -> usize {
+  -     e.total_changed.saturating_sub(e.hit_count)
+    }
+    
+    /// Format the accuracy report as a compact box display.
+ ✓ (0ms)
+            worst_day,
+            overall_lift,
+        }
+  - }
+  - 
+  - /// Count of surprise (non-predicted scored) files for a validation event.
+  - /// ValidationEvent does not persist `surprises` count directly; we recover it
+  - /// by subtracting hits from total_changed (total_changed = hits + surprises).
+  ... (5 more lines)
+
+Now let me check the format_accuracy_report to see if it uses overall_lift. Let me look at it.
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "overall_lift\|format_accu… ✓ (3ms)
+
+The `format_accuracy_report` doesn't display overall_lift. The task requires showing a new report line like "Lift: high-risk files break at X.X× the baseline rate". Let me look at the format_accuracy_report function.
+
+
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:170..220 ✓ (0ms)
+
+I need to add a report line for the lift. Let me add a "Lift" row. Let me update the format function to include it.
+
+
+  ╭─ Turn 28 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:198..216 ✓ (1ms)
+
+The box has {:<13} and {:<25} widths. Let me add a Lift row. Let me construct the lift_str first and add a row.
+
+Let me look at the exact format string lines 198-205 to add a row properly.
+
+
+  ╭─ Turn 29 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (27 → 33 lines)
+        let worst_str = match stats.worst_day {
+            Some((day, pct)) => format!("Day {day} ({pct:.0}%)"),
+            None => "—".to_string(),
+  +     };
+  +     let lift_str = match stats.overall_lift {
+  +         Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+  +         _ => "—".to_string(),
+        };
+    
+        format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
+  -          {BOLD}  │{RESET} Trend:        {:<25}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} Trend:        {:<16}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Best day:     {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  ╰─────────────────────╯{RESET}\n",
+            stats.total_validations,
+  ... (8 more lines)
+ ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+The bottom border uses more dashes. Let me get the exact text from the file.
+
+
+  ╭─ Turn 30 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:196..226 ✓ (0ms)
+
+Let me do this in two edits: first add the lift_str before the `format!`, then modify the format string body.
+
+
+  ╭─ Turn 31 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (18 → 25 lines)
+  +     let lift_str = match stats.overall_lift {
+  +         Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+  +         _ => "—".to_string(),
+  +     };
+  + 
+        format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
+  -          {BOLD}  │{RESET} Trend:        {:<25}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} Trend:        {:<16}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Best day:     {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  ╰────────────────────────────╯{RESET}\n",
+            stats.total_validations,
+            format!(
+  ···
+            trend_str,
+            best_str,
+  ... (4 more lines)
+ ✓ (1ms)
+  +     let lift_str = match stats.overall_lift {
+  +         Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+  +         _ => "—".to_string(),
+  +     };
+  + 
+        format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+  ... (13 more lines)
+
+Now let me check the test in commands_risk_accuracy.rs that checks the report to make sure it still passes, and check if there are tests for the lift. Let me look at the tests around line 455+.
+
+
+  ╭─ Turn 32 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:455..515 ✓ (1ms)
+
+

@@ -1,0 +1,305 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status ✓ (10ms)
+
+Let me look at the relevant code. First, let me understand the Task 1 changes that just landed.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "is_scored_file\|all_ranke… ✓ (5ms)
+
+Let me look at the key functions in detail.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1800..1930 ✓ (2ms)
+
+Now I need to understand where `total_scored` is computed and how the validation event JSON is constructed. Let me look at the validation event building in `commands_risk.rs` (replay_validate_core, around line 2216-2360) and in `commands_risk_snapshots.rs`.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2205..2365 ✓ (2ms)
+
+Now let me look at `write_validation_event` in commands_risk_snapshots.rs.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "write_validation_event\|f… ✓ (4ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:170..260 ✓ (1ms)
+
+Now let me look at the `ValidationEvent struct and parse_validation_events / parse_rich_validation_events` in commands_risk_snapshots.rs (around lines 355-400).
+
+
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:340..420 ✓ (1ms)
+
+Now let me look at compute_accuracy_stats and format_accuracy_report in commands_risk_accuracy.rs.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_accuracy_stats\|f… ✓ (4ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:14..174 ✓ (1ms)
+
+Now I have a clear picture. Let me plan the changes:
+
+1. **Persist `total_scored` and `scored_broke` on validation events.** The `write_validation_event` function needs to accept these new optional fields. The event writer in `commands_risk_snapshots.rs` builds the JSON. And `ValidationEvent` struct needs the new optional fields, parsed backward-compatibly.
+
+2. **`compute_validation` needs to compute the lift-related counts.** But `compute_validation` doesn't know `total_scored. total_scored` = `all_ranked.len()`, which is the whole scored population. `scored_broke` = scored source files in the broke set.
+
+Let me reconsider. The task says:
+• `predicted_broke` = hits (already known)
+• `total_scored = all_ranked.len()` (the whole population the scorer could rank)
+• `scored_broke` = count of scored source files (src/**/*.rs) in the broke set = `hits + surprises.len()`
+
+But `compute_validation` only gets `all_ranked` optionally, and only for rank info. The `total_scored` needs `all_ranked.len()`, which isn't available when `all_ranked is None`. 
+
+The task's guidance is "When the fields are absent (old events), fall back to computing what's derivable and treat the lift as unknown rather than crashing." So `total_scored/scored_broke` should be optional.
+
+Now, let me add optional fields to the `ValidationEvent struct and to write_validation_event`. Let me think about the flow:
+
+• `write_validation_event` gets called from `replay_validate_core` (in commands_risk.rs) and from `auto_validate_after_failure_to` (in commands_risk_snapshots.rs). 
+
+Let me check `auto_validate_after_failure_to and its call to write_validation_event`.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:288..363 ✓ (1ms)
+
+Now I have full understanding. Let me plan the design.
+
+The total_scored/scored_broke are only derivable in the `replay_validate_core` path (where `all_ranked` is passed and gives `total_scored = all_ranked.len()). The auto_validate_after_failure_to` path doesn't have `all_ranked`. So I'll add optional parameters.
+
+Let me add:
+1. `write_validation_event` — add two optional params: `total_scored: Option<usize>, scored_broke: Option<usize>`. Emit them only when `Some`. To keep call sites simple, I'll make them `Option<usize>` params but that changes all call sites. Let me instead make the lift computation happen where all_ranked is available.
+
+Actually, let me think simpler. The task says: "Predicted breakage rate = `hits / predicted_count`; the baseline breakage rate = `scored_broke / total_scored`. The lift factor = flagged_rate / baseline_rate."
+
+I'll compute `total_scored and scored_broke` inside `replay_validate_core` where all_ranked is available. `total_scored = all_ranked.len(). scored_broke = hits.len() + surprises.len()` (since surprises are already filtered to scored files by `is_scored_file`, and hits are by definition predicted files which are scored files).
+
+Then pass them into `write_validation_event` and persist as optional JSON fields. For the `auto_validate_after_failure_to` path (no all_ranked), pass `None`/None.
+
+Then add optional fields `total_scored` and scored_broke to `ValidationEvent` struct.
+
+Then in `compute_accuracy_stats`, aggregate the lift across events that carry the fields.
+
+Let me design carefully to minimize churn. I'll add helper to write the optional fields.
+
+Let me first check the `ValidationEvent` usages in the tests in commands_risk_accuracy.rs to know the struct construction.
+
+Looking at tests, they construct `ValidationEvent` directly (e.g., lines 185-200). Adding new struct fields will break those unless I add `..Default::default()` or update. Let me check the test constructors.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:169..249 ✓ (1ms)
+
+Many tests construct ValidationEvent directly. To avoid breaking all of them, I'll make the new fields optional and add them with .. spread... but they're constructed inline. Adding new fields will break all constructions.
+
+The cleanest approach: use optional fields with `..Default::default()` — but that requires `ValidationEvent` to derive `Default`, and then breaks the .. placements across many tests. Actually they don't use `..`, they fully list fields. Adding two fields breaks all.
+
+Let me add the fields and update all direct constructions with `..Default::default()` (add `Default` derive) OR add them explicitly. Since there are many tests, deriving `Default and using ..Default::default()` on each construction is the least invasive. But I need to check how many direct constructions exist.
+
+Let me count all `ValidationEvent {` constructions.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "ValidationEvent {" src/ … ✓ (13ms)
+
+Let me count the direct constructions in tests (excluding struct definition and parse):
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "ValidationEvent {" src/c… ✓ (4ms)
+
+Let me get a cleaner count of `ValidationEvent {` literals (excluding `DetailedValidationEvent and RichValidationEvent` and the struct def):
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "ValidationEvent {" src/c… ✓ (4ms)
+
+There are many direct constructions in the accuracy tests (23 instances). To avoid touching all of them, I'll add the two fields as optional and use `..Default::default()` — but that still requires editing every construction to add `..Default::default()`.
+
+The cleanest minimal-churn approach: derive Default on `ValidationEvent and add ..Default::default()` at the end of each construction. But there are ~23 in accuracy tests + 1 in snapshots. That's a lot of edits but mechanical.
+
+Actually, a simpler approach that avoids touching all those tests: keep `ValidationEvent` as-is with the new optional fields having a default via Default derive, and update each constructor. Let me just do the derive + spread approach since it's the most robust.
+
+Let me look at how many exact constructions there are to edit. Let me use sed to add `..Default::default()` to all `ValidationEvent {` blocks. Actually they're multiline. Let me instead use a targeted approach.
+
+Let me look at all the constructors in accuracy tests precisely:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "ValidationEvent {" src/co… ✓ (3ms)
+
+23 constructions. Rather than editing each to add `..Default::default(), I'll derive Default` and add the spread to each `ValidationEvent {`'s closing `}`. That's hard to do reliably.
+
+Alternative approach: **make the new fields optional with serde defaults and only populate them via the parse path and the replay path, keeping the struct fields with clear defaults.** But the struct construction itself breaks.
+
+Let me reconsider. The task says fields are optional and backward-compatible. The struct is `#[derive(...)]`? Let me check what's on the struct and Just derive Default and add ..Default::default() to each constructor. This is the standard, explicit way.
+
+Let me check if there's a simpler pattern - maybe I add the fields but instead edit every construction with `..Default::default()`. I'll do this efficiently with a Python/sed script that finds each `ValidationEvent { block and adds ..Default::default()` before the closing }.
+
+Actually, the cleanest robust approach given 23 sites: derive `Default and append \n            ..Default::default()\n` before the closing brace of each. But indent varies. Let me just do it manually via edit to reduce risk — but 23 edits is a lot.
+
+Let me write a Python script to add `..Default::default() to every ValidationEvent {` literal in the two files. The pattern: each literal ends with } on its own line, but there may be nested. Hmm, these are simple flat structs though.
+
+Let me look at the exact closing pattern. E.g.:
+```
+        let events = vec![ValidationEvent {
+            day: 110,
+            hit_count: 3,
+            total_changed: 5,
+            accuracy_pct: 60.0,
+        }];
+```
+
+The closing is `        }];` or         },. Let me write a Python script that tracks braces.
+
+Actually, a much simpler and cleaner approach: instead of adding fields to `ValidationEvent` struct, I can add a **separate optional method** to store the lift on the struct via a HashMap keyed by day... no, too hacky.
+
+Let me just derive Default and update the constructors with a Python script that handles brace counting properly.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (38 lines) ✓ (26ms)
+
+Wait — I need to be careful. This script edits the struct construction inside the accuracy test that already uses `..Default::default()`? No, none did before. But it would also match the struct definition `pub(crate) struct ValidationEvent {` at line 361 in snapshots.rs! That would be wrong. Let me check what happened.
+
+Also, the script would match `ValidationEvent {` where the body might not be flat. Let me verify the results carefully.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "ValidationEvent {" src/co… ✓ (5ms)
+
+The script incorrectly inserted ..Default::default() at line 362 inside the struct definition (after `pub(crate) struct ValidationEvent {`). I need to revert that and only apply to the constructor at line 392. Let me fix the snapshots.rs file.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:360..410 ✓ (1ms)
+
+The script messed up both the struct definition and the constructor in snapshots.rs (the constructor at 392 now only has `..Default::default()` but its fields got erased? No wait — looking again, lines 392-394 the constructor body originally had fields day/hit_count/total_changed/accuracy_pct but now they're gone). 
+
+Wait, that's strange. Let me re-examine. The script counted braces and the constructor in `parse_validation_events` at line 392 — it inserted `..Default::default()` at line 393. But where did the original fields go? 
+
+Oh I see — the script's brace counting may have matched incorrectly and consumed lines. Let me just revert snapshots.rs entirely and redo it manually. Let me check git diff for snapshots.rs.
+
+Actually wait, the original at line 392-400 had fields. Let me check git to see the original. Since I ran the script on both files, both may be corrupted. Let me revert both and redo carefully.
+
+But careful: the accuracy.rs file — did the script corrupt it too? Its ValidationEvent { literals are flat and end with }]; or },. The brace counting should have been correct there, but I need to verify it didn't have issues with nested braces. Let me check git diff stats.
+
+Let me revert both files and redo this more carefully, manually.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git checkout -- src/commands_risk_… ✓ (7ms)
+
+Good, reverted cleanly. Let me look at the snapshots.rs constructor again (original lines 392-400):
+
+The original was:
+```rust
+        events.push(ValidationEvent {
+            day,
+            hit_count: hits,
+            total_changed,
+            accuracy_pct,
+        });
+```
+
+Wait, but earlier I saw the script had erased those fields. That means my script's brace counting was buggy and consumed them. That's alarming — I shouldn't rely on the script. Let me redo this with a much simpler, safer approach.
+
+**Decision**: Instead of adding fields to `ValidationEvent` directly (which forces touching 23 test constructors), I'll take a lighter approach. I'll add the two optional fields to `ValidationEvent` AND derive `Default` on it, then only update the *parse* constructor (1 site in snapshots.rs) plus add `..Default::default()` to each test constructor in accuracy.rs. 
+
+But since a script corrupted things, let me do the accuracy.rs constructor edits with a cleaner, verified approach. Let me first check — do the accuracy.rs test constructors need the fields? They're testing trend/stats aggregation. If I add fields with `..Default::default()`, the existing tests still work (new fields = None).
+
+Let me count exactly: 23 constructor sites in accuracy.rs, all ending flat. I'll do a Python script with proper verification, but this time I'll ALSO handle the struct-def false-positive by skipping lines containing "struct ValidationEvent".
+
+Let me rewrite the script more carefully and verify the output with compile.
+
+Actually, let me reconsider whether I even need `..Default::default()`. The `ValidationEvent` struct is constructed directly in:
+• snapshots.rs parse (1 site) — I'll add fields explicitly
+• accuracy.rs tests (23 sites) — need spread
+
+That's the reality. Let me do it cleanly with a verified script. I'll derive Default and add the spread.
+
+Let me write the script to only target accuracy.rs test constructors (the struct def is in snapshots.rs, so no risk of matching there for accuracy). For snapshots.rs I only have 1 constructor to edit manually.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (34 lines) ✓ (25ms)
+
+Let me verify the result by checking a couple of constructors in accuracy.rs:
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '184,202p' src/commands_ris… ✓ (5ms)
+
+The script **erased the fields** again! It just replaced the constructor body with `..Default::default()`. The brace-counting logic is broken — it's consuming the lines between the opening and closing because of how it handles the depth loop. Let me look at the actual corruption:
+
+The committed change turned:
+```rust
+        let events = vec![ValidationEvent {
+            day: 110,
+            hit_count: 3,
+            total_changed: 5,
+            accuracy_pct: 60.0,
+        }];
+```
+into:
+```rust
+        let events = vec![ValidationEvent {
+        ..Default::default()
+        }];
+```
+
+Wait, that's actually syntactically valid (with `..Default::default()` replacing the fields). The fields are gone but it compiles as long as Default is derived. So functionally OK but I lost the explicit field values! The tests assert `day: 110 etc. With ..Default::default()`, day would be 0, hit_count 0... breaking the test assertions.
+
+This is bad. I erased real test data. Let me revert accuracy.rs and take a completely different, safer approach.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git checkout -- src/commands_risk_… ✓ (8ms)
+
+OK, clean again. Let me think differently to minimize churn.
+
+**Key realization**: Rather than editing the 23 test constructors, I can avoid touching them by NOT adding fields directly to ValidationEvent in a way that breaks its struct literal. 
+
+Options:
+1. Add fields + derive Default + add spread to 23 constructors → too churny/risky.
+2. **Make the new optional fields NOT part of the struct literal breaking** — instead store lift data in the struct as optional fields but construct the struct via `parse_validation_events` (only 1 site) and update the 23 accuracy test constructors.
+
+Hmm, either way the 23 test constructors break if I add fields.
+
+**Better approach**: Don't add the lift fields to the ValidationEvent struct at all. Instead, add a separate lightweight `LiftStats`/aggregation computed by a **new function** `compute_lift_stats(events)` that takes the raw events... but the struct doesn't carry total_scored/scored_broke.
+
+Wait — the lift needs `total_scored/scored_broke` per event. These must come from somewhere. The task explicitly says: "Aggregate the lift across events that carry `total_scored`/`scored_broke`."
+
+So the `ValidationEvent` struct **must** carry these two optional fields. That means the 23 test constructors break. There's no way around it unless I use `..Default::default()`.
+
+So I will add the two fields as `Option<usize> (defaulting to None`), derive Default, and add `..Default::default()` to each of the 23 test constructors in accuracy.rs — **without erasing the existing fields**. The problem was my script erased fields. Let me fix the script to ADD the spread while KEEPING the existing fields.
+
+The issue with my script: when it found the closing brace, it appended the spread + closing line, and set i = j (skipping the consumed lines) — but it had already appended those lines to out in the loop iteration... no wait. Let me re-trace.
+
+Actually the bug: the script appends lines[i] for the opening line, then does the brace-count loop to find the closing. But it never appends the *body* lines (between opening and closing) — it skips them by setting i = j. That's the bug. I need to append ALL lines from i to j (the whole block), and insert the spread just before the closing line.
+
+Let me fix the script properly: iterate the block, append every line, and insert ..Default::default() before the closing line.</p>The script bug was skipping the body lines. Let me write a correct version that keeps all body lines and just inserts the spread before the closing brace.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (38 lines) ✓ (26ms)
+
+Now the fields are preserved and `..Default::default()` is inserted correctly. Let me verify all 23 and check for a few others (including the multiline vec ones):
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -c "Default::default" src/com… ✓ (5ms)
+
+

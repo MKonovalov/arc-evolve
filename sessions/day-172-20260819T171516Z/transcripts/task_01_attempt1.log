@@ -1,0 +1,183 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by exploring the relevant code to understand the current implementation.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_validation\|is_sc… ✓ (7ms)
+
+Let me look at the `compute_validation` function and the `compute_file_risk_scores` to understand how files are scored.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1800..1900 ✓ (2ms)
+
+Now let me look at how `compute_file_risk_scores` collects `src/*/.rs` files to understand the population predicate.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:619..699 ✓ (1ms)
+
+So the scored population is `src/**/*.rs` — including `src/*.rs` and `src/format/*.rs`. The task says the predicate should be "starts with src/ and ends with .rs". Let me check the `ValidationResult` struct and existing tests plus how surprises are used in accuracy computation.
+
+Let me look at how accuracy is computed from surprises (the task mentions total_changed / accuracy).
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "total_changed\|surprises\… ✓ (5ms)
+
+The accuracy is computed in `compute_validation callers: total_changed = hits.len() + surprises.len()` and accuracy = hits/total_changed. So filtering surprises to only scored files directly addresses the `total_changed`/accuracy concern.
+
+Let me look at the ValidationResult struct definition and how `surprises` is declared.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1785..1815 ✓ (1ms)
+
+Now let me look at the existing tests for compute_validation to understand the test patterns.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2620..2710 ✓ (1ms)
+
+Now I have a clear understanding. Let me make the change. I'll add an is_scored_file helper and filter surprises in `compute_validation`.
+
+Let me first make my first concrete change (add the helper + filter), then add a test.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (12 → 23 lines)
+  + /// Whether a path is a risk-scorable source file — i.e. in the same population
+  + /// the risk scorer ranks (`src/**/*.rs`). The scorer only ranks source files,
+  + /// so non-source churn (`DAY_COUNT`, `journals/JOURNAL.md`, `.arc/...`,
+  + /// `Cargo.lock`, `README.md`, etc.) must not count as a validation surprise:
+  + /// the scorer could never predict those files, so including them falsely deflates
+  + /// accuracy. This predicate matches the population collected by
+  + /// `compute_file_risk_scores` / the coupling tracker.
+  + fn is_scored_file(path: &str) -> bool {
+  +     path.starts_with("src/") && path.ends_with(".rs")
+  + }
+  + 
+    /// Compute validation by comparing predicted top-10 files against
+    /// the set of files that actually broke.
+    ///
+ ✓ (1ms)
+  + /// Whether a path is a risk-scorable source file — i.e. in the same population
+  + /// the risk scorer ranks (`src/**/*.rs`). The scorer only ranks source files,
+  + /// so non-source churn (`DAY_COUNT`, `journals/JOURNAL.md`, `.arc/...`,
+  + /// `Cargo.lock`, `README.md`, etc.) must not count as a validation surprise:
+  + /// the scorer could never predict those files, so including them falsely deflates
+  + /// accuracy. This predicate matches the population collected by
+  + /// `compute_file_risk_scores` / the coupling tracker.
+  + fn is_scored_file(path: &str) -> bool {
+  ... (6 more lines)
+
+Now update the surprises filter:
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (4 → 8 lines)
+        let mut surprises: Vec<(String, Option<usize>)> = broke_files
+            .iter()
+            .filter(|f| !predicted_set.contains(f))
+  +         // Only files the scorer could actually rank count as surprises;
+  +         // non-source churn (meta files) can never be predicted, so it must
+  +         // not deflate accuracy.
+  +         .filter(|f| is_scored_file(f))
+            .map(|f| {
+ ✓ (1ms)
+        let mut surprises: Vec<(String, Option<usize>)> = broke_files
+            .iter()
+            .filter(|f| !predicted_set.contains(f))
+  +         // Only files the scorer could actually rank count as surprises;
+  +         // non-source churn (meta files) can never be predicted, so it must
+  +         // not deflate accuracy.
+  +         .filter(|f| is_scored_file(f))
+            .map(|f| {
+
+Now let me add a test. Let me add it after test_compute_validation_no_breakage:
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (10 → 34 lines)
+            assert_eq!(result.hits.len(), 0);
+            assert_eq!(result.clean.len(), 2);
+            assert_eq!(result.surprises.len(), 0);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_validation_filters_non_source_churn() {
+  +         // A real source file that broke and was NOT predicted => a surprise.
+  +         let predicted = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+  +         let mut broke = std::collections::HashSet::new();
+  +         broke.insert("src/d.rs".to_string()); // scored surprise
+  +         // Meta files the scorer can never rank => must NOT be surprises.
+  +         broke.insert("DAY_COUNT".to_string());
+  +         broke.insert("journals/JOURNAL.md".to_string());
+  +         broke.insert(".arc/risk_snapshots.jsonl".to_string());
+  +         broke.insert("Cargo.lock".to_string());
+  +         broke.insert("README.md".to_string());
+  + 
+  +         let result = compute_validation(&predicted, &broke, None, 10);
+  +         // Only the real source file is a surprise.
+  ... (8 more lines)
+ ✓ (1ms)
+            assert_eq!(result.hits.len(), 0);
+            assert_eq!(result.clean.len(), 2);
+            assert_eq!(result.surprises.len(), 0);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_validation_filters_non_source_churn() {
+  +         // A real source file that broke and was NOT predicted => a surprise.
+  ... (13 more lines)
+
+Now let me run the full verification suite:
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (17.5s)
+
+Clippy is clean. Now build and test:
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -5 && carg… ✓ (1m 24s)
+
+All tests pass. Let me check the fmt check explicitly and verify my new test ran:
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt -- --check && echo "FMT … ✓ (1.1s)
+
+All checks pass (build, test, clippy, fmt). The change is complete and correct. This task is Kind: evolve with no product-facing surface change, so docs don't need updating (the behavior is internal risk calibration). Let me commit.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add -A && git commit -m "Day 1… ✓ (17ms)
+
+Committed. 
+
+## Summary
+
+I implemented the task: **de-noising risk validation by filtering non-source churn out of accuracy**.
+
+### Changes (in `src/commands_risk.rs`)
+
+1. **Added `is_scored_file(path: &str) -> bool`** — returns true only for risk-scorable source files (`starts_with("src/") && ends_with(".rs")`), matching the population the scorer ranks in `compute_file_risk_scores`.
+
+2. **Filtered surprises in `compute_validation`** — the surprises iterator now additionally requires `is_scored_file(f)`, so meta files (DAY_COUNT, `journals/JOURNAL.md, .arc/..., Cargo.lock, README.md`, etc.) no longer count as surprises. Since accuracy = `hits / (hits + surprises)`, excluding non-source churn directly removes the false deflation. Hits are untouched (predicted files are already .rs); the all_ranked rank lookup only contains scored files so it stays correct.
+
+3. **Added a regression test** `test_compute_validation_filters_non_source_churn` — confirms a real source file that broke appears as a surprise while five meta files do not, and that total_changed/accuracy excludes them.
+
+The previously-recorded 10% validation event stays in the JSONL as historical data (this only affects newly recorded events) — no history rewritten.
+
+### Verification
+• `cargo build` ✅
+• `cargo test` ✅ (88 passed, 0 failed)
+• `cargo clippy --all-targets -- -D warnings` ✅
+• `cargo fmt -- --check` ✅
+
+Kind is evolve — no product-facing surface changes, so no doc updates needed.
+
+

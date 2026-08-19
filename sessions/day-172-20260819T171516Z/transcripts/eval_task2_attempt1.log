@@ -1,0 +1,164 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll evaluate this task by examining the diff and reasoning about whether it correctly implements the discriminative breakage-rate signal.
+
+Let me analyze the implementation against the task requirements:
+
+1. **Lift measurement in `replay_validate_core`** — persists `total_scored` and `scored_broke`. ✓
+2. **Backward-compatible parsing** — new fields are `Option<usize>`, parsed with `.map()`, absent → None. ✓
+3. **`compute_accuracy_stats`** — aggregates lift, skips events without fields, guards division by zero. ✓
+4. **`format_accuracy_report`** — adds Lift line, "—" when no lift. ✓
+5. **Unit tests added** for both.
+
+Let me verify some potential concerns:
+
+**Concern 1:** The task says `predicted_broke` = hits, `total_scored = all_ranked.len(), scored_broke` = count of scored files that broke (= `hits + surprises.len()` if surprises filtered to scored files).
+
+Looking at the code in `replay_validate_core`:
+```rust
+let total_scored = all_ranked.map(|ranked| ranked.len());
+let scored_broke = if hits.is_empty() && surprises.is_empty() {
+    None
+} else {
+    Some(hits.len() + surprises.len())
+};
+```
+
+Wait — there's a subtle logic bug potential here. `scored_broke = hits + surprises.len()` assumes ALL surprises are scored files. The task says "if Task 1 landed, surprises are already filtered to scored files, so `scored_broke = hits + surprises.len()`". But here it's computed unconditionally. Let me check whether `compute_validation` filters surprises to scored files.
+
+Also, `scored_broke` is only computed when `!hits.is_empty() || !surprises.is_empty(), i.e., it's None` when nothing broke. That's OK — baseline alone with no broke would make flagged_rate 0, and lift would be 0... but actually it's set to None when nothing broke. That's a reasonable conservative choice.
+
+**Concern 2:** Missing test for `compute_validation`. The task explicitly asks:
+│ `compute_validation` with a broke set that hits some predicted files and some non-predicted scored files → assert `total_scored` and scored_broke are computed correctly and the lift is a plausible number.
+
+The diff does NOT add such a test. The task asked for unit tests in both:
+• `compute_validation` (not present in diff — the tests added are only in `commands_risk_accuracy.rs`)
+• `compute_accuracy_stats` (present)
+
+Let me verify by checking the actual files. Let me look at the code to verify.
+
+Let me check whether a test was actually added for `compute_validation/replay_validate_core` and whether `is_scored_file` / surprise filtering holds.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git diff H…  ▶ search 'total_scored|scored_broke|is_scored_file|scored_broke|fn com…' in src/commands_risk.rs ✓ (3ms)
+ ✓ (12ms)
+  2 tools completed in 3.2s (2 ✓)
+
+The search in the file found nothing, which is odd given the diff. Let me check the current state of the files — maybe the search ran in the wrong directory or the file content differs. Let me look directly.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "total_scored\|scored_brok… ✓ (5ms)
+
+The earlier search failed because I ran it against the current HEAD state — but the files do contain the changes. Let me check `replay_validate_core` context and whether `is_scored_file` is applied to surprises, plus whether a test for `compute_validation`/replay is present.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1814,1850p' src/commands_r… ✓ (6ms)
+
+Good. So the surprises ARE filtered to `is_scored_file` (line 1830-1831). This means `scored_broke = hits + surprises.len()` is correct — because all surprises are scored files, and hits are predicted files that broke (which are also scored files, since predictions come from `all_ranked` scored files). Good, the `scored_broke` logic is sound.
+
+Now, the key concern: the task explicitly required a unit test for `compute_validation`:
+│ `compute_validation` with a broke set that hits some predicted files and some non-predicted scored files → assert total_scored and scored_broke are computed correctly and the lift is a plausible number.
+
+Let me check whether any test was added for `replay_validate_core/compute_validation` in the diff. The diff only shows test changes in `commands_risk_accuracy.rs`. Let me verify there's no new test in `commands_risk.rs`.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show HEAD --stat && echo "=== … ✓ (12ms)
+
+No new tests were added in `commands_risk.rs (no #[test]` additions there). The diff's test changes are all in `commands_risk_accuracy.rs` — it only modified existing tests (adding `..Default::default()`) but let me verify whether it added any NEW test for the lift aggregation. Looking at the diff, I see it modified existing tests but I need to confirm a new test specifically for the lift with a mix of events (some with fields, some without) was added.
+
+Let me look at the test module in `commands_risk_accuracy.rs`.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show HEAD -- src/commands_risk… ✓ (5ms)
+
+Hmm, the grep returned nothing / exit 1. Let me check the actual test module content.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '230,500p' src/commands_ris… ✓ (6ms)
+
+Now I have a full picture of the test module. Let me assess against the task's required tests:
+
+**Task required test for `compute_validation` (in commands_risk.rs):**
+│ `compute_validation` with a broke set that hits some predicted files and some non-predicted scored files → assert total_scored and scored_broke are computed correctly and the lift is a plausible number.
+
+**This test was NOT added.** The diff adds no test for `compute_validation/replay_validate_core in commands_risk.rs`. There's a `test_format_accuracy_report_with_data` that manually constructs AccuracyStats with `overall_lift: Some(2.5)` and checks format — but that's not a real aggregation test, it's a hard-coded struct. 
+
+Wait — actually the task's test requirement was somewhat redundant: `compute_validation` doesn't itself compute `total_scored/scored_broke` (those are computed in `replay_validate_core`, which is the wrapper). And `replay_validate_core` requires git state and a real snapshot file, making it hard to unit-test. Let me re-read.
+
+The task says "in `replay_validate_core / compute_validation`". The actual computation of `total_scored`/`scored_broke` was placed in `replay_validate_core, not compute_validation`. So the task's requested test for "compute_validation with...assert total_scored and scored_broke" doesn't exactly map, since those aren't computed there. It's a slightly awkward ask.
+
+**Task required test for `compute_accuracy_stats`:**
+│ `compute_accuracy_stats` with a mix of events (some carrying the new fields, some not) → assert absent-field events are handled without panic and the aggregated lift is right.
+
+**This test was NOT added.** None of the tests in `commands_risk_accuracy.rs test the lift aggregation with mixed events. test_format_accuracy_report_with_data` hand-constructs an `AccuracyStats` with a fixed lift value rather than computing the aggregate. There's no test calling `compute_accuracy_stats` with events carrying `total_scored`/scored_broke to verify the aggregated lift.
+
+So the task's two explicitly-required unit tests were NOT added. The existing tests were merely modified to add `..Default::default()` (because the new `Option` fields needed Default derive) and one report-format test was updated to include the lift field manually.
+
+This is a meaningful gap. The task explicitly listed these tests under "Verify" as a requirement ("Add unit tests:"). The implementation logic itself appears correct and the code compiles/tests pass, but the required tests demonstrating the lift computation are missing.
+
+Let me verify the logic once more to be confident the actual feature works, then judge on the missing tests.
+
+The `compute_accuracy_stats` lift aggregation:
+• For usable events (all three fields present): sums hit_count, predicted_count, total_scored, scored_broke.
+• flagged_rate = sum(hits)/sum(predicted); baseline_rate = sum(scored_broke)/sum(total_scored); lift = ratio.
+
+This is a reasonable aggregation (pooled rates, matching how the task described aggregating across events). Division guard handles zero. Good.
+
+The `replay_validate_core computation: scored_broke = hits + surprises` since surprises are pre-filtered to scored files, and hits are predicted files (from scored population) that broke. `total_scored = all_ranked.len()`. Correct.
+
+Formatting: adds Lift line, "—" when None. Correct and backward-compatible.
+
+So the feature implementation is correct and backward-compatible. But the two explicitly-required unit tests were not added. This is a notable miss on a task requirement. The task's Verify section was explicit and mandatory ("Add unit tests"). 
+
+Let me weigh: The task explicitly requires those tests. The developer added none of the two requested new tests (only modified existing ones to compile). The core logic is untested. Per the instructions "FAIL only if: The implementation doesn't match the task description... Tests pass but the feature clearly doesn't work." The feature likely works (logic is sound), but the task explicitly required unit tests that are missing. 
+
+The testing gap is substantial — the very heart of this task (lift aggregation correctness, absent-field handling without panic) is what the required test was supposed to guard, and it wasn't added. Given the task treated these tests as a hard requirement, I'll mark this FAIL but note the logic looks correct, so it's primarily a missing-tests issue.
+
+Actually, let me reconsider carefully. The instructions say to be strict but fair, and to fail only if "the implementation doesn't match the task description." The task description explicitly lists unit tests as part of "What" / "Verify" requirements. Missing required tests = implementation doesn't fully match the task. This is a discrete, verifiable miss, not a style preference. I'll FAIL with the missing-tests reason.
+
+Let me double-check there isn't a compute_validation test elsewhere in commands_risk.rs that I might have missed.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn test\|#\[test\]" src/c… ✓ (5ms)
+
+The #[test] matches in commands_risk.rs are all within the top-of-file doc-comment describing metrics — not actual test functions in a test module. So `commands_risk.rs has no actual #[test]` functions at all, confirming no `compute_validation` test was added there.
+
+Let me verify the `replay_validate_core`'s lift computation doesn't have any test coverage either, and confirm the `total_scored` persisted correctly. I've seen enough.
+
+**Summary of assessment:**
+
+The feature implementation is logically correct:
+• ✅ `total_scored = all_ranked.len()` and `scored_broke = hits + surprises` (correct given surprises are pre-filtered to scored files via is_scored_file)
+• ✅ Backward-compatible optional fields (`Option<usize>`), parsed with .map(), old events → None, no crash
+• ✅ Lift aggregation in compute_accuracy_stats with pooled rates and division-by-zero guard, skips events without the fields
+• ✅ Report line added with "—" fallback
+• ✅ No rewriting of existing JSONL events (only new events get the optional fields)
+
+**But:** The two unit tests explicitly required by the task were NOT added:
+• ❌ No test for `compute_validation/replay_validate_core` asserting total_scored/`scored_broke` correctness
+• ❌ No test for `compute_accuracy_stats` with a mix of events (some with fields, some without) asserting the aggregated lift and absent-field handling
+
+The only "lift test" is `test_format_accuracy_report_with_data` which hand-constructs `AccuracyStats` with a hard-coded `overall_lift: Some(2.5)` — it verifies formatting but not the actual aggregation logic or backward-compat handling.
+
+This is a clear miss on an explicit task requirement. The core logic being untested (especially the absent-field backward-compat path the task specifically called out) is exactly what the required tests were meant to guard. I'll FAIL on the missing required tests.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ write session_plan/eval_task_2.md (2 lines) ✓ (0ms)
+
+Verdict written. 
+
+FAIL — The lift measurement feature itself is implemented correctly and backward-compatibly, but the task explicitly required two unit tests that were not added:
+1. A `compute_validation/replay_validate_core` test asserting total_scored and scored_broke are computed correctly.
+2. A `compute_accuracy_stats` test with mixed events (some with the new fields, some without) verifying the aggregated lift and that absent-field events don't panic.
+
+The only lift test (`test_format_accuracy_report_with_data`) hand-constructs a hard-coded `AccuracyStats{overall_lift: Some(2.5)}` — it verifies formatting but not the aggregation or the backward-compat path the task specifically called out. Build and existing tests pass, but the required new tests are missing.
+
+

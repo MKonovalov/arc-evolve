@@ -1,0 +1,631 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+Let me look at the relevant files to understand the errors.
+
+
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:340..420  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:350..400 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 631ms (2 ✓)
+
+The tests use `..Default::default() which requires ValidationEvent to implement Default`. The user added tests that construct events with the new fields but using `..Default::default()`. Let me look at the full ValidationEvent struct and where it's used to add the new fields.
+
+Let me check the current state of the implementation - the user was implementing the task and added tests but the struct doesn't yet have total_scored/`scored_broke fields or Default`. Let me look at the broader picture.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:356..476 ✓ (1ms)
+
+Now let me understand the full scope. The task is to add total_scored and `scored_broke fields to ValidationEvent`, plus the lift computation. Let me look at the current testing code in commands_risk_accuracy.rs to see what the user wrote, and the relevant methods.
+
+Let me look at the full test module in commands_risk_accuracy.rs and the compute_accuracy_stats/format_accuracy_report functions.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:1..161 ✓ (1ms)
+
+Let me see the rest of the file and the test module.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:160..440 ✓ (2ms)
+
+Now I have the full picture. The tests use `..Default::default()`. The simplest fix per the compiler suggestion is to add `#[derive(Default)] to ValidationEvent`. This requires the fields to implement `Default` (they do: u32, usize, f64 all implement Default).
+
+But the task also wants me to add the new fields (`total_scored, scored_broke`) and the lift computation. Let me check the current state of the task implementation to understand what's already been done versus what needs to be added. Let me look at `replay_validate_core / compute_validation` in commands_risk.rs.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'compute_validation|replay_validate_core|is_scored_file|write…' in /home/runner/work/arc-evolve/arc-evolve/src (*.rs) ✓ (10ms)
+
+Let me search more broadly.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'replay_validate|is_scored_file|write_validation_event|comput…' in /home/runner/work/arc-evolve/arc-evolve/src (*.rs) ✓ (11ms)
+
+Hmm, no matches. Let me check the structure of the commands_risk files. The task mentions functions that may not exist yet. Let me check what the actual functions are called in commands_risk.rs and commands_risk_snapshots.rs.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn " src/commands_risk.rs…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn \|pub.sub\|write_valid… ✓ (3ms)
+ ✓ (7ms)
+  2 tools completed in 955ms (2 ✓)
+
+The task implementation is not yet fully present. `compute_validation` exists at line 1824 and `replay_validate_core` at 2216. Let me read those, plus `write_validation_event` at line 190 in snapshots.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1814..1904  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:190..310 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 771ms (2 ✓)
+
+Now let me read `replay_validate_core and replay_validate_last_snapshot` to understand where validation events are computed with `all_ranked and broke` set.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2200..2330 ✓ (1ms)
+
+Now I understand the full picture. The user's implementation is partially done: tests were added using `..Default::default()` but the actual task (adding total_scored/`scored_broke` fields + lift) wasn't fully implemented, AND the `ValidationEvent doesn't have #[derive(Default)]`.
+
+The immediate compile errors are about `Default` not implemented. But the task itself is the one I need to complete. Let me implement the full feature:
+
+1. Add `total_scored and scored_broke` optional fields to `ValidationEvent, add #[derive(Default)]`, and make `compute_validation/replay_validate_core` compute and persist them, with backward-compatible parsing.
+2. Add lift aggregation to `compute_accuracy_stats` and report.
+
+Let me look at the `ValidationResult` struct, the `write_validation_event` callers, and understand how total_scored/`scored_broke` should be computed.
+
+The task says:
+• `predicted_broke` = hits
+• `total_scored = all_ranked.len()` (whole population the scorer could rank)
+• scored_broke = count of scored source files in broke set (since surprises are filtered to scored, `scored_broke = hits + surprises.len()`)
+• flagged breakage rate = hits / predicted_count
+• baseline breakage rate = scored_broke / total_scored
+• lift = flagged_rate / baseline_rate (guard div by zero)
+
+Let me check the ValidationResult struct definition and how compute_validation is called from tests (there may be existing tests I shouldn't break).
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct ValidationResult\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "write_validation_event("… ✓ (5ms)
+ ✓ (7ms)
+  2 tools completed in 1.3s (2 ✓)
+
+Let me look at the ValidationResult struct definition and the callers in tests.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1790..1820  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2700..2760 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 4.4s (2 ✓)
+
+Now I have enough understanding. Let me look at how compute_validation is tested with all_ranked (the existing tests) and check for any existing test that uses `all_ranked`.
+
+Let me check the replay_validate_core tests to understand the test infrastructure.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_validation\|repla… ✓ (4ms)
+
+I now have a complete understanding. Let me plan the implementation:
+
+### Plan
+
+1. **`ValidationEvent` struct** (commands_risk_snapshots.rs): Add optional `total_scored: Option<usize> and scored_broke: Option<usize>` fields, add `#[derive(Default)]`.
+2. **`write_validation_event`**: Add two optional params `total_scored: Option<usize>, scored_broke: Option<usize>` and persist them (only when present).
+3. **`parse_validation_events`**: Parse the new fields backward-compatibly.
+4. **`compute_validation` / `replay_validate_core`**: Compute total_scored and `scored_broke`, pass to write.
+5. **`compute_accuracy_stats / format_accuracy_report`**: Aggregate lift.
+6. Add tests.
+
+Wait — the task says "Add two extra counts to persist alongside the existing validation event: `predicted_broke` = hits, total_scored = `all_ranked.len(), scored_broke` = ...". Let me implement total_scored and `scored_broke` as required.
+
+Let me think about where to compute `scored_broke`. In `replay_validate_core, broke_files` is the classified set. The scorer ranks `all_ranked. scored_broke` = count of `src/*/.rs` files in broke set. Since `compute_validation` already computes `result.surprises` filtered by `is_scored_file, and hits` are predicted files (which are all rendered as scored since predictions come from all_ranked which are scored), `scored_broke = hits.len() + surprises.len()`.
+
+But the task also says "reuse the `is_scored_file` predicate". To be safe and to keep `compute_validation`'s signature reasonable, I'll compute `total_scored and scored_broke in replay_validate_core where all_ranked and broke_files` are available.
+
+Let me compute:
+• `total_scored = all_ranked.map(|r| r.len()).unwrap_or(0)` — but all_ranked is `Option<&[String]>`. For the lift to be meaningful, we need this.
+• `scored_broke` = count of `is_scored_file(broke_file)` in broke_files.
+
+Actually per the task: "if Task 1 landed, surprises are already filtered to scored files, so `scored_broke = hits + surprises.len()". So scored_broke = hits.len() + surprises.len()`.
+
+Let me implement. First, add fields to ValidationEvent with `#[derive(Default)]`.
+
+Now, the task's Verify section asks for unit tests on `compute_validation and compute_accuracy_stats`. But the errors shown are only about Default. Let me implement the full feature and add the requested tests.
+
+Let me start. First the ValidationEvent struct + Default derive:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (7 → 15 lines)
+    /// A single parsed validation event from `.arc/risk_validations.jsonl`.
+  + #[derive(Default)]
+    pub(crate) struct ValidationEvent {
+        pub(crate) day: u32,
+        pub(crate) hit_count: usize,
+        pub(crate) total_changed: usize,
+        pub(crate) accuracy_pct: f64,
+  +     /// Total number of scored source files the scorer could rank in this
+  +     /// population (`all_ranked.len()`). Optional for backward-compat: absent on
+  +     /// old events recorded before the lift measurement landed.
+  +     pub(crate) total_scored: Option<usize>,
+  +     /// Count of scored source files that actually broke (hits + scored surprises).
+  +     /// Optional for the same backward-compat reason as `total_scored`.
+  +     pub(crate) scored_broke: Option<usize>,
+    }
+ ✓ (0ms)
+    /// A single parsed validation event from `.arc/risk_validations.jsonl`.
+  + #[derive(Default)]
+    pub(crate) struct ValidationEvent {
+        pub(crate) day: u32,
+        pub(crate) hit_count: usize,
+        pub(crate) total_changed: usize,
+        pub(crate) accuracy_pct: f64,
+  +     /// Total number of scored source files the scorer could rank in this
+  ... (7 more lines)
+
+Now update `parse_validation_events` to parse the new optional fields:
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (12 → 16 lines)
+            let surprises = val["surprises"].as_array().map(|a| a.len()).unwrap_or(0);
+            let total_changed = hits + surprises;
+            let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+  +         let total_scored = val["total_scored"].as_u64().map(|v| v as usize);
+  +         let scored_broke = val["scored_broke"].as_u64().map(|v| v as usize);
+    
+            events.push(ValidationEvent {
+                day,
+                hit_count: hits,
+                total_changed,
+                accuracy_pct,
+  +             total_scored,
+  +             scored_broke,
+            });
+ ✓ (1ms)
+            let surprises = val["surprises"].as_array().map(|a| a.len()).unwrap_or(0);
+            let total_changed = hits + surprises;
+            let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+  +         let total_scored = val["total_scored"].as_u64().map(|v| v as usize);
+  +         let scored_broke = val["scored_broke"].as_u64().map(|v| v as usize);
+    
+            events.push(ValidationEvent {
+                day,
+  ... (6 more lines)
+
+Now update `write_validation_event` to accept and persist the new optional fields. Let me update the signature and JSON.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (11 → 13 lines)
+        accuracy_pct: f64,
+        git_hash_from: &str,
+        git_hash_to: &str,
+  +     total_scored: Option<usize>,
+  +     scored_broke: Option<usize>,
+    ) -> std::io::Result<()> {
+ ✓ (0ms)
+        accuracy_pct: f64,
+        git_hash_from: &str,
+        git_hash_to: &str,
+  +     total_scored: Option<usize>,
+  +     scored_broke: Option<usize>,
+    ) -> std::io::Result<()> {
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (11 → 21 lines)
+  -     let event = serde_json::json!({
+  +     let mut event = serde_json::json!({
+            "ts": ts,
+            "day": day,
+            "trigger": trigger,
+  ···
+            "git_hash_from": git_hash_from,
+            "git_hash_to": git_hash_to,
+        });
+  + 
+  +     // Optional lift-measurement fields — persist only when both are known so
+  +     // old writers (and the pre-lift format) keep producing backward-compatible
+  +     // events. `predicted_broke` is derivable from `hits` and so not stored.
+  +     if let Some(ts_) = total_scored {
+  +         event["total_scored"] = serde_json::json!(ts_);
+  +     }
+  +     if let Some(sb) = scored_broke {
+  +         event["scored_broke"] = serde_json::json!(sb);
+  +     }
+ ✓ (0ms)
+  -     let event = serde_json::json!({
+  +     let mut event = serde_json::json!({
+            "ts": ts,
+            "day": day,
+            "trigger": trigger,
+  ···
+            "git_hash_from": git_hash_from,
+            "git_hash_to": git_hash_to,
+  ... (11 more lines)
+
+Now I need to update the existing callers of `write_validation_event`. There's a caller in commands_risk.rs (line 2260) and test callers in commands_risk_snapshots.rs. Let me update the main caller in `replay_validate_core to pass total_scored and scored_broke`.
+
+First, let me update `replay_validate_core` to compute these values and pass them. Let me view the current section again around 2246-2276.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (25 → 44 lines)
+        let hits: Vec<String> = result.hits.clone();
+        let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+  + 
+  +     // Lift measurement: how often do flagged (predicted-high-risk) files break
+  +     // relative to the baseline over ALL scored files the scorer could rank?
+  +     // - predicted_broke = hits (how many flagged files broke)
+  +     // - total_scored = the whole scored population `all_ranked.len()`
+  +     // - scored_broke = scored source files that broke = hits + scored surprises
+  +     //   (surprises are already filtered to scored files by `compute_validation`).
+  +     // Both are optional: absent when `all_ranked` is unknown (no population to
+  +     // compare against), or when nothing broke. They're persisted for newly
+  +     // recorded events only; old events remain backward-compatible.
+  +     let total_scored = all_ranked.map(|ranked| ranked.len());
+  +     let scored_broke = if hits.is_empty() && surprises.is_empty() {
+  +         None
+  +     } else {
+  +         Some(hits.len() + surprises.len())
+  +     };
+  + 
+        let mut recorded = false;
+  ... (9 more lines)
+ ✓ (1ms)
+        let hits: Vec<String> = result.hits.clone();
+        let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+  + 
+  +     // Lift measurement: how often do flagged (predicted-high-risk) files break
+  +     // relative to the baseline over ALL scored files the scorer could rank?
+  +     // - predicted_broke = hits (how many flagged files broke)
+  +     // - total_scored = the whole scored population `all_ranked.len()`
+  +     // - scored_broke = scored source files that broke = hits + scored surprises
+  ... (13 more lines)
+
+Now update the test callers of write_validation_event in commands_risk_snapshots.rs. Let me look at those tests.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:940..1060 ✓ (1ms)
+
+I'll update the test callers to pass None for the new optional params (they still test backward-compatible behavior). Let me update them.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (4 → 4 lines)
+            write_validation_event(
+  -             &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456",
+  +             &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456", None, None,
+            )
+            .expect("write validation event");
+ ✓ (0ms)
+            write_validation_event(
+  -             &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456",
+  +             &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456", None, None,
+            )
+            .expect("write validation event");
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (12 → 14 lines)
+                100.0,
+                "abc123",
+                "def456",
+  +             None,
+  +             None,
+            )
+            .expect("write validation event");
+ ✓ (1ms)
+                100.0,
+                "abc123",
+                "def456",
+  +             None,
+  +             None,
+            )
+            .expect("write validation event");
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (4 → 4 lines)
+  -         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
+  +         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb", None, None)
+                .expect("first write");
+  -         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
+  +         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc", None, None)
+                .expect("second write");
+ ✓ (1ms)
+  -         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
+  +         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb", None, None)
+                .expect("first write");
+  -         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
+  +         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc", None, None)
+                .expect("second write");
+
+Now let me update compute_accuracy_stats and format_accuracy_report in commands_risk_accuracy.rs to compute and display the lift. I need to add a lift field to AccuracyStats.
+
+Let me add the lift aggregation. The lift factor = flagged_rate / baseline_rate where:
+• flagged_rate = sum(hits) / sum(predicted_count) across events carrying both fields
+• baseline_rate = sum(scored_broke) / sum(total_scored) across those events
+• lift = flagged_rate / baseline_rate (guard div by zero)
+
+I'll aggregate across all events that carry BOTH total_scored and `scored_broke`. Let me add an `overall_lift: Option<f64>` field to AccuracyStats.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (4 → 8 lines)
+        pub(crate) trend: AccuracyTrend,
+        pub(crate) best_day: Option<(u32, f64)>, // (day, accuracy_pct)
+        pub(crate) worst_day: Option<(u32, f64)>, // (day, accuracy_pct)
+  +     /// Lift factor: how much more often flagged (predicted-high-risk) files
+  +     /// break vs the baseline over all scored files. `None` when no usable
+  +     /// event (carrying `total_scored`/`scored_broke`) exists yet.
+  +     pub(crate) overall_lift: Option<f64>,
+    }
+ ✓ (1ms)
+        pub(crate) trend: AccuracyTrend,
+        pub(crate) best_day: Option<(u32, f64)>, // (day, accuracy_pct)
+        pub(crate) worst_day: Option<(u32, f64)>, // (day, accuracy_pct)
+  +     /// Lift factor: how much more often flagged (predicted-high-risk) files
+  +     /// break vs the baseline over all scored files. `None` when no usable
+  +     /// event (carrying `total_scored`/`scored_broke`) exists yet.
+  +     pub(crate) overall_lift: Option<f64>,
+    }
+
+Now update the empty case and main computation in `compute_accuracy_stats`:
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (11 → 12 lines)
+                trend: AccuracyTrend::Insufficient,
+                best_day: None,
+                worst_day: None,
+  +             overall_lift: None,
+            };
+        }
+ ✓ (0ms)
+                trend: AccuracyTrend::Insufficient,
+                best_day: None,
+                worst_day: None,
+  +             overall_lift: None,
+            };
+        }
+
+Now add the lift aggregation before the final AccuracyStats construction, and add the field to the returned struct:
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (12 → 87 lines)
+        let trend = compute_accuracy_trend(events);
+  + 
+  +     // Discriminative breakage-rate lift: do flagged (high-risk) files break at
+  +     // a higher rate than the baseline over ALL scored files? Aggregate across
+  +     // events that carry `total_scored`/`scored_broke` (the lift feature);
+  +     // events without them (older format) are skipped without panic.
+  +     //   flagged_rate = sum(hit_count) / sum(predicted_count)
+  +     //   baseline_rate = sum(scored_broke) / sum(total_scored)
+  +     //   lift = flagged_rate / baseline_rate  (guard division by zero → None)
+  +     let mut lift_predicted_sum: f64 = 0.0;
+  +     let mut lift_hit_sum: usize = 0;
+  +     let mut lift_total_scored_sum: usize = 0;
+  +     let mut lift_scored_broke_sum: usize = 0;
+  +     let mut lift_uvents_used = 0usize;
+  +     for e in events {
+  +         match (e.total_scored, e.scored_broke) {
+  +             (Some(_total_scored), Some(_scored_broke)) => {
+  +                 lift_predicted_sum += e.hit_count as f64;
+  +                 lift_hit_sum += e.hit_count;
+  +                 lift_total_scored_sum += _total_scored;
+  ... (65 more lines)
+ ✓ (0ms)
+        let trend = compute_accuracy_trend(events);
+  + 
+  +     // Discriminative breakage-rate lift: do flagged (high-risk) files break at
+  +     // a higher rate than the baseline over ALL scored files? Aggregate across
+  +     // events that carry `total_scored`/`scored_broke` (the lift feature);
+  +     // events without them (older format) are skipped without panic.
+  +     //   flagged_rate = sum(hit_count) / sum(predicted_count)
+  +     //   baseline_rate = sum(scored_broke) / sum(total_scored)
+  ... (13 more lines)
+
+I made this more convoluted than needed. Let me reconsider the lift computation to be clean and correct. The task defines:
+
+• flagged breakage rate = hits / predicted_count (per event, hits over the predicted set)
+• baseline breakage rate = scored_broke / total_scored
+• lift = flagged_rate / baseline_rate
+
+Since `predicted_count` is not stored in `ValidationEvent`, aggregating the flagged rate needs care. But wait — actually the task says `predicted_broke` = hits and we already know `predicted_count`. The lift is computed "at replay time and surfaced in the accuracy report" — the report only has `ValidationEvent`s.
+
+Hmm, but I should keep it simple. The cleanest interpretation for the aggregated report: for events carrying `total_scored/scored_broke`:
+• flagged_rate = sum(hit_count) / sum(?predicted_count). Since predicted_count isn't in the event, I'll approximate the flagged population. Actually, let me reconsider — the simplest defensible lift that matches the task's definition per-event and aggregates sensibly.
+
+Let me simplify. The task's primary ask is: aggregate lift across events that carry the fields, and surface "high-risk files break at X.X× the baseline rate".
+
+Given the data available in `ValidationEvent` (hit_count, total_changed, plus new total_scored, scored_broke), and that the task defines the flagged rate as hits/predicted_count... Since we don't store predicted_count, the cleanest aggregation is:
+
+total flagged rate = total hits / total flagged population. Without predicted_count, we can't get the flagged population. But actually — the task says persist `total_scored, scored_broke`, and `predicted_broke` (= hits, already known). The `total_scored` is the whole population. The baseline rate = scored_broke/total_scored.
+
+For the flagged rate, we need predicted_count. Hmm. But note: for the aggregate, we could store the predicted count too. But the task explicitly says not to change meaning of existing fields and lists only total_scored and scored_broke as new persisted fields. So the report must derive the flagged rate without predicted_count.
+
+Actually, let me reconsider: the lift is fundamentally about "do flagged files break more than unflagged". A reasonable aggregate that doesn't need per-event predicted_count:
+
+Overall lift = (total hits / total scored_broke-representation)... no.
+
+Let me think again about what's cleanly computable:
+• The flagged files that broke = hits (summed).
+• The scored files that broke = scored_broke (summed).
+• The total scored population = total_scored (summed).
+• Unflagged files that broke = scored_broke - hits (since scored_broke = hits + scored surprises = total scored broken).
+• baseline rate if unflagged: (scored_broke - hits) / (total_scored - flagged_population).
+
+Without flagged_population, we cannot compute rates per population. 
+
+Given the constraint, the reasonable clean aggregate that the report can show uses the ratio form. Actually the cleanest defensible stat given available fields:
+
+Lift ≈ (flagged_broke / scored_broke) / ... no.
+
+Let me simplify and just make it honest and simple. I'll define the aggregated lift as:
+
+flagged_rate = total_hits / total_flagged where total_flagged is approximated... 
+
+OK, I'm overcomplicating. Let me look at what's actually cleanest and matches the task's Verify test: "compute_accuracy_stats with a mix of events (some carrying the new fields, some not) → assert absent-field events are handled without panic and the aggregated lift is right."
+
+The test will construct events with `total_scored`, `scored_broke, hit_count`. The "right" lift must be deterministic given those fields. So my aggregation formula must be well-defined using exactly: hit_count, total_scored, scored_broke.
+
+A clean, well-defined formula: 
+• The lifted rate of flagged files ≈ treats the whole scored population as the flagged+unflagged universe. 
+• flagged rate = total_hits / total_scored_broke_baseline... 
+
+Actually, here's a clean interpretation the task hints at. Per-event:
+• flagged breakage rate = hits / predicted_count. predicted_count isn't stored, BUT the task says the lift uses this. Since we can't recover predicted_count, and the test needs determinism, I think the intended aggregate is:
+
+lift = (sum hits / sum total_scored) ... no.
+
+Let me reconsider — maybe persist predicted_count implicitly. Actually simplest: the flagged rate is what fraction of scored-broken files were hits vs the fraction of scored files that broke. Hmm.
+
+I'll go with a clean and sensible definition that uses only the three fields and is deterministic for tests:
+
+lift = (sum(hits) / sum(scored_broke - hits... no.
+
+Let me define:
+• flagged_burst_rate = sum(hit_count) / sum(total_changed)? no.
+
+OK let me step back and pick the mathematically standard lift (lift in association rules):
+
+lift(P→B) = P(B|flagged) / P(B)  where P(B) = baseline breakage.
+
+P(B) = scored_broke / total_scored  (baseline rate).
+P(B|flagged) = hits / predicted_count. 
+
+Without predicted_count stored, I'll use an approximation in the aggregate: since hits ⊂ flagged and scored_broke ⊂ (flagged ∪ unflagged... ), actually scored_broke = hits + scored surprises. 
+
+The cleanest self-consistent choice: use the per-event ratio then average? But test needs determinism with a formula.
+
+Given the messy situation, let me reconsider: I will store `predicted_count` too as part of the new lift fields — NO, task says don't change existing fields, but I can add a NEW optional field `predicted_broke`? Actually task says "`predicted_broke` = hits (already known)" — so predicted_broke IS hits, not predicted_count. It says persist `total_scored` and scored_broke. So predicted_count is NOT persisted.
+
+So flagged rate in the aggregate must use available data. The most reasonable: the flagged breakage rate equals hits divided by total_scored? No.
+
+Let me re-read the task once more: "The flagged breakage rate = hits / predicted_count; the baseline breakage rate = scored_broke / total_scored. The lift factor = flagged_rate / baseline_rate (guard division by zero → report as 'n/a')."
+
+This is per-event. For the aggregate report, the cleanest is to sum numerators and denominators across events:
+• flagged_rate_agg = sum(hits) / sum(predicted_count)
+• baseline_rate_agg = sum(scored_broke) / sum(total_scored)
+• lift = flagged_rate_agg / baseline_rate_agg
+
+But we don't have predicted_count in the event. However — for events that DO carry total_scored/scored_broke, the predicted_count is closely tied to the events with hits. Since we don't store it, I'll approximate sum(predicted_count) using the events' hit data... 
+
+Actually, wait. Let me reconsider whether I should also persist `predicted_count`'s sum. Actually the simplest correct approach: I realize the test the user wants is deterministic, and I get to write it. So I should define a clean formula and matching test.
+
+Let me define the aggregated lift cleanly as:
+
+Given events carrying both fields:
+• flagged_rate = sum(hit_count) / sum(scored_broke)  — hmm this is hits/total-scored-broken, not true.
+
+I think the cleanest, most defensible formula given available data, and one that directly answers "do flagged files break more than the baseline", is:
+
+lift = (sum(hit_count) / sum(total_scored)) / (sum(scored_broke) / sum(total_scored)) = sum(hits)/sum(scored_broke)
+
+That's just hits as a fraction of broken — not a lift, it's precision-like. Not meaningful.
+
+Let me reconsider. I'm going to simplify the whole thing and store predicted_count sum implicitly is not possible. 
+
+Given the difficulty, the clean, honest, testable approach:
+
+The task wants: "high-risk files break at X.X× the baseline rate". Baseline rate = scored_broke / total_scored (fraction of all scored files that broke). Flagged rate = fraction of flagged files that broke. Since flagged files ≈ predicted files, and hits are flagged files that broke, flagged rate = hits / predicted_count.
+
+Since predicted_count is per-event and not stored, but we can store the SUM concept... Actually — easiest: I'll compute the flagged rate numerator and denominator per event in the aggregate using `hit_count` as numerator and, since we don't have predicted_count, I can use `total_changed + surprise...`. No.
+
+Let me just make a decision: I will persist `predicted_count` implicitly by NOT storing it, and in the aggregate I'll compute flagged rate as `sum(hits) / sum(total_scored)` for the numerator's denominator being the full scored population — no.
+
+New plan — cleanest defensible definition that is deterministic and uses the 3 stored fields:
+
+The report answers: "of all scored files that broke, what fraction were flagged (hits), compared to what fraction of scored files are flagged?"
+
+That's not standard. 
+
+OK, I'll go with a genuinely clean and standard lift that only needs the 3 fields:
+
+Define the flagged set size ≈ the number of scored files that are predicted = not stored. 
+
+I keep going in circles. Let me just take the pragmatic path the task describes and, since predicted_count isn't persisted, use the stored `total_changed` + the fact that hits ≤ total_changed. Actually, you know what — I'll store the flagged population too as it's genuinely needed and it's a NEW field (allowed — the task says keep existing fields' meaning; adding a new field is fine). But the task explicitly lists what to persist. Hmm.
+
+Let me re-read: "Persist total_scored and scored_broke as optional fields on the validation event JSON." It lists those two. And "predicted_broke = hits (already known)" — not persisted as separate.
+
+Given the flagged rate needs predicted_count and it's in the snapshot (last.predicted.len()), I could persist it. But task says only persist total_scored and scored_broke. 
+
+I think the intended aggregate uses `total_changed` as a proxy... no.
+
+Let me look at it differently. The per-event lift is hits/predicted_count ÷ scored_broke/total_scored. For aggregation, sum numerators and denominators:
+
+lift_agg = (Σhits / Σpredicted_count) / (Σscored_broke / Σtotal_scored)
+
+And Σpredicted_count across lift-carrying events. Since we don't store predicted_count, but `hit_count` is known and `total_changed = hits + surprises`, and surprises for scored files... predicted_count ≥ hits. 
+
+The cleanest is to ALSO compute and store the aggregate using the events we have where predicted_count can be derived. But it can't.
+
+Decision: I'll store `predicted_count`-equivalent as part of the lift by adding it to the persisted event is over-engineering. Instead, the practical and honest aggregate the report can compute is:
+
+lift = (Σhits / Σscored_broke) / (1 / ... ) → 
+
+I'll define: **flagged rate = Σhits / Σtotal_scored* and *baseline rate = Σscored_broke / Σtotal_scored**? That makes lift = Σhits / Σscored_broke. Meaningless.
+
+I need flagged population. Fel it — I'll store predicted_count by extending the new fields. Actually, let me reconsider the task literally: it says "Compute two extra counts to persist... predicted_broke = hits (already known), total_scored..., scored_broke..." plus "The flagged breakage rate = hits / predicted_count". 
+
+For the REPORT aggregate, I have a clean option: use hit_count for flagged numerator, and for the flagged denominator use `total_scored` minus unflagged... no.
+
+I'm going to make an executive decision for a clean, correct, testable formula, and document it clearly. The standard "lift" for the sense-organ question:
+
+**Lift = (fraction of flagged files that broke) / (fraction of all scored files that broke)**
+
+= (Σhits / Σflagged_population) / (Σscored_broke / Σtotal_scored)
+
+Since we don't store flagged_population, I'll use the well-known relationship and approximate flagged population as the number of events' predicted sets... 
+
+Alright — I'll add a third new field to the persisted event: `predicted_count` is NOT allowed to change meaning, but it's already being written in JSON (there's `"predicted_count": predicted_count` in write_validation_event!). It IS already in the JSON. It's just not parsed into ValidationEvent. So I can parse it! Let me add it as the flagged population denominator.
+
+Wait, but the task says don't change meaning of predicted_count — it's already there in the JSON as `predicted_count`. Currently `parse_validation_events` ignores it. I can parse it into a new field. But actually the cleaner route: use `predicted_count` from JSON for the flagged population.
+
+Let me add `predicted_count: Option<usize>` to ValidationEvent (parsed from the existing JSON field), which serves as the flagged population. Then:
+• flagged_rate = Σhits / Σpredicted_count
+• baseline_rate = Σscored_broke / Σtotal_scored
+• lift = flagged_rate / baseline_rate
+
+This is clean, correct, backward-compatible (predicted_count field already exists in old events too). 
+
+Let me redo the implementation. First add `predicted_count` field to ValidationEvent.
+
+Actually wait — but for the aggregate, the events that carry both total_scored AND scored_broke are the NEW ones (which also carry predicted_count from replay). Old events have predicted_count too but not total_scored/scored_broke, so they're excluded anyway. So restricting to events with total_scored+scored_broke present gives us events that also have predicted_count. 
+
+Let me implement this cleanly. Let me refactor.
+
+First, revert my convoluted block in compute_accuracy_stats and write clean code. Let me add `predicted_count: Option<usize>` to ValidationEvent.
+
+Let me rewrite the whole compute_accuracy_stats block I added. Let me first update ValidationEvent again to add predicted_count.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:360..380 ✓ (0ms)
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (7 → 11 lines)
+        pub(crate) hit_count: usize,
+        pub(crate) total_changed: usize,
+        pub(crate) accuracy_pct: f64,
+  +     /// The flagged population: how many files were predicted high-risk that the
+  +     /// writer persisted (`predicted_count`, already present in the JSONL).
+  +     /// Parsed for the lift measurement (flagged rate denominator).
+  +     pub(crate) predicted_count: Option<usize>,
+ ✓ (0ms)
+        pub(crate) hit_count: usize,
+        pub(crate) total_changed: usize,
+        pub(crate) accuracy_pct: f64,
+  +     /// The flagged population: how many files were predicted high-risk that the
+  +     /// writer persisted (`predicted_count`, already present in the JSONL).
+  +     /// Parsed for the lift measurement (flagged rate denominator).
+  +     pub(crate) predicted_count: Option<usize>,
+
+
