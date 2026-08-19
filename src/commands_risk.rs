@@ -1253,6 +1253,32 @@ fn handle_risk_predict() {
 
 /// Handle `/risk snapshot` — save current risk predictions to JSONL.
 fn handle_risk_snapshot() {
+    // Validate the PRIOR snapshot against commits since its git_hash BEFORE
+    // writing the new one. Order matters: replay_validate_last_snapshot treats
+    // the currently-last snapshot as the prediction and replays it against
+    // commits since its hash. If we recorded the new snapshot first, git log
+    // <newhash>..HEAD would be empty (no-op). This yields one matched
+    // prediction-outcome pair per session the loop runs, closing the
+    // validation cold-start.
+    if let Some(v) = replay_validate_last_snapshot() {
+        if v.recorded {
+            let total_changed = v.result.hits.len() + v.result.surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (v.result.hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            println!(
+                "  {DIM}📊 Risk validation: replayed {}..{} — {} hit / {} predicted ({:.1}% accuracy){RESET}",
+                v.git_hash,
+                v.head_hash,
+                v.result.hits.len(),
+                v.predicted.len(),
+                accuracy_pct,
+            );
+        }
+    }
+
     let risks = compute_file_risk_scores();
 
     // Get current git hash
@@ -4134,5 +4160,89 @@ src/baz.rs
         assert_eq!(event_lines.len(), 2, "two distinct spans → two events");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_risk_snapshot_validate_accumulation_tmpdir() {
+        // Locks in the snapshot→validate accumulation flow that makes
+        // `risk snapshot` also validate the PRIOR snapshot. Uses a temp .arc
+        // dir so no real repo state is touched, and fake git-log strings so
+        // no destructive git call runs from the project root.
+        let dir = std::env::temp_dir().join(format!(
+            "arc-risk-snapshot-acc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let snap_path = dir.join("risk_snapshots.jsonl");
+        let val_path = dir.join("risk_validations.jsonl");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Simulate two sessions: each writes a prediction snapshot at its own
+        // git hash via the real persistence path (build_risk_snapshot_json →
+        // write_risk_snapshot_to).
+        let risk_a = FileRisk {
+            path: "src/mod_a.rs".to_string(),
+            score: 0.9,
+            signals: vec!["churn"],
+            test_density: 0.0,
+        };
+        write_risk_snapshot_to(
+            &snap_path,
+            &build_risk_snapshot_json(&[risk_a], 172, "abc123"),
+        )
+        .unwrap();
+
+        // Skip a validation round on the first snapshot (nothing has changed
+        // yet) and record a second snapshot at a new HEAD, as the loop does
+        // after the prior validate step.
+        let risk_b = FileRisk {
+            path: "src/mod_b.rs".to_string(),
+            score: 0.8,
+            signals: vec!["recency"],
+            test_density: 0.0,
+        };
+        write_risk_snapshot_to(
+            &snap_path,
+            &build_risk_snapshot_json(&[risk_b], 173, "def456"),
+        )
+        .unwrap();
+
+        // Now the "new session" validates the CURRENTLY-last snapshot — the
+        // prior session's (def456) — against commits since its hash. This is
+        // the ordering `risk snapshot` relies on: replay treats the last line
+        // as the prediction and must run BEFORE a new snapshot is appended. A
+        // fix commit touches def456's predicted file → a matched hit pair.
+        let content = std::fs::read_to_string(&snap_path).unwrap();
+        let log = git_log_output(&[("feed12 fix: patch b", &["src/mod_b.rs"])]);
+        let v = replay_validate_core(&content, &log, None, &val_path, "feed12").unwrap();
+        assert!(v.recorded, "prior snapshot must record a validation event");
+        assert_eq!(
+            v.git_hash, "def456",
+            "replays the currently-last (prior) snapshot"
+        );
+        assert!(v.result.hits.iter().any(|h| h == "src/mod_b.rs"));
+
+        // Dedup guard: replaying the same association records nothing new.
+        let again = replay_validate_core(&content, &log, None, &val_path, "feed12").unwrap();
+        assert!(!again.recorded, "same (from,to) span must not double-count");
+
+        // last_validation_association returns the expected (from,to).
+        assert_eq!(
+            last_validation_association(&val_path),
+            Some(("def456".to_string(), "feed12".to_string())),
+            "association should be (prior snapshot hash, current HEAD)"
+        );
+
+        let val_content = std::fs::read_to_string(&val_path).unwrap();
+        let event_lines: Vec<&str> = val_content
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        assert_eq!(event_lines.len(), 1, "dedup must leave exactly one event");
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
