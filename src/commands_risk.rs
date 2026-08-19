@@ -2153,7 +2153,12 @@ struct ReplayValidated {
     recorded: bool,
 }
 
-/// Replay the last risk snapshot against commits since its git_hash.
+/// The deterministic, I/O-free core that replays the last snapshot against
+/// commits since its git_hash. Takes the snapshot JSONL content, the raw
+/// `git log {hash}..HEAD --name-only --oneline` output, the current full risk
+/// ranking (for surprise ranks; may be `None`), and the validation JSONL path
+/// (for dedup + writing) — so it can be tested with synthetic inputs without
+/// touching the repo or git.
 ///
 /// Shared core used by BOTH the `/risk validate` CLI path and the opt-in
 /// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`), so the two paths
@@ -2167,6 +2172,83 @@ struct ReplayValidated {
 /// already recorded (dedup: re-running on the same HEAD must not double-count,
 /// mirroring the `last_snapshot_git_hash` discipline). A matched pair is only
 /// recorded once per snapshot-to-HEAD span.
+fn replay_validate_core(
+    snapshot_content: &str,
+    git_log: &str,
+    all_ranked: Option<&[String]>,
+    validation_path: &std::path::Path,
+    head_hash: &str,
+) -> Option<ReplayValidated> {
+    // Load the most recent snapshot
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
+    }
+
+    // Nothing to validate if there are no commits since the snapshot.
+    if git_log.trim().is_empty() {
+        return None;
+    }
+
+    // Parse commits and classify breakage
+    let entries = parse_git_log_name_only(git_log);
+    let commit_count = entries.len();
+    let broke_files = classify_broke_files(&entries);
+
+    // Compute validation
+    let result = compute_validation(&last.predicted, &broke_files, all_ranked, commit_count);
+
+    // Persist a validation event (deduped by snapshot association).
+    // hits = predicted files that broke; surprises = files that broke but
+    // weren't predicted. Only record when there was something to validate.
+    let hits: Vec<String> = result.hits.clone();
+    let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+    let mut recorded = false;
+    if !hits.is_empty() || !surprises.is_empty() {
+        let already = last_validation_association(validation_path)
+            .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+        if !already {
+            let total_changed = hits.len() + surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
+            if let Err(e) = write_validation_event(
+                validation_path,
+                last.day as u32,
+                "replay",
+                last.predicted.len(),
+                &hits,
+                &surprises,
+                accuracy_pct_rounded,
+                &last.git_hash,
+                head_hash,
+            ) {
+                eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+            } else {
+                recorded = true;
+            }
+        }
+    }
+
+    Some(ReplayValidated {
+        day: last.day,
+        git_hash: last.git_hash.clone(),
+        head_hash: head_hash.to_string(),
+        predicted: last.predicted.clone(),
+        result,
+        recorded,
+    })
+}
+
+/// Replay the last risk snapshot against commits since its git_hash.
+/// The I/O wrapper: reads the real snapshot/validation files, runs git to get
+/// the log since the snapshot and the current HEAD, then delegates the compute
+/// + persist (deduped) to `replay_validate_core` so both the `/risk validate`
+/// CLI path and the opt-in auto-replay hook share one implementation.
 fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
     // Load the most recent snapshot
     let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
@@ -2188,70 +2270,22 @@ fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
         return None;
     }
 
-    // Parse commits and classify breakage
-    let entries = parse_git_log_name_only(&log_output);
-    let commit_count = entries.len();
-    let broke_files = classify_broke_files(&entries);
-
     // Get current full risk ranking for rank info on surprises
     let all_risks = compute_file_risk_scores();
     let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
 
-    // Compute validation
-    let result = compute_validation(
-        &last.predicted,
-        &broke_files,
-        Some(&all_ranked),
-        commit_count,
-    );
     let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
         .unwrap_or_else(|_| "HEAD".to_string())
         .trim()
         .to_string();
 
-    // Persist a validation event (deduped by snapshot association).
-    // hits = predicted files that broke; surprises = files that broke but
-    // weren't predicted. Only record when there was something to validate.
-    let hits: Vec<String> = result.hits.clone();
-    let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
-    let mut recorded = false;
-    if !hits.is_empty() || !surprises.is_empty() {
-        let already = last_validation_association(std::path::Path::new(RISK_VALIDATION_PATH))
-            .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
-        if !already {
-            let total_changed = hits.len() + surprises.len();
-            let accuracy_pct = if total_changed > 0 {
-                (hits.len() as f64 / total_changed as f64) * 100.0
-            } else {
-                0.0
-            };
-            let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
-            if let Err(e) = write_validation_event(
-                std::path::Path::new(RISK_VALIDATION_PATH),
-                last.day as u32,
-                "replay",
-                last.predicted.len(),
-                &hits,
-                &surprises,
-                accuracy_pct_rounded,
-                &last.git_hash,
-                &head_hash,
-            ) {
-                eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
-            } else {
-                recorded = true;
-            }
-        }
-    }
-
-    Some(ReplayValidated {
-        day: last.day,
-        git_hash: last.git_hash.clone(),
-        head_hash,
-        predicted: last.predicted.clone(),
-        result,
-        recorded,
-    })
+    replay_validate_core(
+        &content,
+        &log_output,
+        Some(&all_ranked),
+        std::path::Path::new(RISK_VALIDATION_PATH),
+        &head_hash,
+    )
 }
 
 /// Opt-in auto-replay validation on session exit.
