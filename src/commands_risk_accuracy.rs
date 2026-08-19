@@ -127,16 +127,16 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
     for e in events {
         // A usable event needs the flagged population (predicted_count), the
         // whole scored population (total_scored), and the scored-broke count.
-        match (e.predicted_count, e.total_scored, e.scored_broke) {
-            (Some(pred), Some(total_scored), Some(scored_broke)) => {
-                lift_hit_sum += e.hit_count;
-                lift_predicted_sum += pred;
-                lift_total_scored_sum += total_scored;
-                lift_scored_broke_sum += scored_broke;
-                lift_events_used += 1;
-            }
-            _ => {} // older event without the lift fields — skip
+        if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+            (e.predicted_count, e.total_scored, e.scored_broke)
+        {
+            lift_hit_sum += e.hit_count;
+            lift_predicted_sum += pred;
+            lift_total_scored_sum += total_scored;
+            lift_scored_broke_sum += scored_broke;
+            lift_events_used += 1;
         }
+        // else: older event without the lift fields — skip
     }
     let overall_lift = if lift_events_used > 0
         && lift_predicted_sum > 0
@@ -456,6 +456,103 @@ mod tests {
         // Average for day 110 = (20 + 80) / 2 = 50
         assert_eq!(stats.best_day, Some((110, 50.0)));
         assert_eq!(stats.worst_day, Some((110, 50.0)));
+    }
+
+    #[test]
+    fn test_compute_accuracy_stats_lift_aggregation_mixed_events() {
+        // Mix of events: some carry the lift fields (total_scored/scored_broke/
+        // predicted_count), some are old-format events WITHOUT them. The absent-
+        // field events must be skipped without panic, and the aggregated lift
+        // must be computed only from the fields present.
+        let events = vec![
+            // Old-format event — no lift fields → must be skipped, no panic.
+            ValidationEvent {
+                day: 110,
+                hit_count: 1,
+                total_changed: 3,
+                accuracy_pct: 33.3,
+                ..Default::default()
+            },
+            // Lift event 1: 2 hits out of 4 predicted; 3 scored-broke of 7 scored.
+            ValidationEvent {
+                day: 111,
+                hit_count: 2,
+                total_changed: 3,
+                accuracy_pct: 66.7,
+                predicted_count: Some(4),
+                total_scored: Some(7),
+                scored_broke: Some(3),
+            },
+            // Lift event 2: 1 hit out of 2 predicted; 2 scored-broke of 5 scored.
+            ValidationEvent {
+                day: 112,
+                hit_count: 1,
+                total_changed: 2,
+                accuracy_pct: 50.0,
+                predicted_count: Some(2),
+                total_scored: Some(5),
+                scored_broke: Some(2),
+            },
+            // Old-format event — again no lift fields, must be skipped.
+            ValidationEvent {
+                day: 113,
+                hit_count: 0,
+                total_changed: 1,
+                accuracy_pct: 0.0,
+                ..Default::default()
+            },
+        ];
+
+        let stats = compute_accuracy_stats(&events);
+        // The two old-format events were handled without panic, so they still
+        // contribute to the headline aggregates.
+        assert_eq!(stats.total_validations, 4);
+        assert_eq!(stats.total_hits, 4); // 1 + 2 + 1 + 0
+        assert_eq!(stats.total_changed, 9); // 3 + 3 + 2 + 1
+
+        // Pooled lift over lift-carrying events only:
+        //   flagged / predicted = (2 + 1) / (4 + 2) = 3/6 = 0.5
+        //   baseline = (3 + 2) / (7 + 5) = 5/12 ≈ 0.4167
+        //   lift = 0.5 / (5/12) = 1.2
+        let expected_lift = (3.0_f64 / 6.0) / (5.0_f64 / 12.0);
+        let lift = stats.overall_lift.expect("mixed events produce a lift");
+        assert!(
+            (lift - expected_lift).abs() < 1e-9,
+            "pooled lift = {lift}, expected {expected_lift}"
+        );
+    }
+
+    #[test]
+    fn test_compute_accuracy_stats_lift_no_fields_is_none() {
+        // No event carries the lift fields → overall_lift must be None (and the
+        // report renders "—"), not an incorrect number.
+        let events = vec![
+            ValidationEvent {
+                day: 110,
+                hit_count: 1,
+                total_changed: 3,
+                accuracy_pct: 33.3,
+                ..Default::default()
+            },
+            ValidationEvent {
+                day: 111,
+                hit_count: 2,
+                total_changed: 2,
+                accuracy_pct: 100.0,
+                ..Default::default()
+            },
+        ];
+        let stats = compute_accuracy_stats(&events);
+        assert!(
+            stats.overall_lift.is_none(),
+            "no lift fields → unknown lift"
+        );
+
+        let report = format_accuracy_report(&stats);
+        assert!(
+            report.contains("Lift:") && report.contains("—"),
+            "report shows the n/a dash when no lift data exists"
+        );
     }
 
     #[test]

@@ -4171,6 +4171,92 @@ src/baz.rs
     }
 
     #[test]
+    fn test_replay_validate_core_persists_lift_measurement() {
+        // The discriminative breakage-rate signal: a broke set that hits some
+        // predicted files AND some non-predicted scored files must produce
+        // `total_scored`/`scored_broke` on the persisted event so the lift can
+        // be computed later. all_ranked is the whole scored population.
+        let snapshot = snapshot_jsonl(
+            "snap_lift",
+            175,
+            &[
+                "src/mod_a.rs",
+                "src/mod_b.rs",
+                "src/mod_c.rs",
+                "src/mod_d.rs",
+            ],
+        );
+        // mod_a (predicted) and mod_b (predicted) break → 2 hits.
+        // mod_z (NOT predicted but a scored source file) breaks → 1 scored surprise.
+        // mod_meta/*.md breaks but is NOT a scored file → must NOT count.
+        let log = git_log_output(&[(
+            "abc123 fix: patch caller",
+            &[
+                "src/mod_a.rs",
+                "src/mod_b.rs",
+                "src/mod_z.rs",
+                "docs/notes.md",
+                "DAY_COUNT",
+            ],
+        )]);
+        let ranked = vec![
+            "src/mod_a.rs".to_string(),
+            "src/mod_b.rs".to_string(),
+            "src/mod_c.rs".to_string(),
+            "src/mod_d.rs".to_string(),
+            "src/mod_e.rs".to_string(),
+            "src/mod_f.rs".to_string(),
+            "src/mod_z.rs".to_string(),
+        ];
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let v = replay_validate_core(&snapshot, &log, Some(&ranked), &path, "HEAD_lift").unwrap();
+        assert!(v.recorded, "a hit+surprise pair must be recorded");
+        // 2 hits (mod_a, mod_b) + 1 scored surprise (mod_z)
+        assert_eq!(v.result.hits.len(), 2);
+        assert_eq!(v.result.surprises.len(), 1);
+        assert_eq!(v.result.surprises[0].0, "src/mod_z.rs");
+
+        // The persisted event carries the lift fields.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let line = content.lines().find(|l| l.contains("snap_lift")).unwrap();
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        // total_scored = all_ranked.len() = 7
+        assert_eq!(
+            val["total_scored"].as_u64(),
+            Some(7),
+            "total_scored is the whole scored population"
+        );
+        // scored_broke = hits + scored surprises = 2 + 1 = 3 (non-source meta
+        // churn like DAY_COUNT / docs/notes.md must be excluded)
+        assert_eq!(
+            val["scored_broke"].as_u64(),
+            Some(3),
+            "scored_broke counts only scored source breaks"
+        );
+
+        // Sanity check the lift is a plausible number from the persisted event:
+        //   flagged_rate = hits / predicted_count = 2 / 4 = 0.5
+        //   baseline_rate = scored_broke / total_scored = 3 / 7 ≈ 0.4286
+        //   lift = 0.5 / 0.4286 ≈ 1.17 (> 1: flagged files break more often)
+        let predicted_count = val["predicted_count"].as_u64().unwrap() as f64;
+        let hits = val["hits"].as_array().unwrap().len() as f64;
+        let total_scored = val["total_scored"].as_u64().unwrap() as f64;
+        let scored_broke = val["scored_broke"].as_u64().unwrap() as f64;
+        let flagged_rate = hits / predicted_count;
+        let baseline_rate = scored_broke / total_scored;
+        let lift = flagged_rate / baseline_rate;
+        assert!(
+            (lift - (0.5 / (3.0 / 7.0))).abs() < 1e-6,
+            "lift is the ratio of flagged to baseline breakage rate, got {lift}"
+        );
+        assert!(lift > 1.0, "flagged files break more often than baseline");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn test_replay_validate_core_dedup_same_hash() {
         // Replaying the SAME snapshot→HEAD span twice must not double-count.
         let snapshot = snapshot_jsonl("snap005", 172, &["src/mod_a.rs"]);
