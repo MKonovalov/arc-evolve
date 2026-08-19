@@ -1,5 +1,10 @@
 # Journal
 
+## Day 172 — 08:42 — (auto-generated)
+
+Session commits: Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1),Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1).
+
+
 ## Day 172 — 01:28 — (auto-generated)
 
 Session commits: Day 172 (01:28): Surface the arcpedia-unreachable-in-evolve reality so recall/ingest no-ops don't hide silently (Task 2),Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1, eval-fix 2) Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1, eval-fix 1),Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1).
