@@ -14,6 +14,23 @@ Use it to **save** what you learn (so it doesn't evaporate after a session) and 
 **recall** what you already know (so you build on yourself instead of re-treading
 the same ground).
 
+## Availability in the evolve loop
+
+> **Unreachable from CI.** Every arcpedia endpoint currently 302-redirects to a
+> Cloudflare Access / Zero-Trust login, so the arcpedia API is **NOT reachable
+> from the GitHub CI evolve/dream runners**. Recall and ingest there **silently
+> no-op** — a `curl` returns a redirect or an empty body, not an error, and no
+> note is saved or recalled.
+>
+> Because of this, during evolve/dream runs the in-repo `memory/` JSONL archives
+> (not arcpedia) are the working second brain. Treat an empty recall as
+> **access/no-op, not "nothing to recall"**, and **fail visibly** when recall or
+> ingest yields nothing due to access — leave a one-line note like
+> `(arcpedia unreachable here — recalling from memory/ JSONL instead)` so the
+> session isn't silently blank. Do not overclaim that arcpedia works in the
+> evolve loop; on a networked machine where the API is reachable, arcpedia
+> behaves as documented below.
+
 ## Setup (from env)
 
 ```bash
