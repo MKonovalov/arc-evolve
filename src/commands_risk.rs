@@ -2247,7 +2247,7 @@ fn replay_validate_core(
 /// Replay the last risk snapshot against commits since its git_hash.
 /// The I/O wrapper: reads the real snapshot/validation files, runs git to get
 /// the log since the snapshot and the current HEAD, then delegates the compute
-/// + persist (deduped) to `replay_validate_core` so both the `/risk validate`
+/// and persist (deduped) to `replay_validate_core` so both the `/risk validate`
 /// CLI path and the opt-in auto-replay hook share one implementation.
 fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
     // Load the most recent snapshot
@@ -3959,5 +3959,180 @@ src/baz.rs
         let out = format_recent_events(&events, 5);
         assert!(out.contains("Day 164"), "should render the event day");
         assert!(out.contains("1 hit"), "should render hit count");
+    }
+
+    /// Build a single synthetic snapshot JSONL line (mirrors the on-disk
+    /// `.arc/risk_snapshots.jsonl` shape consumed by `parse_all_snapshots`).
+    fn snapshot_jsonl(hash: &str, day: u64, paths: &[&str]) -> String {
+        let top_10: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|p| serde_json::json!({ "path": p, "score": 1.0, "signals": [] }))
+            .collect();
+        serde_json::json!({ "day": day, "git_hash": hash, "top_10": top_10 }).to_string()
+    }
+
+    /// Synthetic `git log {hash}..HEAD --name-only --oneline` output.
+    /// Non-fix/revert commits are ignored for breakage; only messages containing
+    /// "fix"/"revert" mark their files as having broken (per classify_broke_files).
+    fn git_log_output(commits: &[(&str, &[&str])]) -> String {
+        let mut out = String::new();
+        for (msg, files) in commits {
+            out.push_str(msg);
+            out.push('\n');
+            for f in *files {
+                out.push_str(f);
+                out.push('\n');
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Temp file helper scoped to the test (creates a fresh dir + file).
+    fn temp_validation_file() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "arc-risk-validate-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        dir.join("risk_validations.jsonl")
+    }
+
+    #[test]
+    fn test_replay_validate_core_computes_hits_and_surprises() {
+        // One predicted file that broke (hit) + one that broke unpredicted
+        // (surprise). The snapshot predicts ["src/mod_a.rs", "src/mod_b.rs"];
+        // a fix commit touches mod_a (hit) and mod_c (surprise).
+        let snapshot = snapshot_jsonl("snap001", 172, &["src/mod_a.rs", "src/mod_b.rs"]);
+        let log = git_log_output(&[(
+            "abc123 fix: patch caller",
+            &["src/mod_a.rs", "src/mod_c.rs"],
+        )]);
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let v = replay_validate_core(&snapshot, &log, None, &path, "HEAD01").unwrap();
+
+        assert_eq!(v.git_hash, "snap001");
+        assert_eq!(v.head_hash, "HEAD01");
+        assert_eq!(v.predicted.len(), 2);
+        assert_eq!(v.result.hits, vec!["src/mod_a.rs".to_string()]);
+        assert_eq!(v.result.clean, vec!["src/mod_b.rs".to_string()]);
+        // surprise = mod_c (broke but not predicted), no rank info (None)
+        assert_eq!(v.result.surprises.len(), 1);
+        assert_eq!(v.result.surprises[0].0, "src/mod_c.rs");
+        assert_eq!(v.result.commit_count, 1);
+        // A hit+surprise pair was recorded (written to the temp file).
+        assert!(v.recorded, "expected an event to be recorded");
+
+        // The file now holds one replay event with the honest predicted_count.
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("snap001"), "event carries git_hash_from");
+        assert!(content.contains("HEAD01"), "event carries git_hash_to");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replay_validate_core_noop_without_commits() {
+        let snapshot = snapshot_jsonl("snap002", 172, &["src/mod_a.rs"]);
+        // Empty git log = nothing since snapshot → no event, quiet no-op.
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let v = replay_validate_core(&snapshot, "", None, &path, "HEAD01");
+        assert!(v.is_none(), "no commits since snapshot → no validation");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replay_validate_core_noop_without_predictions() {
+        // Snapshot with an empty top_10 → nothing to predict → quiet no-op.
+        let snapshot = snapshot_jsonl("snap003", 172, &[]);
+        let log = git_log_output(&[("abc123 fix: patch", &["src/mod_a.rs"])]);
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let v = replay_validate_core(&snapshot, &log, None, &path, "HEAD01");
+        assert!(v.is_none(), "no predictions → no validation");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replay_validate_core_noop_with_some_rank_attribution() {
+        // Supply a full risk ranking so surprises get a rank; verify the rank
+        // is attributed (1-based position in all_ranked).
+        let snapshot = snapshot_jsonl("snap004", 172, &["src/mod_a.rs"]);
+        let log = git_log_output(&[("abc123 fix: patch", &["src/mod_z.rs"])]);
+        let ranked = vec![
+            "src/mod_a.rs".to_string(),
+            "src/mod_c.rs".to_string(),
+            "src/mod_z.rs".to_string(),
+        ];
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let v = replay_validate_core(&snapshot, &log, Some(&ranked), &path, "HEAD01").unwrap();
+        assert!(v.recorded);
+        // surprise mod_z is at 1-based rank 3 in the ranked list
+        assert_eq!(v.result.surprises[0].1, Some(3));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replay_validate_core_dedup_same_hash() {
+        // Replaying the SAME snapshot→HEAD span twice must not double-count.
+        let snapshot = snapshot_jsonl("snap005", 172, &["src/mod_a.rs"]);
+        let log = git_log_output(&[("abc123 fix: patch", &["src/mod_a.rs"])]);
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let first = replay_validate_core(&snapshot, &log, None, &path, "HEAD01").unwrap();
+        assert!(first.recorded, "first replay records an event");
+
+        // Second replay of the same association → deduped (no new event).
+        let second = replay_validate_core(&snapshot, &log, None, &path, "HEAD01").unwrap();
+        assert!(
+            !second.recorded,
+            "second replay of same span must not record"
+        );
+
+        // Exactly one event line in the file.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let event_lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(event_lines.len(), 1, "dedup must produce exactly one event");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_replay_validate_core_distinct_hash_records_each() {
+        // A NEW snapshot→HEAD span must record a second event (not deduped).
+        let snap1 = snapshot_jsonl("snapA", 172, &["src/mod_a.rs"]);
+        let log1 = git_log_output(&[("abc123 fix: patch", &["src/mod_a.rs"])]);
+        let path = temp_validation_file();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        let first = replay_validate_core(&snap1, &log1, None, &path, "HEAD01").unwrap();
+        assert!(first.recorded);
+
+        // Different snapshot hash + same HEAD → new association → second event.
+        let snap2 = snapshot_jsonl("snapB", 173, &["src/mod_b.rs"]);
+        let log2 = git_log_output(&[("def456 fix: patch b", &["src/mod_b.rs"])]);
+        let second = replay_validate_core(&snap2, &log2, None, &path, "HEAD01").unwrap();
+        assert!(second.recorded, "a distinct snapshot span must record");
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let event_lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(event_lines.len(), 2, "two distinct spans → two events");
+
+        let _ = std::fs::remove_file(&path);
     }
 }
