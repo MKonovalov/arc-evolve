@@ -1804,6 +1804,17 @@ struct ValidationResult {
     commit_count: usize,
 }
 
+/// Whether a path is a risk-scorable source file — i.e. in the same population
+/// the risk scorer ranks (`src/**/*.rs`). The scorer only ranks source files,
+/// so non-source churn (`DAY_COUNT`, `journals/JOURNAL.md`, `.arc/...`,
+/// `Cargo.lock`, `README.md`, etc.) must not count as a validation surprise:
+/// the scorer could never predict those files, so including them falsely deflates
+/// accuracy. This predicate matches the population collected by
+/// `compute_file_risk_scores` / the coupling tracker.
+fn is_scored_file(path: &str) -> bool {
+    path.starts_with("src/") && path.ends_with(".rs")
+}
+
 /// Compute validation by comparing predicted top-10 files against
 /// the set of files that actually broke.
 ///
@@ -1832,6 +1843,10 @@ fn compute_validation(
     let mut surprises: Vec<(String, Option<usize>)> = broke_files
         .iter()
         .filter(|f| !predicted_set.contains(f))
+        // Only files the scorer could actually rank count as surprises;
+        // non-source churn (meta files) can never be predicted, so it must
+        // not deflate accuracy.
+        .filter(|f| is_scored_file(f))
         .map(|f| {
             let rank = all_ranked.and_then(|ranked| {
                 ranked.iter().position(|r| r == f).map(|i| i + 1) // 1-based
@@ -2671,6 +2686,30 @@ src/baz.rs
         assert_eq!(result.hits.len(), 0);
         assert_eq!(result.clean.len(), 2);
         assert_eq!(result.surprises.len(), 0);
+    }
+
+    #[test]
+    fn test_compute_validation_filters_non_source_churn() {
+        // A real source file that broke and was NOT predicted => a surprise.
+        let predicted = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let mut broke = std::collections::HashSet::new();
+        broke.insert("src/d.rs".to_string()); // scored surprise
+                                              // Meta files the scorer can never rank => must NOT be surprises.
+        broke.insert("DAY_COUNT".to_string());
+        broke.insert("journals/JOURNAL.md".to_string());
+        broke.insert(".arc/risk_snapshots.jsonl".to_string());
+        broke.insert("Cargo.lock".to_string());
+        broke.insert("README.md".to_string());
+
+        let result = compute_validation(&predicted, &broke, None, 10);
+        // Only the real source file is a surprise.
+        assert_eq!(result.surprises.len(), 1);
+        assert_eq!(result.surprises[0].0, "src/d.rs");
+
+        // total_changed (hits + surprises) excludes the meta files.
+        assert_eq!(result.hits.len(), 0);
+        let total_changed = result.hits.len() + result.surprises.len();
+        assert_eq!(total_changed, 1);
     }
 
     #[test]
