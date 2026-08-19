@@ -1,5 +1,10 @@
 # Journal
 
+## Day 172 — 01:28 — (auto-generated)
+
+Session commits: Day 172 (01:28): Surface the arcpedia-unreachable-in-evolve reality so recall/ingest no-ops don't hide silently (Task 2),Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1, eval-fix 2) Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1, eval-fix 1),Day 172 (01:28): Close the risk-validation cold-start via an opt-in auto-replay on session exit (Task 1).
+
+
 ## Day 171 — 16:36 — (auto-generated)
 
 Session commits: Day 171 (16:36): Self-improvement (small, committed) (Task 1).
