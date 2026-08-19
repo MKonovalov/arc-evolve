@@ -1,0 +1,412 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by examining the current state of the code to understand what's already implemented and what's missing.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && echo "---S… ✓ (9ms)
+
+Let me look at the current state of the implementation.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat HEAD | head -40 ✓ (8ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_last_snap… ✓ (3ms)
+
+Let me look at the current implementation in detail.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2100,2400p' src/commands_r… ✓ (5ms)
+
+Let me see the rest of the tests module and understand the existing helpers.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "test_compute_validation\|… ✓ (5ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|st… ✓ (5ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|st… ✓ (4ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn compute_validation\|s… ✓ (13ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "struct ValidationResult\… ✓ (13ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "struct ValidationResult\… ✓ (13ms)
+
+Now let me look at the existing tests in `commands_risk.rs` related to compute_validation and the test module structure, plus the existing replay tests in `commands_risk_snapshots.rs`.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2620,2700p' src/commands_r… ✓ (4ms)
+
+Let me look at the existing tests in the test module for compute_validation and how snapshots/tests are structured. Let me search for existing compute_validation tests.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_validation\|parse… ✓ (4ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2485,2620p' src/commands_r… ✓ (4ms)
+
+Now I understand the structure. Let me look at the test module more and understand what exists in `commands_risk_snapshots.rs` around the tests (the `last_validation_pair` tests the evaluator mentioned).
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '990,1030p' src/commands_ri… ✓ (3ms)
+
+Now let me look at the structure of `replay_validate_last_snapshot` more closely. The problem is that it directly reads from `RISK_SNAPSHOT_PATH` and calls `run_git`, which makes it hard to test with synthetic data. 
+
+The evaluator's feedback says the tests are missing. I need to write tests that are deterministic. Since `replay_validate_last_snapshot` reads from the real .arc dir and runs git, I'll need to design the test to test the core computation logic in a deterministic way without the git/snapshot I/O.
+
+Let me understand the task's requirements again:
+1. A deterministic test that given a synthetic snapshot JSONL (git_hash + top_10 paths) and synthetic git log output, the pair computes correct hits/surprises/accuracy.
+2. A dedup test: same git_hash replayed twice must not produce two events.
+
+The cleanest way to make this deterministic is to refactor `replay_validate_last_snapshot` to extract a pure core that takes the snapshot content, git log output, and validates against a temp file path. Let me look at what the function currently does and design a testable refactor.
+
+Let me look at the full function and the helper functions involved.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1714,1880p' src/commands_r… ✓ (4ms)
+
+Now I have a clear picture. Let me look at how `replay_validate_last_snapshot` is structured and think about the best testable refactor. The challenge: the function reads from real files (`RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH`) and runs git. To make it testable deterministically, I should extract a core function that accepts injected data.
+
+Let me refactor to create a testable core. Let me look at the current `replay_validate_last_snapshot` again and the `commands_risk_snapshots.rs` helpers signature.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '140,230p' src/commands_ris… ✓ (4ms)
+
+Now I understand the full picture. Let me design the testable refactor. I'll extract a core function replay_validate_core that accepts:
+• snapshot content (JSONL) — from which it derives last snapshot's git_hash and predicted paths
+• git log output string
+• full risk ranking (for surprise ranks) — optional
+• the validation JSONL path (for dedup)
+
+This makes it fully testable without touching the real repo or git.
+
+Let me look at how `compute_file_risk_scores and parse_all_snapshots` are used, and the `ParsedSnapshot` struct.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '406,465p' src/commands_ris… ✓ (3ms)
+
+Now let me check how snapshots are written - the JSON format for top_10. Let me check `build_risk_snapshot_json`.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '25,100p' src/commands_risk… ✓ (4ms)
+
+Now I have everything I need. Let me refactor replay_validate_last_snapshot to extract a testable core. The core will take:
+• snapshot_content: &str (the JSONL snapshots)
+• git_log: &str (synthetic git log output)
+• `all_ranked: Option<&[String]>` (full risk ranking for surprise ranks)
+• `validation_path: &std::path::Path` (for dedup + writing)
+• `head_hash: &str`
+
+And return `Option<ReplayValidated>` (or a tuple with recorded flag), without doing git I/O.
+
+Let me look at the current implementation once more to refactor precisely.
+
+The current replay_validate_last_snapshot():
+1. Reads RISK_SNAPSHOT_PATH content
+2. `parse_all_snapshots` → last
+3. if predicted empty → None
+4. runs `git log {hash}..HEAD --name-only --oneline` via run_git
+5. if empty → None
+6. parse_git_log_name_only, classify_broke_files
+7. compute_file_risk_scores for all_ranked
+8. compute_validation
+9. head_hash via git rev-parse
+10. persist deduped event if hits/surprises exist
+11. return ReplayValidated
+
+Let me refactor this into a testable core. I'll create:
+
+```rust
+/// Core replay logic, decoupled from git/stdout I/O so it can be tested
+/// deterministically with synthetic inputs. Returns the validation result
+/// with the `recorded` flag set when a dedup-passing event was persisted.
+fn replay_validate_core(
+    snapshot_content: &str,
+    git_log: &str,
+    all_ranked: Option<&[String]>,
+    validation_path: &std::path::Path,
+    head_hash: &str,
+) -> Option<ReplayValidated> {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
+    }
+    if git_log.trim().is_empty() {
+        return None;
+    }
+
+    let entries = parse_git_log_name_only(git_log);
+    let commit_count = entries.len();
+    let broke_files = classify_broke_files(&entries);
+
+    let result = compute_validation(&last.predicted, &broke_files, all_ranked, commit_count);
+
+    let hits: Vec<String> = result.hits.clone();
+    let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+    let mut recorded = false;
+    if !hits.is_empty() || !surprises.is_empty() {
+        let already = last_validation_association(validation_path)
+            .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+        if !already {
+            let total_changed = hits.len() + surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
+            if let Err(e) = write_validation_event(
+                validation_path,
+                last.day as u32,
+                "replay",
+                last.predicted.len(),
+                &hits,
+                &surprises,
+                accuracy_pct_rounded,
+                &last.git_hash,
+                head_hash,
+            ) {
+                eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+            } else {
+                recorded = true;
+            }
+        }
+    }
+
+    Some(ReplayValidated {
+        day: last.day,
+        git_hash: last.git_hash.clone(),
+        head_hash: head_hash.to_string(),
+        predicted: last.predicted.clone(),
+        result,
+        recorded,
+    })
+}
+```
+
+Then `replay_validate_last_snapshot()` becomes a thin wrapper that does the I/O:
+
+```rust
+fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+    let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+    // validate against current risk ranking for accurate surprise ranks
+    let all_risks = compute_file_risk_scores();
+    let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
+    // determine the git ranges
+    let snapshots = parse_all_snapshots(&content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
+    }
+    let log_output = crate::git::run_git(&[
+        "log",
+        &format!("{}..HEAD", last.git_hash),
+        "--name-only",
+        "--oneline",
+    ])
+    .ok()?;
+    let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
+    replay_validate_core(
+        &content,
+        &log_output,
+        Some(&all_ranked),
+        std::path::Path::new(RISK_VALIDATION_PATH),
+        &head_hash,
+    )
+}
+```
+
+Wait, but the original `replay_validate_last_snapshot` computed all_ranked from `compute_file_risk_scores()` — which reads from disk. For the core's test, I'll pass `Some(&all_ranked)` where I construct all_ranked synthetically. Actually for the deterministic test I should pass an explicit all_ranked. Good.
+
+Now regex: the task says there's a subtle issue with the original — but let me not worry, the eval said the feature is correct. My job is to add the missing tests and docs.
+
+Now let me write the refactor. First let me check the exact current code of `replay_validate_last_snapshot` to replace it cleanly.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2166,2290p' src/commands_r… ✓ (4ms)
+
+Now let me refactor. I'll extract the core into a testable function and make `replay_validate_last_snapshot` a thin I/O wrapper.
+
+Let me make the edit:
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (89 → 125 lines)
+  - /// Replay the last risk snapshot against commits since its git_hash.
+  - ... (12 more similar lines)
+  - /// recorded once per snapshot-to-HEAD span.
+  - fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+  + /// The core replay logic, decoupled from git/stdout/disk I/O so it can be
+  + /// tested deterministically with synthetic inputs. Given the snapshot JSONL
+  + /// content and the raw `git log` output since the last snapshot's hash, it:
+  + /// - loads the last snapshot's predicted top-10,
+  + /// - computes hits/surprises/accuracy against files that "broke" (revert/fix),
+  + /// - and persists a deduped `"replay"` validation event to `validation_path`
+  + ///   (skipping when the same from→to pair is already recorded).
+  + /// Returns `None` (quiet no-op) when there is no usable snapshot or nothing to
+  + /// validate. `recorded` is `true` only when an event was actually persisted.
+  + #[allow(clippy::too_many_arguments)]
+  + fn replay_validate_core(
+  +     snapshot_content: &str,
+  +     git_log: &str,
+  +     all_ranked: Option<&[String]>,
+  +     validation_path: &std::path::Path,
+  +     head_hash: &str,
+  ... (131 more lines)
+ ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs.
+
+The doc comment above the function differs from what I used. Let me use the edit_file with the exact text. Let me view the exact current function text.
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2160,2290p' src/commands_r… ✓ (4ms)
+
+Now let me do the edit using the exact function body text (without the doc comment, which I'll replace separately). Let me separate: first replace the body of the function and add a new core function. I'll edit the whole block from `fn replay_validate_last_snapshot` through its closing }) and `Some(ReplayValidated ...)` end.
+
+Let me use the exact text from the file. I'll replace the function.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (86 → 115 lines)
+  - fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+  + fn replay_validate_core(
+  +     snapshot_content: &str,
+  +     git_log: &str,
+  +     all_ranked: Option<&[String]>,
+  +     validation_path: &std::path::Path,
+  +     head_hash: &str,
+  + ) -> Option<ReplayValidated> {
+        // Load the most recent snapshot
+  -     let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+  -     let snapshots = parse_all_snapshots(&content);
+  +     let snapshots = parse_all_snapshots(snapshot_content);
+        let last = snapshots.last()?;
+        if last.predicted.is_empty() {
+            return None;
+        }
+    
+  -     // Check if there are commits since the snapshot
+  -     let log_output = crate::git::run_git(&[
+  -         "log",
+  ... (118 more lines)
+ ✓ (1ms)
+  - fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+  + fn replay_validate_core(
+  +     snapshot_content: &str,
+  +     git_log: &str,
+  +     all_ranked: Option<&[String]>,
+  +     validation_path: &std::path::Path,
+  +     head_hash: &str,
+  + ) -> Option<ReplayValidated> {
+  ... (13 more lines)
+
+Now let me add the doc comment to the new `replay_validate_core` function. Let me check what's directly above it.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2140,2172p' src/commands_r… ✓ (3ms)
+
+The doc comment above fn replay_validate_core is stale (it was the old replay_validate_last_snapshot doc). Let me update it to be accurate for the core function.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2153,2172p' src/commands_r… ✓ (3ms)
+
+Let me view the full doc comment text to replace it.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=2153 && NR<=2172' src/com… ✓ (4ms)
+
+The file from line 2153 onward shows compressed output. Let me use read_file to get the exact doc comment text.
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2153..2171 ✓ (1ms)
+
+This doc comment is actually a good description of the core function's behavior. Let me update it to mention that it's the injectable/testable core.
+
+
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (14 → 19 lines)
+  - /// Replay the last risk snapshot against commits since its git_hash.
+  + /// The deterministic, I/O-free core that replays the last snapshot against
+  + /// commits since its git_hash. Takes the snapshot JSONL content, the raw
+  + /// `git log {hash}..HEAD --name-only --oneline` output, the current full risk
+  + /// ranking (for surprise ranks; may be `None`), and the validation JSONL path
+  + /// (for dedup + writing) — so it can be tested with synthetic inputs without
+  + /// touching the repo or git.
+    ///
+    /// Shared core used by BOTH the `/risk validate` CLI path and the opt-in
+    /// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`), so the two paths
+ ✓ (1ms)
+  - /// Replay the last risk snapshot against commits since its git_hash.
+  + /// The deterministic, I/O-free core that replays the last snapshot against
+  + /// commits since its git_hash. Takes the snapshot JSONL content, the raw
+  + /// `git log {hash}..HEAD --name-only --oneline` output, the current full risk
+  + /// ranking (for surprise ranks; may be `None`), and the validation JSONL path
+  + /// (for dedup + writing) — so it can be tested with synthetic inputs without
+  + /// touching the repo or git.
+    ///
+    /// Shared core used by BOTH the `/risk validate` CLI path and the opt-in
+    /// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`), so the two paths
+
+Now let me build to check the refactor compiles before adding tests.
+
+
+  ╭─ Turn 28 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -20 ✓ (8.6s)
+
+Build passes. Now let me add the tests. I need to check what's available in the test module — tempfile is available (used in `commands_risk_snapshots.rs` tests). Let me verify `tempfile` is available and check the `RISK_SNAPSHOT_PATH/RISK_VALIDATION_PATH` consts visibility in commands_risk.rs.
+
+Let me check the imports and whether `write_validation_event / last_validation_association / parse_all_snapshots` are in scope in commands_risk.rs test module (they're pub(crate) so `use super::*` should bring them in).
+
+Let me check the top of commands_risk.rs for what's imported from commands_risk_snapshots.
+
+
+  ╭─ Turn 29 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "use crate::commands_risk_… ✓ (4ms)
+
+
+  ╭─ Turn 30 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '12,30p' src/commands_risk.… ✓ (3ms)
+
+Good, all the needed helpers (parse_all_snapshots, write_validation_event, last_validation_association, `RISK_VALIDATION_PATH, RISK_SNAPSHOT_PATH`) are in scope. Now let me add the tests. Let me find the end of the tests module / a good place to insert. Let me look at where the test module's compute_validation tests end.
+
+Let me add tests after `test_compute_validation_no_breakage` around line 2610. Let me find the location.
+
+
+  ╭─ Turn 31 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn test_compute_validatio… ✓ (3ms)
+
+

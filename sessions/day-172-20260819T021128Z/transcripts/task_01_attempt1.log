@@ -1,0 +1,590 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by exploring the relevant code to understand the current structure before making changes.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "handle_risk_validate\|fn … ✓ (6ms)
+
+Let me look at the relevant sections in detail.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2100..2280 ✓ (1ms)
+
+Now let me look at the key helpers and `commands_risk_snapshots.rs`.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|fn… ✓ (4ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:1..261 ✓ (2ms)
+
+Let me see the rest of the snapshots file, particularly the `parse_all_snapshots`, ParsedSnapshot struct, and the end tests.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:260..560 ✓ (2ms)
+
+Now let me look at compute_validation, `classify_broke_files, and parse_git_log_name_only` in commands_risk.rs, plus how the validations are read for dedup (git_hash_to). Let me check `format_validation_report and compute_validation`.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|fn… ✓ (4ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1700..1920 ✓ (2ms)
+
+Now I understand the core logic. Let me look at how handle_risk_validate is dispatched and its current usage of `write_validation_event` with trigger "cli". Let me check the imports at the top of commands_risk.rs and the repl.rs exit hook.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1..41 ✓ (1ms)
+
+Now let me look at the repl.rs exit hook.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_risk_snapshot\|risk_… ✓ (4ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/repl.rs:1380..1420 ✓ (1ms)
+
+I now have a full picture. Let me design the `auto_validate_by_replay` helper. 
+
+Key design decisions:
+• Reuse the replay core from `handle_risk_validate` (git log since last snapshot, classify, compute validation)
+• Write validation event with trigger "replay"
+• Dedup: don't write if the last validation event already covers the same git_hash
+
+For dedup, the validation events don't currently store the git_hash. The task says "skip writing if the last validation event in `.arc/risk_validations.jsonl` already covers the same git_hash (read the last line; if its snapshot-association matches, don't double-count)". 
+
+The validation events have a ts field but no git hash. I need a way to determine "the same snapshot-association". The cleanest approach: store the snapshot git_hash in the validation event so we can dedup. But that would change the shared `write_validation_event` shape. Actually, the task says "the shared writer already exists and sets predicted_count honestly". 
+
+Let me think about dedup more carefully. The replay validates the LAST snapshot against HEAD. Re-running on the same HEAD after a snapshot would re-validate the same last snapshot → duplicate event. To dedup, I can record the git_hash_from (snapshot hash) and git_hash_to (HEAD hash) in the event, then before writing check if an event with the same from/to already exists.
+
+I'll add two optional fields to the validation event: `git_hash_from and git_hash_to`. Since all readers parse defensively (`parse_validation_events` uses .as_array() with defaults), adding fields is backward-compatible. Let me add these fields to write_validation_event.
+
+Let me check the dedup requirement precisely: "skip writing if the last validation event in `.arc/risk_validations.jsonl` already covers the same git_hash (read the last line; if its snapshot-association matches, don't double-count)".
+
+So I'll create a helper to read the last validation event's from/to hashes, and skip if the replay's from == last.from && to == last.to. Actually the requirement says "already covers the same git_hash" — the snapshot hash. But to be safe and precise, dedup on (from, to) pair.
+
+Let me implement. I'll add `git_hash_from` and git_hash_to to `write_validation_event`, and a helper `last_validation_pair(path) -> Option<(String, String)>` in snapshots.rs.
+
+Let me check `CommitEntry` and its definition and how `handle_risk_validate` is dispatched (whether it's a `fn` that returns). It's `fn handle_risk_validate()`. Let me look at the section around 967 to see how it's wired.
+
+Let me write the code now. First, let me modify `write_validation_event` to add git hashes.
+
+Let me look at all callers of `write_validation_event` to update them:
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "write_validation_event" … ✓ (6ms)
+
+I'll add two optional parameters git_hash_from and git_hash_to to `write_validation_event`. Since there are only 2 callers (the auto_validate_after_failure test and handle_risk_validate), I'll update them. Actually, to keep the shared writer clean and avoid churn, I'll add the two hash params as `&str`.
+
+Let me design:
+
+```rust
+pub(crate) fn write_validation_event(
+    validation_path: &std::path::Path,
+    day: u32,
+    trigger: &str,
+    predicted_count: usize,
+    hits: &[String],
+    surprises: &[String],
+    accuracy_pct: f64,
+    git_hash_from: &str,
+    git_hash_to: &str,
+) -> std::io::Result<()> {
+```
+
+And add the fields to the event JSON.
+
+Then a helper:
+```rust
+/// Read the last validation event's snapshot association (from/to hashes).
+fn last_validation_pair(content: &str) -> Option<(String, String)> {
+    let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(last).ok()?;
+    let from = v.get("git_hash_from")?.as_str()?;
+    let to = v.get("git_hash_to")?.as_str()?;
+    Some((from.to_string(), to.to_string()))
+}
+```
+
+Now let me implement everything. First update `write_validation_event` and add the helper + a `pub(crate)` accessor for dedup use.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (9 → 23 lines)
+  + /// Returns the `git_hash_from`/`git_hash_to` association of the last
+  + /// validation event in the given JSONL content, or None if empty/unparseable.
+  + /// Used to dedup auto-replay validations: re-running on the same HEAD must not
+  + /// double-count a snapshot association that's already recorded.
+  + fn last_validation_pair(content: &str) -> Option<(String, String)> {
+  +     let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+  +     let v: serde_json::Value = serde_json::from_str(last).ok()?;
+  +     let from = v.get("git_hash_from")?.as_str()?.to_string();
+  +     let to = v.get("git_hash_to")?.as_str()?.to_string();
+  +     Some((from, to))
+  + }
+  + 
+    pub(crate) fn write_validation_event(
+        validation_path: &std::path::Path,
+        day: u32,
+  ···
+        hits: &[String],
+        surprises: &[String],
+        accuracy_pct: f64,
+  +     git_hash_from: &str,
+  ... (2 more lines)
+ ✓ (0ms)
+  + /// Returns the `git_hash_from`/`git_hash_to` association of the last
+  + /// validation event in the given JSONL content, or None if empty/unparseable.
+  + /// Used to dedup auto-replay validations: re-running on the same HEAD must not
+  + /// double-count a snapshot association that's already recorded.
+  + fn last_validation_pair(content: &str) -> Option<(String, String)> {
+  +     let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+  +     let v: serde_json::Value = serde_json::from_str(last).ok()?;
+  +     let from = v.get("git_hash_from")?.as_str()?.to_string();
+  ... (13 more lines)
+
+Now add the hash fields to the event JSON:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (9 → 11 lines)
+            "surprises": surprises,
+            "predicted_count": predicted_count,
+            "accuracy_pct": accuracy_pct,
+  +         "git_hash_from": git_hash_from,
+  +         "git_hash_to": git_hash_to,
+        });
+ ✓ (1ms)
+            "surprises": surprises,
+            "predicted_count": predicted_count,
+            "accuracy_pct": accuracy_pct,
+  +         "git_hash_from": git_hash_from,
+  +         "git_hash_to": git_hash_to,
+        });
+
+Now update the `auto_validate_after_failure_to` caller and the test caller. Let me update `auto_validate_after_failure_to`:
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (9 → 11 lines)
+            &hits,
+            &surprises,
+            accuracy_pct_rounded,
+  +         &last.git_hash,
+  +         "HEAD",
+        ) {
+ ✓ (0ms)
+            &hits,
+            &surprises,
+            accuracy_pct_rounded,
+  +         &last.git_hash,
+  +         "HEAD",
+        ) {
+
+Now update the test caller at line ~954:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:960..980 ✓ (0ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (3 → 4 lines)
+  -         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0).expect("first write");
+  -         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0)
+  +         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
+  +             .expect("first write");
+  +         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
+                .expect("second write");
+ ✓ (0ms)
+  -         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0).expect("first write");
+  -         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0)
+  +         write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
+  +             .expect("first write");
+  +         write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
+                .expect("second write");
+
+Now I need to add a pub(crate) accessor for the dedup helper so `commands_risk.rs` can use it. Let me add a public wrapper. Let me also add a test for `last_validation_pair`. Let me add the accessor near `write_validation_event`:
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (2 → 12 lines)
+    /// Default path for risk validation JSONL file.
+    pub(crate) const RISK_VALIDATION_PATH: &str = ".arc/risk_validations.jsonl";
+  + 
+  + /// Returns the `(git_hash_from, git_hash_to)` association of the last recorded
+  + /// validation event, or None if none exists / unparseable. Used by the
+  + /// auto-replay validator to avoid double-counting the same snapshot association.
+  + pub(crate) fn last_validation_association(
+  +     validation_path: &std::path::Path,
+  + ) -> Option<(String, String)> {
+  +     let content = std::fs::read_to_string(validation_path).ok()?;
+  +     last_validation_pair(&content)
+  + }
+ ✓ (0ms)
+    /// Default path for risk validation JSONL file.
+    pub(crate) const RISK_VALIDATION_PATH: &str = ".arc/risk_validations.jsonl";
+  + 
+  + /// Returns the `(git_hash_from, git_hash_to)` association of the last recorded
+  + /// validation event, or None if none exists / unparseable. Used by the
+  + /// auto-replay validator to avoid double-counting the same snapshot association.
+  + pub(crate) fn last_validation_association(
+  +     validation_path: &std::path::Path,
+  ... (4 more lines)
+
+Now let me add tests for last_validation_pair in the snapshots test module. Let me add them near the other tests.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (2 → 28 lines)
+  +     #[test]
+  +     fn test_last_validation_pair_basic() {
+  +         let jsonl =
+  +             "{\"day\":1,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"bbb\"}\n{\"day\":2,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"ccc\"}";
+  +         assert_eq!(
+  +             last_validation_pair(jsonl),
+  +             Some(("aaa".to_string(), "ccc".to_string())),
+  +             "should return the last event's from/to hashes"
+  +         );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_last_validation_pair_empty() {
+  +         assert_eq!(last_validation_pair(""), None);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_last_validation_pair_missing_field() {
+  +         let jsonl = "{\"day\":1,\"hits\":[]}";
+  +         assert_eq!(
+  ... (8 more lines)
+ ✓ (0ms)
+  +     #[test]
+  +     fn test_last_validation_pair_basic() {
+  +         let jsonl =
+  +             "{\"day\":1,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"bbb\"}\n{\"day\":2,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"ccc\"}";
+  +         assert_eq!(
+  +             last_validation_pair(jsonl),
+  +             Some(("aaa".to_string(), "ccc".to_string())),
+  +             "should return the last event's from/to hashes"
+  ... (13 more lines)
+
+Now let me update the import in `commands_risk.rs` to include `last_validation_association`, and update the `handle_risk_validate` caller. First let me update the import list:
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (6 → 6 lines)
+    pub(crate) use crate::commands_risk_snapshots::{
+        auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  -     risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  -     RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  +     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  +     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    };
+ ✓ (1ms)
+    pub(crate) use crate::commands_risk_snapshots::{
+        auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  -     risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  -     RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  +     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  +     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    };
+
+Now let me refactor `handle_risk_validate to extract the replay core into auto_validate_by_replay`. I'll rewrite the function section from line 2144 to the end (2256). Let me design the new structure:
+
+• `handle_risk_validate()` loads the last snapshot, runs git log, classifies, computes, prints the report, and then calls the shared persistence logic. I'll extract the persistence (replay + write with dedup) into a reusable `auto_validate_by_replay()`.
+
+Let me write a shared helper that:
+1. reads last snapshot (returns None quietly if absent/empty)
+2. runs git log; returns None if no commits
+3. computes result + head hash
+4. writes event with dedup
+5. returns the computed result so the CLI path can print the report
+
+Let me design so both paths share one implementation. I'll make `auto_validate_by_replay()` the core that does everything, and have `handle_risk_validate()` call it and print a report from the returned data.
+
+Let me write:
+
+```rust
+/// Result of an auto-replay validation: enough to both persist a matched pair
+/// and (in the CLI path) render a report.
+struct ReplayValidated {
+    day: u64,
+    git_hash: String,
+    head_hash: String,
+    predicted: Vec<String>,
+    result: ValidationResult,
+    /// true if a validation event was actually persisted (i.e., not deduped/empty)
+    recorded: bool,
+}
+
+/// Replay the last risk snapshot against commits since its git_hash.
+///
+/// Shared core used by both the `/risk validate` CLI path and the opt-in
+/// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`). Quietly no-ops when:
+/// - no snapshots, or the last snapshot has no top_10 predictions
+/// - there are no commits since the snapshot (nothing to validate)
+/// - the same snapshot association is already recorded (dedup — re-running on
+///   the same HEAD must not double-count)
+/// When hits or surprises exist and aren't already recorded, appends a
+/// validation event (trigger "replay") so the prediction meter's validation
+/// half accumulates.
+fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+    // 1. Load the most recent snapshot
+    let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+    let snapshots = parse_all_snapshots(&content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
+    }
+
+    // 2. Check if there are commits since the snapshot
+    let log_output = crate::git::run_git(&[
+        "log",
+        &format!("{}..HEAD", last.git_hash),
+        "--name-only",
+        "--oneline",
+    ])
+    .ok()?;
+    if log_output.trim().is_empty() {
+        return None;
+    }
+
+    // 3. Parse commits and classify breakage
+    let entries = parse_git_log_name_only(&log_output);
+    let commit_count = entries.len();
+    let broke_files = classify_broke_files(&entries);
+
+    // 4. Get current full risk ranking for rank info on surprises
+    let all_risks = compute_file_risk_scores();
+    let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
+
+    // 5. Compute validation
+    let result = compute_validation(&last.predicted, &broke_files, Some(&all_ranked), commit_count);
+    let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
+
+    // 6. Persist a validation event (deduped by snapshot association), so the
+    //    prediction meter's validation half turns its crank.
+    let hits: Vec<String> = result.hits.clone();
+    let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+    let mut recorded = false;
+    if !hits.is_empty() || !surprises.is_empty() {
+        // Dedup: skip if the last validation event already covers this same
+        // snapshot association — re-running on the same HEAD must not append
+        // duplicates (mirrors the last_snapshot_git_hash dedup discipline).
+        if let Some((from, to)) = last_validation_association(std::path::Path::new(RISK_VALIDATION_PATH))
+        {
+            if from == last.git_hash && to == head_hash {
+                recorded = false;
+                return None;
+            }
+        }
+        let total_changed = hits.len() + surprises.len();
+        let accuracy_pct = if total_changed > 0 {
+            (hits.len() as f64 / total_changed as f64) * 100.0
+        } else {
+            0.0
+        };
+        let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
+        if let Err(e) = write_validation_event(
+            std::path::Path::new(RISK_VALIDATION_PATH),
+            last.day as u32,
+            "replay",
+            last.predicted.len(),
+            &hits,
+            &surprises,
+            accuracy_pct_rounded,
+            &last.git_hash,
+            &head_hash,
+        ) {
+            eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+        } else {
+            recorded = true;
+        }
+    }
+
+    Some(ReplayValidated {
+        day: last.day,
+        git_hash: last.git_hash.clone(),
+        head_hash,
+        predicted: last.predicted.clone(),
+        result,
+        recorded,
+    })
+}
+
+/// Opt-in auto-replay validation on session exit. Gated by the same
+/// `arc_RISK_AUTOSNAPSHOT=1` flag as `auto_risk_snapshot`, so the validation
+/// half of the prediction meter accumulates in lockstep with the snapshot half.
+/// Emits a brief stderr note when an event is recorded. Never panics.
+pub(crate) fn auto_validate_by_replay() {
+    match replay_validate_last_snapshot() {
+        Some(v) if v.recorded => {
+            eprintln!(
+                "  {DIM}📊 Risk validation: replayed last snapshot ({}..{}) — {}/{} predicted files hit ({:.1}% accuracy){RESET}",
+                v.git_hash,
+                v.head_hash,
+                v.result.hits.len(),
+                v.result.hits.len() + v.result.clean.len(),
+                if v.result.hits.len() + v.result.surprises.len() > 0 {
+                    (v.result.hits.len() as f64 / (v.result.hits.len() + v.result.surprises.len()) as f64) * 100.0
+                } else { 0.0 }
+            );
+        }
+        _ => {}
+    }
+}
+```
+
+Wait, there's an issue with the dedup: if the last event matches, I set `recorded = false; return None;`. But returning None is fine for the auto-replay path. However `handle_risk_validate` needs the report even if already recorded. Hmm. But actually if it's already recorded, we don't want to write again AND we probably shouldn't print the report again either (it's a dedup no-op). Actually the manual `/risk validate` CLI path would still want to display. But the requirement says "then have `handle_risk_validate()` call this shared helper (or keep the helper wrapping the shared core) so both paths share one implementation." 
+
+The simplest clean approach that satisfies "share one implementation" and keeps both working: extract the replay core that computes the result, and the write+dedup. But `handle_risk_validate` currently prints the report regardless. If I make `replay_validate_last_snapshot` return `None` on dedup, the CLI path would stop printing too.
+
+Let me reconsider. The requirement's dedup is specifically for the auto-replay to avoid double counting. For the manual CLI path, the existing behavior prints a report every time — that's fine and desirable (someone explicitly typed `/risk validate`). 
+
+The cleanest design: separate "compute replay result" (shared) from "persist with dedup". But the task says share one implementation. Let me make `replay_validate_last_snapshot` return the `ReplayValidated` regardless of dedup, and have a separate persist guard. Actually simpler: the dedup naturally lives in the write step. Let me reconsider whether dedup should suppress even the auto-replay report.
+
+The task says for the auto path: "If the replay-for-this-hash is already recorded, no-op so the ledger stays clean". That means on dedup, no event written. It's fine if we don't print either (or print nothing). 
+
+I'll structure it so `handle_risk_validate` shares the same compute core. Let me make `replay_validate_last_snapshot` return the full `ReplayValidated` always (when there's something to validate, regardless of dedup), and put the dedup check inside a persistence helper that returns whether it recorded. That way `handle_risk_validate` can still print the report.
+
+Let me restructure:
+
+```rust
+fn replay_validate_last_snapshot() -> Option<ReplayValidated> {
+    // steps 1-5 same, returns the structured result
+    // step 6: persistence with dedup
+    let hits...
+    if !hits.is_empty() || !surprises.is_empty() {
+        let already = last_validation_association(...).map_or(false, |(f, t)| f == *last.git_hash && t == *head_hash);
+        if !already {
+            // write
+            recorded = true;
+        }
+    }
+    Some(ReplayValidated { ..., recorded })
+}
+```
+
+Then `auto_validate_by_replay` prints only if recorded. `handle_risk_validate` prints the report from the return regardless.
+
+Wait, but there's a subtlety: if dedup hits (already recorded), `handle_risk_validate` would print a report about the (already-recorded) association and skip writing — fine. But currently `handle_risk_validate` always writes when there are hits/surprises (no dedup). Adding dedup here changes that: if the CLI user runs `/risk validate` twice on the same HEAD, the second time it won't write a duplicate. That's actually an improvement and consistent with the "keep the ledger clean" goal. Good.
+
+Now let me restructure the whole block. Let me rewrite `handle_risk_validate` and add the new functions.
+
+Let me now replace lines 2143-2256.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit ? (20 → 149 lines)
+  + /// Result of replaying the last snapshot against commits since its git_hash.
+  + /// Enough to both persist a matched prediction-outcome pair and (in the CLI
+  + /// path) render a human-readable report.
+  + struct ReplayValidated {
+  +     day: u64,
+  +     git_hash: String,
+  +     head_hash: String,
+  +     predicted: Vec<String>,
+  +     result: ValidationResult,
+  +     /// true if a validation event was actually persisted (not deduped/no-op)
+  +     recorded: bool,
+  + }
+  + 
+  + /// Replay the last risk snapshot against commits since its git_hash.
+  + ///
+  + /// Shared core used by BOTH the `/risk validate` CLI path and the opt-in
+  + /// REPL-exit auto-replay hook (`arc_RISK_AUTOSNAPSHOT=1`), so the two paths
+  + /// share one implementation. Quietly returns None when:
+  + /// - no snapshots exist, or the last snapshot has no top_10 predictions
+  + /// - there are no commits since the snapshot (nothing to validate)
+  ... (144 more lines)
+ ✗ (0ms)
+    │ Invalid arguments: missing 'path' parameter
+
+I need to replace the whole block. Let me read the current exact block to replace it properly.
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2143..2268 ✓ (1ms)
+
+Now I'll replace the whole block from line 2143 to 2256.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (114 → 152 lines)
+  - /// Handle `/risk validate` — compare past predictions against actual breakage.
+  - fn handle_risk_validate() {
+  -     // 1. Load the most recent snapshot
+  -     let path = std::path::Path::new(RISK_SNAPSHOT_PATH);
+  -     let contents = match std::fs::read_to_string(path) {
+  -         Ok(c) if !c.trim().is_empty() => c,
+  -         Ok(_) => {
+  -             println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
+  -             return;
+  -         }
+  -         Err(_) => {
+  -             println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
+  -             return;
+  -         }
+  -     };
+  - 
+  -     // Take the last non-empty line (most recent snapshot)
+  -     let last_line = match contents.lines().rev().find(|l| !l.trim().is_empty()) {
+  -         Some(l) => l,
+  -         None => {
+  ... (223 more lines)
+ ✓ (2ms)
+  - /// Handle `/risk validate` — compare past predictions against actual breakage.
+  - fn handle_risk_validate() {
+  -     // 1. Load the most recent snapshot
+  -     let path = std::path::Path::new(RISK_SNAPSHOT_PATH);
+  -     let contents = match std::fs::read_to_string(path) {
+  -         Ok(c) if !c.trim().is_empty() => c,
+  -         Ok(_) => {
+  -             println!("  No snapshots found. Run {BOLD}/risk snapshot{RESET} first.");
+  ... (13 more lines)
+
+Now let me update src/repl.rs to call auto_validate_by_replay() inside the opt-in guard:
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (6 → 11 lines)
+        // Dedups by git hash → at most one snapshot per HEAD.
+        if crate::commands_risk::risk_autosnapshot_enabled() {
+            crate::commands_risk::auto_risk_snapshot();
+  +         // Opt-in companion: replay-validate the pre-exit snapshot against
+  +         // commits since it, so the validation half of the prediction meter
+  +         // accumulates in lockstep with the snapshot half. Also gated by the
+  +         // same flag; deduped so re-running on one HEAD records at most once.
+  +         crate::commands_risk::auto_validate_by_replay();
+        }
+ ✓ (1ms)
+        // Dedups by git hash → at most one snapshot per HEAD.
+        if crate::commands_risk::risk_autosnapshot_enabled() {
+            crate::commands_risk::auto_risk_snapshot();
+  +         // Opt-in companion: replay-validate the pre-exit snapshot against
+  +         // commits since it, so the validation half of the prediction meter
+  +         // accumulates in lockstep with the snapshot half. Also gated by the
+  +         // same flag; deduped so re-running on one HEAD records at most once.
+  +         crate::commands_risk::auto_validate_by_replay();
+        }
+
+

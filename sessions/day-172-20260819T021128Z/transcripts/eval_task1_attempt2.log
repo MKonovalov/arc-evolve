@@ -1,0 +1,131 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll evaluate the diff against the task. Let me verify the implementation matches the requirements.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git diff H… ✓ (8ms)
+
+The commit is present and matches the task. Let me verify the key pieces in the current file state.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay\|… ✓ (4ms)
+
+The key functions are present. Let me verify the dedup logic and the tests exist, and confirm the REPL hook is inside the same opt-in guard.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1385,1405p' src/repl.rs ✓ (3ms)
+
+The repl hook is correctly inside the `risk_autosnapshot_enabled()` guard. Let me verify the tests were added in the `#[cfg(test)]` module of commands_risk.rs (the task required a deterministic replay test and a dedup test). Let me search for the new tests.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn test_.*replay\|fn test… ✓ (4ms)
+
+The task asked for tests for the replay core. Let me check if new replay-specific tests were added in the commands_risk.rs test module.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2690,2800p' src/commands_r… ✓ (4ms)
+
+Let me search for a test that specifically exercises the new `replay_validate_core` function (the deterministic replay test the task requested).
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_core\|rep… ✓ (9ms)
+
+replay_validate_core is only used in the implementation (from replay_validate_last_snapshot), not referenced in any test. The task explicitly required:
+
+│ Add tests in the #[cfg(test)] module of commands_risk.rs for the replay core:
+│ - a deterministic test that given a synthetic snapshot JSONL ... the pair computes the correct hits/surprises/accuracy
+│ - a dedup test: the same git_hash replayed twice must not produce two events.
+
+The diff shown in the task did NOT include any test for `replay_validate_core`. The tests added were only in `commands_risk_snapshots.rs (test_last_validation_pair_basic, test_last_validation_pair_empty, test_last_validation_pair_missing_field`) — these test the dedup accessor helper but NOT the replay core deterministically nor the dedup-at-the-replay-level requirement.
+
+Let me check whether the diff in the task added any tests in commands_risk.rs at all. Looking at the provided diff, the commands_risk.rs changes were all implementation (no test additions). Let me confirm the dedup test requirement isn't met elsewhere.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn test.*replay\|replay.… ✓ (6ms)
+
+The task explicitly required two tests:
+1. A deterministic test of the replay core (synthetic snapshot JSONL + synthetic git log → correct hits/surprises/accuracy) in `commands_risk.rs`.
+2. A dedup test: the same git_hash replayed twice must not produce two events.
+
+Neither test was added. The only new tests are the three `last_validation_pair` tests in commands_risk_snapshots.rs, which test the small accessor helper but NOT the replay core's hit/surprise/accuracy computation NOR the replay-level dedup (the dedup lives in `replay_validate_core`, which reads the actual files — it's not tested with a synthetic double-replay).
+
+The task framed tests as requirements ("must pass", "Add tests in the `#[cfg(test)]` module"). However, let me weigh this. This is an evolve task. The core functionality works (builds, existing tests pass), but the verification section explicitly requires tests for the replay core that weren't provided. The dedup logic in `replay_validate_core` is real and could have a bug.
+
+Let me quickly check the dedup logic for an actual bug — since a deterministic test would've caught a real issue. Let me examine the dedup comparison in the core.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2200,2245p' src/commands_r… ✓ (3ms)
+
+The dedup logic looks functionally correct: it checks last_validation_association and skips if the same from/to association already exists. So re-running on the same HEAD won't double-count. The implementation is correct.
+
+The main gap: the task's Verification section explicitly required tests for the replay core (a deterministic synthetic test and a dedup test). These were not added — only the three `last_validation_pair` accessor tests were added in `commands_risk_snapshots.rs`. 
+
+Now, the grading rubric says: "FAIL only if: ... Tests pass but the feature clearly doesn't work; Obvious bugs that tests don't catch." The feature DOES work — I verified the logic is sound. The missing tests are a deviation from the task's verification requirements, but they aren't a functional failure.
+
+However, the task's verification explicitly said "Add tests in the #[cfg(test)] module of `commands_risk.rs` for the replay core" with specific test requirements. This is a tangible requirement miss. But per the rubric, I should be "strict but fair" and not fail for minor imperfections. Missing required tests is more than a mere style preference — it's an explicit specification item.
+
+Let me weigh this carefully. The core functionality:
+• ✅ Opt-in auto-replay hook added on REPL exit, inside the same `risk_autosnapshot_enabled()` guard (product-safe, opt-in)
+• ✅ Shared replay core reused by both `/risk validate` and the auto-replay hook
+• ✅ Dedup logic present and correct
+• ✅ `auto_validate_by_replay` emits stderr note on record
+• ✅ Accessor `last_validation_association` added
+• ✅ Tests added for the accessor helper
+• ✅ Builds and tests pass
+• ❌ The required deterministic replay-core test and dedup test were NOT added in commands_risk.rs
+
+The implementation matches the task description functionally, but the explicit test requirement was partially unmet. The verification section listed the replay-core tests as a hard requirement ("Verification: ... Add tests in the `#[cfg(test)]` module of commands_risk.rs for the replay core").
+
+Given the explicit nature of the test requirement and that this is an evolve task where tests-before-features is a stated discipline, I'll flag this. However, "FAIL" per the rubric should be reserved for when the implementation doesn't match or the feature doesn't work. The feature works. But the missing required tests are a concrete deliverable miss.
+
+Given the task explicitly and precisely described two specific tests that must be added, and those weren't added, this is a real deviation from the task specification. I'll render FAIL on the missing required tests, since the verification section was a mandatory part of the task ("must pass ... Add tests"). Combined with CLAUDE.md's "Write tests before adding features" and "Never delete existing tests" discipline, missing the explicitly-required tests for new logic (the deterministic replay test and dedup test) is a substantive gap, not a style nit.
+
+Let me double check the docs update requirement too before finalizing.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 10657ed --stat | head -20… ✓ (8ms)
+
+Let me check the full commit (the eval-fix commit) and the doc changes across both commits.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 54e3a52 --stat | head -20… ✓ (10ms)
+
+CLAUDE.md was not updated. The task's Docs section explicitly required:
+
+│ Update CLAUDE.md in the `commands_risk_snapshots.rs` bullet (and the `commands_risk.rs` bullet) to note that the opt-in `arc_RISK_AUTOSNAPSHOT=1` REPL-exit hook now ALSO runs a replay-validate...
+
+CLAUDE.md was NOT modified in either commit. This is a second unmet requirement.
+
+So the evaluation:
+1. **Core feature**: Implemented correctly ✅
+2. **Required tests** (deterministic replay + dedup): NOT added ❌ (only accessor-helper tests added)
+3. **Docs update** (CLAUDE.md): NOT updated ❌
+
+Two of the three explicit non-code deliverables are missing. The core implementation is functionally correct, but the task had explicit verification and docs requirements that were not met. Given the task explicitly required tests for new logic in a repo with "write tests before adding features" discipline, and required CLAUDE.md docs updates, both of which are absent, I'll render FAIL with clear reasons.
+
+Let me write the verdict.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_pla… (5 lines) ✓ (6ms)
+
+Verdict written. 
+
+Summary of my evaluation:
+• **Core feature**: Correct — the opt-in auto-replay validation hook is on REPL exit inside the existing risk_autosnapshot_enabled() guard (product-safe), shares the replay core with /risk validate, has sound dedup logic, and emits a stderr note on record.
+• Missing required tests: The task explicitly required a deterministic replay-core test (synthetic snapshot JSONL + synthetic git log) and a dedup test (same git_hash replayed twice). Neither was added — only the last_validation_pair accessor tests exist in `commands_risk_snapshots.rs`.
+• **Missing docs**: The task explicitly required a CLAUDE.md update; CLAUDE.md was not modified in either commit.
+
+FAIL rendered due to the two unmet explicit deliverables, with the functional implementation being noted as correct.
+
+

@@ -1,0 +1,146 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -15 && echo "---… ✓ (7ms)
+
+Let me look at the risk validation code to understand the gap precisely before planning.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "=== risk snapshots dir ===" … ✓ (6ms)
+
+The validation file doesn't exist. Let me examine the risk snapshot/validation code to understand the structure so I can write a precise plan.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_after_failu… ✓ (4ms)
+
+I have a clear picture of the snapshot/validation structure. Let me look at how snapshots relate to git hashes and what changed files look like, to design the replay path precisely.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '330,440p' src/commands_ris… ✓ (4ms)
+
+I now understand the structure. Let me look at the `auto_validate_after_failure_to` function to understand the matching logic, and how it computes hits, so I can design a replay path that reuses it.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '154,330p' src/commands_ris… ✓ (4ms)
+
+Now I fully understand the structure. The current validation uses the *last* snapshot and matches it against files changed *after a failure*. The replay gap: there's no path that takes an *old* snapshot (keyed by git hash), looks at what actually changed in the commits after that hash, and produces a validation event.
+
+Let me verify the CLI `/risk validate` subcommand to understand the existing manual path.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "validate\|snapshot\|RISK_… ✓ (4ms)
+
+Let me check the existing handle_risk_validate and the consecutive-pair validation logic in `commands_risk.rs`, since there may already be a partial replay mechanism.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk_validate\|… ✓ (4ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2144,2260p' src/commands_r… ✓ (4ms)
+
+I now have a complete understanding. The `/risk validate` command already does a replay against the *last* snapshot only. The gap described in the assessment is that this `/risk validate` path exists but only validates the last snapshot, and it's only run via CLI by a human/harness.
+
+Wait — actually there IS a replay path here (`/risk validate` uses `git log {git_hash}..HEAD`) but it's CLI-only and not automated in evolve. And critically — re-reading the assessment: "there's no post-hoc/replay path that pairs an existing snapshot against subsequent commits" — but /risk validate does exactly that for the top-1 snapshot. The real gap is **automation**: nothing calls validate-replay automatically in the evolve loop, so validation events never accumulate (0 events).
+
+Let me now design the plan. The cleanest, most surgical approach:
+
+**Task 1 (dream-advancing, off-shape):** Add an automated replay/auto-validation hook that runs during evolve session wrap-up — after the session's commits, take the last pre-session snapshot and validate it against what changed since that snapshot's git hash, writing a validation event (autodim via existing `write_validation_event`). This closes the cold-start gap: every evolve session produces a validation event even when nothing "failed."
+
+Let me think about where to hook it. The CLAUDE.md says `auto_risk_snapshot` fires from `/commit` and REPL-exit only — NOT in evolve (evolve uses raw git commit). So the validation half is also starved. The most product-safe, evolve-opt-in place to add a validation trigger is exactly where the dream's milestone points, and it must be opt-in per the two-audiences rule.
+
+Let me check how session wrap-up / `session.rs or prompt.rs` handles end-of-session, or whether there's an existing evolve-side hook.
+
+Actually, given the two-audiences product-safety rule, the cleanest approach: add a `--validate-risk` or a new CLI subcommand path that evolve.sh can optionally call, OR reuse `/risk validate` which already exists and replays. The MINIMAL change to close the gap: make the existing validation logic runnable in a batch/auto fashion during evolve, gated by an env var (opt-in, product-safe), so the evolve loop can call it.
+
+Let me look at how the session wrap-up works and whether there's a natural hook point.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_risk_snapshot\|risk… ✓ (4ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1380,1400p' src/repl.rs ✓ (3ms)
+
+Now I understand the full picture. The `auto_risk_snapshot` fires on REPL exit when opt-in. The `auto_validate_after_failure` fires only from watch-mode fix loops after failures.
+
+The cleanest closure: add an **auto-validate on REPL exit** (mirroring the existing `auto_risk_snapshot` opt-in pattern) that replays the last snapshot against what changed since its git hash. This directly connects the two halves: `auto_risk_snapshot` records a prediction at HEAD; on a later session exit (same opt-in env var), validate the prior snapshot against the commits that happened since.
+
+Actually, the simplest, most correct design that closes the cold-start: **extend the existing opt-in exit hook** (`arc_RISK_AUTOSNAPSHOT=1`) to ALSO run a validation replay after taking the new snapshot. When you snapshot at session start... hmm, but snapshot is on exit.
+
+Let me think about the natural cadence within the existing /risk validate logic. The current `/risk validate` replays the last snapshot against `git log {hash}..HEAD`. That's exactly the pairing needed. The gap is purely **automation**: it's CLI-only.
+
+So the minimal, surgical, product-safe change: **add an opt-in auto-validation that runs the existing last-snapshot replay at REPL exit** (gated by the same `arc_RISK_AUTOSNAPSHOT` env var, which already exists and is off by default). Given the two-audiences rule, gating by the existing opt-in env var is correct and product-safe.
+
+But wait — the assessment specifically frames the gap as needing evolve-loop automation (raw git commit, no /commit, no REPL exit). The replay logic itself already exists in `handle_risk_validate`. The real question is just wiring it to fire somewhere in evolve that isn't a failure-dependent path.
+
+Given the constraint that this is planning only and I should produce a focused, small, testable task, let me define Task 1 cleanly: extract the last-snapshot replay-validate core into a reusable function (`auto_validate_by_replay`) and call it from the opt-in REPL-exit hook alongside the snapshot. This makes the validation meter accumulate whenever the snapshot meter does — closing the cold-start with no new surface.
+
+Let me verify the tests count and structure for the risk module to size the task, then write the plan. I have enough context.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn handle_risk_validate\… ✓ (4ms)
+
+I have enough context. Let me now plan the session. The assessment strongly recommends an off-shape, dream-advancing task to close the risk validation cold-start. There are no community issues. I'll allocate:
+
+• **Task 1** (self-driven, dream-advancing, off-shape): automate the replay-validation so validation events accumulate during evolve — the #1 suggested priority.
+• Task 2 (self-driven, small): document/gate the arcpedia-unreachable-in-evolve reality (priority 2 from assessment).
+
+Let me write the task files.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p session_plan && rm -f ses… ✓ (5ms)
+
+There's an assessment.md in session_plan — let me leave it. Now let me write the task files.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_01.md (92 lines) ✓ (0ms)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_02.md (50 lines) ✓ (0ms)
+
+Now the issue responses file — there are no community issues today, so I'll note that.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/issue_responses.md (18 lines) ✓ (0ms)
+
+Now let me commit the session plan.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add session_plan/ && git commi… ✓ (5ms)
+
+session_plan/ is gitignored (as noted in CLAUDE.md — it's ephemeral and gitignored). The commit was a no-op (|| true). The task files are written to disk, which is the deliverable. Let me verify the commit status is clean of any stray changes.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short && echo "--- ta… ✓ (8ms)
+
+Working tree is clean (gitignored `session_plan/` is untracked, which is expected). The session plan is complete.
+
+## Session Plan — Day 172
+
+I produced the plan deliverables in `session_plan/`:
+
+*task_01.md* (self-driven, **dream-advancing, off-shape** — the assessment's priority #1): Close the risk-validation cold-start via an opt-in auto-replay on session exit. This directly advances my day-135 DREAM milestone (≥5 matched prediction-outcome pairs) by wiring the existing last-snapshot replay logic (`git log {hash}..HEAD`) into the same opt-in `arc_RISK_AUTOSNAPSHOT=1` REPL-exit hook that already accumulates snapshots — gated product-safe, off by default, with dedup so the validation ledger stays clean. This is a genuinely different shape than the last 9 sessions of small base-file hardening, addressing the trajectory "possible stuck" flag.
+
+task_02.md (self-driven, polish — assessment priority #2): Surface the arcpedia-unreachable-in-evolve reality in `skills/yopedia/SKILL.md` — an honest doc-only note so recall/ingest no-ops fail visibly instead of silently.
+
+**issue_responses.md**: No community issues existed today, so no issue responses — both slots allocated to self-driven work (satisfying the mandatory ≥1 self-driven slot).
+
+I did not implement anything — planning only, as instructed. I stopped after writing the files. The session_plan/ directory is gitignored per repo convention, so no commit was created (expected), and the working tree is clean.
+
+
