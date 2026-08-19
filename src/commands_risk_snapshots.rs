@@ -197,6 +197,8 @@ pub(crate) fn write_validation_event(
     accuracy_pct: f64,
     git_hash_from: &str,
     git_hash_to: &str,
+    total_scored: Option<usize>,
+    scored_broke: Option<usize>,
 ) -> std::io::Result<()> {
     let ts = std::process::Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
@@ -213,7 +215,7 @@ pub(crate) fn write_validation_event(
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let event = serde_json::json!({
+    let mut event = serde_json::json!({
         "ts": ts,
         "day": day,
         "trigger": trigger,
@@ -224,6 +226,16 @@ pub(crate) fn write_validation_event(
         "git_hash_from": git_hash_from,
         "git_hash_to": git_hash_to,
     });
+
+    // Optional lift-measurement fields — persist only when both are known so
+    // old writers (and the pre-lift format) keep producing backward-compatible
+    // events. `predicted_broke` is derivable from `hits` and so not stored.
+    if let Some(ts_) = total_scored {
+        event["total_scored"] = serde_json::json!(ts_);
+    }
+    if let Some(sb) = scored_broke {
+        event["scored_broke"] = serde_json::json!(sb);
+    }
 
     if let Some(parent) = validation_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -327,6 +339,8 @@ fn auto_validate_after_failure_to(
         accuracy_pct_rounded,
         &last.git_hash,
         "HEAD",
+        None,
+        None,
     ) {
         eprintln!("  {DIM}(warning: could not write risk validation entry: {e}){RESET}");
     }
@@ -358,11 +372,23 @@ fn auto_validate_after_failure_to(
 }
 
 /// A single parsed validation event from `.arc/risk_validations.jsonl`.
+#[derive(Default)]
 pub(crate) struct ValidationEvent {
     pub(crate) day: u32,
     pub(crate) hit_count: usize,
     pub(crate) total_changed: usize,
     pub(crate) accuracy_pct: f64,
+    /// The flagged population: how many files were predicted high-risk that the
+    /// writer persisted (`predicted_count`, already present in the JSONL).
+    /// Parsed for the lift measurement (flagged rate denominator).
+    pub(crate) predicted_count: Option<usize>,
+    /// Total number of scored source files the scorer could rank in this
+    /// population (`all_ranked.len()`). Optional for backward-compat: absent on
+    /// old events recorded before the lift measurement landed.
+    pub(crate) total_scored: Option<usize>,
+    /// Count of scored source files that actually broke (hits + scored surprises).
+    /// Optional for the same backward-compat reason as `total_scored`.
+    pub(crate) scored_broke: Option<usize>,
 }
 
 /// Load validation history from a JSONL file.
@@ -391,12 +417,18 @@ pub(crate) fn parse_validation_events(content: &str) -> Vec<ValidationEvent> {
         let surprises = val["surprises"].as_array().map(|a| a.len()).unwrap_or(0);
         let total_changed = hits + surprises;
         let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+        let predicted_count = val["predicted_count"].as_u64().map(|v| v as usize);
+        let total_scored = val["total_scored"].as_u64().map(|v| v as usize);
+        let scored_broke = val["scored_broke"].as_u64().map(|v| v as usize);
 
         events.push(ValidationEvent {
             day,
             hit_count: hits,
             total_changed,
             accuracy_pct,
+            predicted_count,
+            total_scored,
+            scored_broke,
         });
     }
     events
@@ -931,7 +963,7 @@ mod tests {
         let hits = vec!["src/main.rs".to_string(), "src/cli.rs".to_string()];
         let surprises = vec!["src/prompt.rs".to_string()];
         write_validation_event(
-            &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456",
+            &path, 129, "cli", 5, &hits, &surprises, 66.7, "abc123", "def456", None, None,
         )
         .expect("write validation event");
 
@@ -970,6 +1002,8 @@ mod tests {
             100.0,
             "abc123",
             "def456",
+            None,
+            None,
         )
         .expect("write validation event");
 
@@ -1017,10 +1051,14 @@ mod tests {
 
         let hits = vec!["src/main.rs".to_string()];
         let surprises: Vec<String> = vec![];
-        write_validation_event(&path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb")
-            .expect("first write");
-        write_validation_event(&path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc")
-            .expect("second write");
+        write_validation_event(
+            &path, 1, "cli", 10, &hits, &surprises, 100.0, "aaa", "bbb", None, None,
+        )
+        .expect("first write");
+        write_validation_event(
+            &path, 2, "cli", 10, &hits, &surprises, 100.0, "aaa", "ccc", None, None,
+        )
+        .expect("second write");
 
         let events = load_validation_history_from(&path);
         assert_eq!(events.len(), 2, "appending twice yields two lines");

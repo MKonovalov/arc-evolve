@@ -2245,6 +2245,23 @@ fn replay_validate_core(
     // weren't predicted. Only record when there was something to validate.
     let hits: Vec<String> = result.hits.clone();
     let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+
+    // Lift measurement: how often do flagged (predicted-high-risk) files break
+    // relative to the baseline over ALL scored files the scorer could rank?
+    // - predicted_broke = hits (how many flagged files broke)
+    // - total_scored = the whole scored population `all_ranked.len()`
+    // - scored_broke = scored source files that broke = hits + scored surprises
+    //   (surprises are already filtered to scored files by `compute_validation`).
+    // Both are optional: absent when `all_ranked` is unknown (no population to
+    // compare against), or when nothing broke. They're persisted for newly
+    // recorded events only; old events remain backward-compatible.
+    let total_scored = all_ranked.map(|ranked| ranked.len());
+    let scored_broke = if hits.is_empty() && surprises.is_empty() {
+        None
+    } else {
+        Some(hits.len() + surprises.len())
+    };
+
     let mut recorded = false;
     if !hits.is_empty() || !surprises.is_empty() {
         let already = last_validation_association(validation_path)
@@ -2267,6 +2284,8 @@ fn replay_validate_core(
                 accuracy_pct_rounded,
                 &last.git_hash,
                 head_hash,
+                total_scored,
+                scored_broke,
             ) {
                 eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
             } else {

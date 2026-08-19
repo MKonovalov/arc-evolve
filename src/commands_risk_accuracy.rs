@@ -27,6 +27,10 @@ pub(crate) struct AccuracyStats {
     pub(crate) trend: AccuracyTrend,
     pub(crate) best_day: Option<(u32, f64)>, // (day, accuracy_pct)
     pub(crate) worst_day: Option<(u32, f64)>, // (day, accuracy_pct)
+    /// Lift factor: how much more often flagged (predicted-high-risk) files
+    /// break vs the baseline over all scored files. `None` when no usable
+    /// event (carrying `total_scored`/`scored_broke`) exists yet.
+    pub(crate) overall_lift: Option<f64>,
 }
 
 /// Compute trend by comparing the average accuracy of the last N events
@@ -66,6 +70,7 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
             trend: AccuracyTrend::Insufficient,
             best_day: None,
             worst_day: None,
+            overall_lift: None,
         };
     }
 
@@ -107,6 +112,48 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
 
     let trend = compute_accuracy_trend(events);
 
+    // Discriminative breakage-rate lift: do flagged (high-risk) files break at
+    // a higher rate than the baseline over ALL scored files? Aggregate across
+    // events that carry `total_scored`/`scored_broke` (the lift feature);
+    // events without them (older format) are skipped without panic.
+    //   flagged_rate = sum(hit_count) / sum(predicted_count)
+    //   baseline_rate = sum(scored_broke) / sum(total_scored)
+    //   lift = flagged_rate / baseline_rate  (guard division by zero → None)
+    let mut lift_hit_sum: usize = 0;
+    let mut lift_predicted_sum: usize = 0;
+    let mut lift_total_scored_sum: usize = 0;
+    let mut lift_scored_broke_sum: usize = 0;
+    let mut lift_events_used = 0usize;
+    for e in events {
+        // A usable event needs the flagged population (predicted_count), the
+        // whole scored population (total_scored), and the scored-broke count.
+        match (e.predicted_count, e.total_scored, e.scored_broke) {
+            (Some(pred), Some(total_scored), Some(scored_broke)) => {
+                lift_hit_sum += e.hit_count;
+                lift_predicted_sum += pred;
+                lift_total_scored_sum += total_scored;
+                lift_scored_broke_sum += scored_broke;
+                lift_events_used += 1;
+            }
+            _ => {} // older event without the lift fields — skip
+        }
+    }
+    let overall_lift = if lift_events_used > 0
+        && lift_predicted_sum > 0
+        && lift_total_scored_sum > 0
+        && lift_scored_broke_sum > 0
+    {
+        let flagged_rate = lift_hit_sum as f64 / lift_predicted_sum as f64;
+        let baseline_rate = lift_scored_broke_sum as f64 / lift_total_scored_sum as f64;
+        if baseline_rate > 0.0 {
+            Some(flagged_rate / baseline_rate)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     AccuracyStats {
         total_validations,
         total_hits,
@@ -115,6 +162,7 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
         trend,
         best_day,
         worst_day,
+        overall_lift,
     }
 }
 
@@ -147,13 +195,19 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         None => "—".to_string(),
     };
 
+    let lift_str = match stats.overall_lift {
+        Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+        _ => "—".to_string(),
+    };
+
     format!(
         "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
          {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
-         {BOLD}  │{RESET} Trend:        {:<25}{BOLD}│{RESET}\n\
+         {BOLD}  │{RESET} Trend:        {:<16}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Best day:     {:<13}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+         {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
          {BOLD}  ╰────────────────────────────╯{RESET}\n",
         stats.total_validations,
         format!(
@@ -163,6 +217,7 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         trend_str,
         best_str,
         worst_str,
+        lift_str,
     )
 }
 
@@ -188,6 +243,7 @@ mod tests {
             hit_count: 3,
             total_changed: 5,
             accuracy_pct: 60.0,
+            ..Default::default()
         }];
         let stats = compute_accuracy_stats(&events);
         assert_eq!(stats.total_validations, 1);
@@ -207,36 +263,42 @@ mod tests {
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 20.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 101,
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 25.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 102,
                 hit_count: 2,
                 total_changed: 5,
                 accuracy_pct: 40.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 103,
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 60.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 104,
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 80.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 105,
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 80.0,
+                ..Default::default()
             },
         ];
         let trend = compute_accuracy_trend(&events);
@@ -251,36 +313,42 @@ mod tests {
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 80.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 101,
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 75.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 102,
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 60.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 103,
                 hit_count: 2,
                 total_changed: 5,
                 accuracy_pct: 40.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 104,
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 20.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 105,
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 15.0,
+                ..Default::default()
             },
         ];
         let trend = compute_accuracy_trend(&events);
@@ -295,24 +363,28 @@ mod tests {
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 60.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 101,
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 58.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 102,
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 62.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 103,
                 hit_count: 3,
                 total_changed: 5,
                 accuracy_pct: 59.0,
+                ..Default::default()
             },
         ];
         let trend = compute_accuracy_trend(&events);
@@ -326,6 +398,7 @@ mod tests {
             hit_count: 3,
             total_changed: 5,
             accuracy_pct: 60.0,
+            ..Default::default()
         }];
         let trend = compute_accuracy_trend(&events);
         assert_eq!(trend, AccuracyTrend::Insufficient);
@@ -339,18 +412,21 @@ mod tests {
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 20.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 110,
                 hit_count: 2,
                 total_changed: 5,
                 accuracy_pct: 40.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 115,
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 80.0,
+                ..Default::default()
             },
         ];
         let stats = compute_accuracy_stats(&events);
@@ -366,12 +442,14 @@ mod tests {
                 hit_count: 1,
                 total_changed: 5,
                 accuracy_pct: 20.0,
+                ..Default::default()
             },
             ValidationEvent {
                 day: 110,
                 hit_count: 4,
                 total_changed: 5,
                 accuracy_pct: 80.0,
+                ..Default::default()
             },
         ];
         let stats = compute_accuracy_stats(&events);
@@ -395,6 +473,7 @@ mod tests {
             total_hits: 7,
             total_changed: 12,
             overall_hit_rate_pct: 58.333,
+            overall_lift: Some(2.5),
             trend: AccuracyTrend::Improving,
             best_day: Some((115, 80.0)),
             worst_day: Some((108, 20.0)),
