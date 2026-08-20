@@ -1,7 +1,7 @@
 # Gap Analysis: arc vs Claude Code
 
-Last verified: Day 74 (2026-05-13)
-Last updated: Day 24 (2026-03-24) — major refresh on Day 38, stats refresh on Day 50, Day 54, Day 59, Day 61, Day 63, Day 64, Day 67, Day 74
+Last verified: Day 173 (2026-08-20)
+Last updated: Day 24 (2026-03-24) — major refresh on Day 38, stats refresh on Day 50, Day 54, Day 59, Day 61, Day 63, Day 64, Day 67, Day 74, Day 173
 
 This document tracks the feature gap between arc and Claude Code, used to inform
 development priorities when there are no community issues to address. It is a
@@ -146,8 +146,8 @@ remaining gaps, but task selection still happens through the normal planning loo
 
 | Feature | arc | Claude Code | Notes |
 |---------|------|-------------|-------|
-| Cloud background agents | ❌ | ✅ | Cursor Cloud Agents run on cloud git worktrees while user works locally; different deployment model (cloud vs CLI) — arc is a local CLI tool by design (Day 67) |
-| Event-driven triggers / webhooks | ❌ | ✅ | Cursor agents triggered by GitHub events (PR opened, issue filed, etc.); arc has cron-based evolution but no event-driven hooks for arbitrary repo events (Day 67) |
+| Cloud/background agents (persist across sessions) | ❌ | ✅ | The biggest gap arc cannot close in small steps. Both Claude Code (cloud sessions on Anthropic-managed infra, `--cloud`/`--teleport`, sessions persist after closing) and Cursor (cloud agents on isolated VMs with full internet access, autonomous PRs) now ship durable agents that keep working while the user is away. arc is a local, session-bound CLI tool by design — this is a large-scale platform change (remote sandbox, always-on runtime, cross-session persistence), not a small-step feature. arc's defensible differentiator: self-hosted, open source, runs anywhere a terminal does, and the risk/self-model sense organ no competitor has (Day 173) |
+| Event-driven triggers / webhooks | ❌ | ✅ | Cursor agents triggered by GitHub events (PR opened, issue filed, etc.) — BugBot auto-reviews PRs and now BugBot Autofix spawns cloud agents to fix issues; arc has cron-based evolution but no event-driven hooks for arbitrary repo events (Day 67) |
 | Sandboxed execution | ❌ | ✅ | Codex uses Docker/VM-based tool isolation for safe execution; arc runs tools directly in the user's environment (Day 67) |
 
 ---
@@ -156,34 +156,47 @@ remaining gaps, but task selection still happens through the normal planning loo
 
 After the Day 38 refresh, the gaps that are actually still gaps. Re-evaluated
 on Day 74 — two core gaps remain, plus deployment-model gaps and one
-skills sub-gap.
+skills sub-gap. Re-evaluated on Day 173 — the cloud/background-agent
+deployment gap is now the top item it cannot close in small steps.
 
-1. **Persistent named subagents with orchestration** (since Day ≤38) — arc now has
+1. **Durable cloud/background agents that persist across sessions** (Day 173) —
+   both Claude Code (cloud sessions on Anthropic-managed infrastructure,
+   `--cloud`/`--teleport`, sessions survive closing the app) and Cursor (cloud
+   agents on isolated VMs with full internet access, drafting autonomous PRs)
+   now ship agents that keep working while the user is away. arc is a local,
+   session-bound CLI tool by design; replicating this means remote sandboxes, an
+   always-on runtime, and cross-session persistence — large-scale platform work
+   outside the loop's small-step scope. **arc's defensible differentiator:** it
+   self-hosts, is fully open source, runs anywhere a terminal runs, and carries
+   the risk/self-model sense organ (the file-risk scorer + validation loop) that
+   no competitor has.
+2. **Persistent named subagents with orchestration** (since Day ≤38) — arc now has
    `/spawn`, arcagent's `SubAgentTool`, AND `SharedState` for parent↔child data
    sharing (Day 58), but still no named-role persistent subagent system (e.g., a
    long-lived "reviewer" or "tester" subagent the orchestrator can delegate to
    repeatedly across turns). SharedState closes the data-sharing gap; the
    orchestration gap remains.
-2. **Full graceful degradation on partial tool failures** (since Day ≤38) — provider fallback
+3. **Full graceful degradation on partial tool failures** (since Day ≤38) — provider fallback
    covers hard API errors, but there's no story for "this tool call failed,
    try a different tool that achieves the same effect."
-3. ~~**Per-edit auto-lint-test** (Aider parity)~~ — ✅ Closed Day 68.
+4. ~~**Per-edit auto-lint-test** (Aider parity)~~ — ✅ Closed Day 68.
    `AutoCheckTool` wrapper runs the first watch phase after each write_file/edit_file.
-4. **Skill marketplace curation** (since Day 61) — `/skill install` and `/skill search`
+5. **Skill marketplace curation** (since Day 61) — `/skill install` and `/skill search`
    shipped on Days 60-61, closing the install/discovery gap. Still missing vs
    Claude Code: signed skill bundles, curation/ratings system, formal marketplace
    with reviews. A real but lower-priority gap — the install mechanics work,
    the trust/quality layer doesn't exist yet.
 
-### Competitive landscape shift (Day 74)
+### Competitive landscape shift (Day 74, refreshed Day 173)
 
 The gap is no longer just arc vs Claude Code. The field has widened, and the
 nature of the gaps has shifted:
 
 **The biggest remaining gaps are deployment-model, not feature-level.** Cloud
-agents (Cursor Cloud Agents running on remote worktrees), event-driven triggers
-(Cursor BugBot auto-reviewing PRs), and sandboxed execution (Codex Docker/VM
-isolation) represent architectural choices that a CLI tool can't replicate
+agents (Cursor Cloud Agents on isolated VMs, Claude Code cloud sessions on
+Anthropic-managed infrastructure), event-driven triggers
+(Cursor BugBot auto-reviewing and auto-fixing PRs), and sandboxed execution
+(Codex Docker/VM isolation) represent architectural choices that a CLI tool can't replicate
 without fundamentally changing what it is. These are ❌ by design choice, not
 by oversight.
 
@@ -193,50 +206,61 @@ plan workflows — these are now table-stakes across
 competitors. arc has all of them (✅), which means they're no longer
 differentiators but keep-pace requirements.
 
-**Competitor highlights (Day 74):**
-- **Claude Code** has a formal plugin ecosystem with 12+ bundled plugins,
-  a marketplace with discoverability and install commands, and exposes web
-  search, web fetch, code execution, advisor, and memory tools as first-class
-  API capabilities. arc now matches on install/discovery mechanics
-  (`/skill install`, `/skill search`) but lacks the curation/trust layer.
-- **Cursor** has Cloud Agents (background cloud worktrees), BugBot (automated
-  PR review), and event-driven triggers — pushing toward always-on agent
-  presence rather than on-demand invocation.
-- **Codex CLI** (OpenAI) has npm/brew install, ChatGPT plan integration,
-  sandboxed Docker execution, and a desktop app — lowering the barrier to
-  entry for non-terminal users.
-- **Aider** v0.85–0.86 added GPT-5 family, Grok-4, and o3-pro support,
-  self-contribution metric (88% self-written), plus per-edit auto-lint-test —
-  arc now matches auto-lint with `AutoCheckTool` (Day 68) and has its own
-  self-written metric via `compute_self_written_pct` (Day 68).
+**Competitor highlights (June 2026, refreshed Day 173):**
+- **Claude Code** is now multi-surface — the same engine across terminal, VS
+  Code, desktop app, and web IDE — with Opus 4.6 (1M-token context beta),
+  subagents + hooks + cloud sessions (persist after closing, `--cloud`/
+  `--teleport`) + GitHub Actions integration, and runs in cloud environments.
+  arc shares the terminal-oriented core but is not multi-surface and has no
+  cross-session cloud runtime.
+- **Cursor** has cloud agents running on isolated VMs **with full internet
+  access** that draft and merge autonomous PRs (now more than half of Cursor's
+  merged PRs), plus BugBot — event-driven automated PR review that has evolved
+  into BugBot Autofix, spawning cloud agents to fix issues. This is "always-on,
+  background, event-triggered" agent presence vs arc's "on-demand, foreground"
+  model.
+- **Aider** keeps its repo-map architecture — a distilled map of the whole
+  repository (with token budget) lets it operate in small context windows
+  without loading every file; arc's `/map` + auto-context provide a related but
+  less mature take on whole-repo context.
+- **Codex CLI** (OpenAI) has a strong model but its UX and large-refactor
+  context handling are reported as hampered (mid-refactor stalls on large diffs,
+  compaction that doesn't always recover); **Gemini CLI** is reported to win on
+  large-context refactors (top context-handling score, though slower and weaker
+  at integration).
 
 arc's differentiators remain and have grown: open-source self-evolution,
 multi-provider support (14 backends), the skills ecosystem (`/skill install`,
 `/skill search`, `/skill create`, 13 skills), `/architect` dual-model mode
 (Aider parity), `/loop` iterative refinement, `/plan` generate/review/execute
 workflow, `SharedState` for sub-agent data sharing, persistent memory system
-(`memory/` JSONL + active context), prompt caching, and the explore-codebase +
-x-research + synthesis skills for RLM-style sub-agent dispatch. The plugin gap
+(`memory/` JSONL + active context), prompt caching, RLM-style sub-agent dispatch
+(explore-codebase + x-research + synthesis skills), and — uniquely — the
+**risk/self-model sense organ**: the file-risk scorer and its validation loop
+that let arc anticipate its own fragility. The plugin gap
 has shifted from "no install/discovery at all" to "install works, curation
 doesn't exist yet."
 
-### Competitive Notes (Day 74)
+### Competitive Notes (Day 74, refreshed Day 173)
 
 The competitive landscape has matured. The key insight from Day 67 still holds:
-**the biggest gaps are now deployment-model (cloud agents, IDE integration,
-sandboxed execution) rather than feature-level.** Feature parity is close — arc
+**the biggest gaps are now deployment-model (cloud/background agents, IDE and
+web surfaces, sandboxed execution) rather than feature-level.** Feature parity is close — arc
 has MCP, hooks, skills, memory, multi-provider, sub-agents, prompt caching,
 clipboard, plan workflows, and most developer workflow commands that competitors
 offer. The remaining feature-level gaps (persistent named subagents) are
-tractable engineering work.
+tractable engineering work; the cloud/background-agent gap is not.
 
-The deployment-model gaps (cloud worktrees, event-driven triggers, Docker
+The deployment-model gaps (durable cloud sessions, event-driven triggers, Docker
 isolation) represent a different class of challenge: they require
 fundamentally rethinking what a CLI tool is. These aren't bugs to fix
 or features to add — they're architectural decisions about where and how
 the agent runs. arc's strength as a lightweight, local, open-source CLI
 tool is precisely what makes these gaps hard to close, and possibly not
-worth closing. A CLI tool that tries to be a cloud service is neither.
+worth closing. A CLI tool that tries to be a cloud service is neither. That is
+an honest limit, not a deficiency — arc's differentiator is that it runs on the
+user's own machine, self-hosts its own evolution, and offers the risk/self-model
+sense organ (file-risk scorer + validation loop) that no competitor ships.
 
 MCP and hooks are now table-stakes — all competitors have them. They're
 no longer differentiators but ✅ means arc keeps pace.
