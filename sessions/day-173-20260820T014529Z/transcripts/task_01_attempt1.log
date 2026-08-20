@@ -1,0 +1,373 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by reading the relevant file to understand the current structure.
+
+
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs ✓ (2ms)
+
+Let me read the rest of the file, especially the `compute_accuracy_stats and format_accuracy_report` sections.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:99..539 ✓ (2ms)
+
+Let me read the middle portion of the file (the report formatting and remaining tests).
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:197..487 ✓ (1ms)
+
+Now I have a full understanding of the code. Let me also check how AccuracyStats is constructed elsewhere to ensure I update all constructors.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "AccuracyStats" src/ --in… ✓ (7ms)
+
+The struct is only constructed in this file (two places: `compute_accuracy_stats` empty-return and non-empty, plus one test). Now let me make the changes.
+
+First, add the lift_events_used field to the struct:
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (5 → 11 lines)
+        /// break vs the baseline over all scored files. `None` when no usable
+        /// event (carrying `total_scored`/`scored_broke`) exists yet.
+        pub(crate) overall_lift: Option<f64>,
+  +     /// Number of validation events that carry the lift fields
+  +     /// (`total_scored`/`scored_broke`/`predicted_count`) and therefore actually
+  +     /// feed the pooled `overall_lift`. This is the "matched prediction-outcome
+  +     /// pair" count the dream tracks: the lift is only a confident measurement
+  +     /// once ≥5 such pairs accumulate (cold-start threshold).
+  +     pub(crate) lift_events_used: usize,
+    }
+ ✓ (0ms)
+        /// break vs the baseline over all scored files. `None` when no usable
+        /// event (carrying `total_scored`/`scored_broke`) exists yet.
+        pub(crate) overall_lift: Option<f64>,
+  +     /// Number of validation events that carry the lift fields
+  +     /// (`total_scored`/`scored_broke`/`predicted_count`) and therefore actually
+  +     /// feed the pooled `overall_lift`. This is the "matched prediction-outcome
+  +     /// pair" count the dream tracks: the lift is only a confident measurement
+  +     /// once ≥5 such pairs accumulate (cold-start threshold).
+  +     pub(crate) lift_events_used: usize,
+    }
+
+Now update the empty-stats constructor:
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (3 → 4 lines)
+                worst_day: None,
+                overall_lift: None,
+  +             lift_events_used: 0,
+            };
+ ✓ (0ms)
+                worst_day: None,
+                overall_lift: None,
+  +             lift_events_used: 0,
+            };
+
+Now populate in the non-empty return:
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (4 → 5 lines)
+            worst_day,
+            overall_lift,
+  +         lift_events_used,
+        }
+    }
+ ✓ (0ms)
+            worst_day,
+            overall_lift,
+  +         lift_events_used,
+        }
+    }
+
+Now update the report formatting. Let me redefine the lift string logic. Current code:
+
+```rust
+    let lift_str = match stats.overall_lift {
+        Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+        _ => "—".to_string(),
+    };
+```
+
+Now I'll rewrite the lift/pairs logic:
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (25 → 46 lines)
+  +     // Cold-start / milestone legibility for the lift: the dream's active
+  +     // milestone is to accumulate ≥5 matched prediction-outcome pairs (events
+  +     // that actually feed the lift), then judge whether the lift is real. Below
+  +     // that threshold the lift is noise — a single event presented as a firm
+  +     // "2.5×" is exactly the cold-start problem the dream names. `lift_events_used`
+  +     // IS the matched-pair count: each lift-carrying validation event is one
+  +     // matched prediction-outcome pair feeding the pooled lift.
+  +     let pairs = stats.lift_events_used;
+  +     let pairs_str = format!("Pairs: {pairs}/5");
+  + 
+  +     // Labels are byte-safe (no slicing); width handled by `{:<13}` padding.
+        let lift_str = match stats.overall_lift {
+  -         Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+  +         Some(lift) if lift.is_finite() && pairs >= 5 => format!("{lift:.1}×"),
+  +         Some(lift) if lift.is_finite() => {
+  +             // Sub-threshold: label the measurement as provisional, not firm.
+  +             format!("~{lift:.1}× (provisional)")
+  +         }
+  +         _ if pairs > 0 => {
+  +             // Pairs exist but below both lift-availability and threshold.
+  ... (23 more lines)
+ ✗ (0ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+The box border uses a different number of dashes. Let me use a targeted edit on just the lift_str and add the pairs row separately.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (25 → 46 lines)
+  +     // Cold-start / milestone legibility for the lift: the dream's active
+  +     // milestone is to accumulate ≥5 matched prediction-outcome pairs (events
+  +     // that actually feed the lift), then judge whether the lift is real. Below
+  +     // that threshold the lift is noise — a single event presented as a firm
+  +     // "2.5×" is exactly the cold-start problem the dream names. `lift_events_used`
+  +     // IS the matched-pair count: each lift-carrying validation event is one
+  +     // matched prediction-outcome pair feeding the pooled lift.
+  +     let pairs = stats.lift_events_used;
+  +     let pairs_str = format!("Pairs: {pairs}/5");
+  + 
+  +     // Labels are byte-safe (no slicing); width handled by `{:<13}` padding.
+        let lift_str = match stats.overall_lift {
+  -         Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+  +         Some(lift) if lift.is_finite() && pairs >= 5 => format!("{lift:.1}×"),
+  +         Some(lift) if lift.is_finite() => {
+  +             // Sub-threshold: label the measurement as provisional, not firm.
+  +             format!("~{lift:.1}× (provisional)")
+  +         }
+  +         _ if pairs > 0 => {
+  +             // Pairs exist but below both lift-availability and threshold.
+  ... (21 more lines)
+ ✓ (0ms)
+  +     // Cold-start / milestone legibility for the lift: the dream's active
+  +     // milestone is to accumulate ≥5 matched prediction-outcome pairs (events
+  +     // that actually feed the lift), then judge whether the lift is real. Below
+  +     // that threshold the lift is noise — a single event presented as a firm
+  +     // "2.5×" is exactly the cold-start problem the dream names. `lift_events_used`
+  +     // IS the matched-pair count: each lift-carrying validation event is one
+  +     // matched prediction-outcome pair feeding the pooled lift.
+  +     let pairs = stats.lift_events_used;
+  ... (13 more lines)
+
+Now the existing test `test_format_accuracy_report_with_data` constructs AccuracyStats directly and needs the new field. Let me update it, and also add new tests. First update the existing constructor in tests:
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (14 → 18 lines)
+                overall_lift: Some(2.5),
+  +             lift_events_used: 7,
+                trend: AccuracyTrend::Improving,
+                best_day: Some((115, 80.0)),
+                worst_day: Some((108, 20.0)),
+  ···
+            assert!(report.contains("Improving"));
+            assert!(report.contains("Day 115"));
+            assert!(report.contains("Day 108"));
+  +         assert!(report.contains("Pairs: 7/5"));
+  +         assert!(report.contains("2.5×"));
+  +         assert!(!report.contains("provisional"));
+        }
+ ✓ (0ms)
+                overall_lift: Some(2.5),
+  +             lift_events_used: 7,
+                trend: AccuracyTrend::Improving,
+                best_day: Some((115, 80.0)),
+                worst_day: Some((108, 20.0)),
+  ···
+            assert!(report.contains("Improving"));
+            assert!(report.contains("Day 115"));
+  ... (5 more lines)
+
+The existing test asserts contains "2.5×" — with 7 pairs (≥5), it should be firm "2.5×" (not "~2.5× (provisional)"). And `!contains("provisional")`. Good.
+
+Now let me add new tests. Let me add them before the closing of the tests module. Let me add tests covering: single-pair provisional, ≥5 confident, and mixed lift_events_used population.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (6 → 133 lines)
+            assert!(report.contains("Day 108"));
+            assert!(report.contains("Pairs: 7/5"));
+            assert!(report.contains("2.5×"));
+  +         assert!(!report.contains("provisional"));
+  +     }
+  + 
+  +     #[test]
+  +     fn test_lift_single_pair_is_provisional() {
+  +         // A single lift-carrying event computes an overall_lift, but the report
+  +         // must mark it provisional (below the dream's ≥5-pair threshold) rather
+  +         // than presenting a 1-event lift as a confident measurement.
+  +         let events = vec![ValidationEvent {
+  +             day: 172,
+  +             hit_count: 2,
+  +             total_changed: 3,
+  +             accuracy_pct: 66.7,
+  +             predicted_count: Some(4),
+  +             total_scored: Some(7),
+  +             scored_broke: Some(3),
+  +         }];
+  ... (112 more lines)
+ ✓ (0ms)
+            assert!(report.contains("Day 108"));
+            assert!(report.contains("Pairs: 7/5"));
+            assert!(report.contains("2.5×"));
+  +         assert!(!report.contains("provisional"));
+  +     }
+  + 
+  +     #[test]
+  +     fn test_lift_single_pair_is_provisional() {
+  ... (13 more lines)
+
+Now let me verify the existing test `test_compute_accuracy_stats_lift_no_fields_is_none` still works. That test asserts report contains "Lift:" and "—". With pairs=0 (no lift fields at all), my new code returns "—". Good. But now it also has a "Pairs: 0/5" line. The assertion `report.contains("Lift:") && report.contains("—")` still holds.
+
+Let me check the box width alignment concern. I added a pairs row using `Pairs: N/5`. The row string is `"  │{RESET} {:<14}{BOLD}│{RESET}\n"` — let me verify widths. Actually, let me just build and test.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -20 ✓ (6.3s)
+
+Build passes. Now run the accuracy tests:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_risk_accuracy … ✓ (13.9s)
+
+All accuracy tests pass (16 including my 4 new + 1 modified). Now let me run fmt, clippy, and the full test suite.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo fmt -- --check … ✓ (12.6s)
+
+Clippy clean. Let me run the full test suite.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -15 ✓ (51.2s)
+
+All 88 tests pass. Let me verify the report renders correctly by writing a quick look at the final state of the flow. Let me confirm the box rows are aligned reasonably. Let me view the final format section:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:203..263 ✓ (0ms)
+
+The box row for pairs uses `{:<14}` on "Pairs: N/5". The other rows use {:<13}. Let me verify the box width is consistent. The interior width: "   Validations:  " + value(13) + "  " = interior width. Let me count: `Validations:  {:<13}` = "Validations:  " (14 chars) + 13 = 27. For the pairs row: ` {:<14}` = " " (1) + 14 = 15... hmm the label "Pairs: N/5" is put in the value slot.
+
+Actually looking at the width — the box was built with `{:<13}` value slots. The "Pairs: N/5" row uses `{:<14}`. Let me count precisely. The template interior for each row:
+
+row: `{BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}`
+•   │ = 2 spaces + │
+•  Validations:   = " Validations:  " = 15 chars
+• value 13
+• │
+
+Let me just compute the total width by rendering the empty report. Let me write a tiny check to render.
+
+Actually, rather than hand-count, let me render an actual report through a debug test to inspect alignment. Let me temporarily create a quick test to print the report and eyeball it.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat > /tmp/ren… (19 lines) ✓ (3ms)
+
+That approach is circular (field is pub(crate) but format fn too). Let me instead check the width arithmetic directly by reasoning, or use a simpler approach — temporarily write a standalone formatting check via the existing test harness with a print. Actually, let me just compute widths manually.
+
+The box border: `╭─ Risk Prediction Accuracy ─╮. Interior width = between the two │` chars. Let me count the border: `╭─ Risk Prediction Accuracy ─╮` — width including the ╭ and ╮. The inner text between the box side chars is what matters.
+
+Let me count by octet. Border line: `  ╭─ Risk Prediction Accuracy ─╮` — after ╭ there's `─ Risk Prediction Accuracy ─` then ╮. Interior = length of `─ Risk Prediction Accuracy ─` = 1 + 24 + 1 = 26? "Risk Prediction Accuracy" = 24 chars. So ─  = 2 + 24 +  ─ = 2 = 28. Hmm.
+
+This was already the existing box and my additions must match it. Let me instead count the row template precisely.
+
+Row: `{BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n`
+After the left │: content = ` Validations:  ` + up-to-13 value + no trailing spaces before right │.
+
+Length of ` Validations:  ` = 1 (leading space) + len("Validations:  ") = 1 + 14 = 15 chars. Then value {:<13} pads to 13. So content width = 15 + 13 = 28.
+
+For lift row: ` Lift:         {:<13}` = 1 + len("Lift:         ") = 1 + 14 = 15, + 13 = 28. Good.
+
+For pairs row:  {:<14} = 1 + 14 = 15 wide? That's only 15 total, which is wrong — it doesn't match 28!
+
+Wait, let me re-read. Line 237: `{BOLD}  │{RESET} {:<14}{BOLD}│{RESET}\n` — there's only ONE leading space then the value. So content = 1 + 14 = 15, but other rows are 28. That's misaligned.
+
+I need to fix the pairs row to use the same content width. "Pairs: 1/5" composes label+value in one slot. Let me pad it to 15 chars (the leading space + 14) no — I need it to total 28 like the label rows. The value slot for pairs should be 27 wide (1 leading space + 27 = 28). Let me set `{:<27}`.
+
+Wait, let me recount the label rows. Row: ` Validations:  ` — that's 1 leading space + "Validations:  ". "Validations:" = 12 chars, + 2 spaces = 14, + 1 leading = 15. Value pad 13 → 28 total content.
+
+For the pairs row I want content width 28. So ` {:<27}` = 1 + 27 = 28. Let me fix.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (2 → 2 lines)
+  -          {BOLD}  │{RESET} {:<14}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+ ✓ (2ms)
+  -          {BOLD}  │{RESET} {:<14}{BOLD}│{RESET}\n\
+  +          {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+
+Now let me verify the alignment by rendering an actual report. Let me write a quick throwaway integration check using the crate's public interface. Actually, `handle_risk` in commands_risk.rs is the entry. But simpler: let me just verify with a tiny standalone test in the same file temporarily... 
+
+Actually, the cleanest verification is to write a temporary test in the test module. But I don't want to leave a print test committed. Let me instead just reason and confirm the box characters match. The border bottom is `╰────────────────────────────╯` — I kept it, which matches the existing box (it wasn't widened). Let me confirm my rows total 28 content width each and the border interior is 26 (the ─ between).
+
+Let me count the bottom border: ` ╰` + ─*28 + ╯? Let me count the existing bottom line that I did NOT change: `╰────────────────────────────╯`. Between ╰ and ╯: count of ─. Let me count from the file.
+
+Rather than guess, let me just add a quick temporary rendering test and run it, then remove it.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "╰" src/commands_risk_accu… ✓ (3ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "╰\|╮\|╭" src/commands_ris… ✓ (2ms)
+
+Only one occurrence? The box ╰ line must be split across the format string continuation. Let me grep the full block:
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:230..252 ✓ (0ms)
+
+The ╰ line seems to be on line 239? Wait, line 239 is missing from the read. Let me check — the output skips from 238 to 240. There must be a line 239 with the bottom border but read_file merged it. Let me read lines 238-240 exactly.
+
+Actually the read shows line 238 is the Lift row, then jumps to 240. Line 239 must be the `╰...╯` line but it was omitted in this display (perhaps truncation). Let me grep again with -n for the whole block.
+
+The grep earlier only found line 231 for box chars — meaning there's no ╰ or ╯ on later lines! That means the original box had no closing rows? Wait — but the tests assert `report.contains("Risk Prediction Accuracy")`. Let me re-examine: the box may only be the top border `╭─...─╮` and the rows, with no bottom border originally. Let me check the original file at line ~210 (the earlier read showed line 210 `{BOLD}  ╰────────────────────────────╯{RESET}\n` in the original). 
+
+In my current file the `╰` doesn't appear — that means my edit removed the bottom border line! My edit replacement used \n\ continuations and I dropped the ╰ line. Let me look — my replacement text included the Lift row line 238 then jumped to the format args. I lost the ╰ bottom border line.
+
+Let me check the raw bytes around there.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '238,240p' src/commands_ris… ✓ (3ms)
+
+Good — line 239 has the `╰...╯` bottom border (I misread). It's there. There are 26 ─ characters between ╰ and ╯ (M-bM-^TM-^@ is ─). Let me count them in the line.
+
+The bottom border has ╰ + N×─ + ╯. Content width = 26 dashes between. Let me verify: each content row is 28 wide (including the 1 leading space). But the border `─` count = 26 means the interior width between the box corners is 26+2 = wait.
+
+Actually the box has │ side chars at content positions. Let me count the raw border precisely. Original border was: `╭─ Risk Prediction Accuracy ─╮` top and `╰─(...)─╯` bottom. The task didn't change the box width; I preserved the same bottom border line (26 dashes) and just added a row. All content rows total 28 (1 leading space + label + padded value → left │ at char 1, right │ at char 28). 
+
+Wait — the content between the two │ is 28 chars? Let me count the top border interior: `─ Risk Prediction Accuracy ─. That's ─(1) +  Risk Prediction Accuracy `(28) + ─(1) = 30, but with sides it's... I'm overcomplicating.
+
+The key fact: I did NOT change the box border at all, and the existing box rendered correctly for the original 6 rows. I added one more row with the same `│ ... │` pattern. All I need is for my added row's interior width to match the existing rows' interior width. Existing rows use ` Validations:  ` (15) + {:<13} (13) = 28 interior. My pairs row now uses ` {:<27}` = 1 + 27 = 28. ✓ Match.
+
+Let me just verify by rendering. Let me temporarily add a print test, run it, and remove it.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat > /tmp/che… (36 lines) ✓ (22ms)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test __temp_render_align -- … ✓ (341ms)
+
+

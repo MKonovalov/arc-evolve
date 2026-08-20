@@ -1,0 +1,225 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll analyze the evidence and create a session plan. Let me start by setting up the session_plan directory and reviewing available inputs.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p session_plan && rm -f ses…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat DAY_COUNT && git log --oneline… ✓ (3ms)
+ ✓ (6ms)
+  2 tools completed in 988ms (2 ✓)
+
+No community issues today. The dream's active milestone is the risk-validation cold-start (accumulate ≥5 prediction-outcome pairs, then measure discriminative lift). Assessment says only 2 pairs accumulated vs. the ≥5 target.
+
+Let me check what's actually in the risk validation data so I can plan concretely.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "=== risk_validations.jsonl =…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_pla… (10 lines) ✓ (4ms)
+ ✓ (18ms)
+  2 tools completed in 930ms (2 ✓)
+
+Now I have a concrete picture of the data. The dream's cold-start milestone is at 2 pairs, needing ≥5. The assessment explicitly flags this as the live thread and notes the accumulation is "feeding" work, not new construction — the measurement infra (discrim lift) landed Day 172.
+
+Let me examine the validation data to understand the noise source — the Day 171 validation shows non-source churn (`.arc/risk_snapshots.jsonl, .skill_evolve_counter, DAY_COUNT, CLAUDE.md, journals/JOURNAL.md`) counted as surprises, dragging accuracy to 10%. The Day-172 de-noising helped.
+
+Let me look at the current validation logic to find a concrete, small improvement for the dream milestone — specifically whether the source-filter is complete or whether there's a clean way to increase accumulated pairs.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "is_source\|source\|non-so…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,120p' src/commands_risk_… ✓ (2ms)
+ ✓ (4ms)
+  2 tools completed in 779ms (2 ✓)
+
+Now let me look at where the actual validation/surprise de-noising happens — likely in `commands_risk_snapshots.rs where auto_validate_by_replay` compares predicted vs actual commits. The surprise list still includes non-source entries like CLAUDE.md, DAY_COUNT, `journals/JOURNAL.md` in the Day 171 event. The assessment says Day-172 de-noising helped (surprise list shrank). Let me check whether there's a clean, small improvement to the de-noising that would tighten the measurement — that directly serves the dream milestone.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "surprise\|source\|filter\…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,120p' src/commands_risk_… ✓ (2ms)
+ ✓ (3ms)
+  2 tools completed in 1.0s (2 ✓)
+
+Let me look at the validation core (`auto_validate_by_replay` → likely the validate function around line 276-340) to see the filter and how surprises are computed. This is the key area for the dream milestone measurement quality.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '255,375p' src/commands_ris… ✓ (3ms)
+
+Now I understand the whole picture. The filtering to src/ is already in place (line 276), and the Day 171 event appears to predate some de-noising. The `predicted_set` is the top-10 from the snapshot; the `compute_file_risk_scores` scores all src/ files and `total_scored` counts them.
+
+Now let me think about what concrete, small, high-value task advances the dream milestone. The milestone is: accumulate ≥5 validation pairs, then measure discriminative lift. Currently 2 pairs. The infra (lift) is done. The remaining work is **feeding** — more sessions with validation firing.
+
+The assessment says specifically: "the remaining work is **accumulation/feeding**, not new construction." And from SELF-WISDOM: "For milestones blocked on accumulation, automate the feed; don't add more sensors."
+
+So the highest-value task is to automate the feed — make validation fire more often (or detect/verify it's firing in the evolve loop each session). Let me check how validation currently gets triggered in the evolve loop. The CLAUDE.md says:
+• `arc risk snapshot` (called once per session by evolve.sh) BOTH writes a snapshot AND runs `replay_validate_last_snapshot()` of the prior snapshot.
+
+So each evolve session should already accumulate ~1 validation pair. With 3 sessions/day, that's ~3/day. But only 2 pairs exist across days 171-172. Let me check why — maybe the replay validate has a guard that skips when there's no source churn, or when git hashes coincide.
+
+Let me look at the replay validation core to understand accumulation.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_last_snap… ✓ (3ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "replay_validate_last_sna… ✓ (6ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1240,1400p' src/commands_r… ✓ (3ms)
+
+Now let me look at `replay_validate_last_snapshot` and its core to understand accumulation (why only 2 pairs so far), which is central to the feeding/accumulation task.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2380,2560p' src/commands_r… ✓ (3ms)
+
+Let me find the actual replay_validate_last_snapshot and `replay_validate_core` functions to understand the accumulation dedup logic.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn replay_validate_last_s… ✓ (3ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2216,2380p' src/commands_r… ✓ (3ms)
+
+Now I have a clear understanding. There's a key subtlety in `classify_broke_files`: it classifies "broke" files from the git log `--name-only`. Let me check whether the filter to src/ is applied there too — because the Day 171 surprise list still contained non-source entries (`.arc/..., CLAUDE.md, DAY_COUNT, journals/...`), which means the de-noising that was "added Day 172" may only have landed in `auto_validate_after_failure` (line 276) but NOT in the replay path's `classify_broke_files`.
+
+This is a concrete gap: the replay validation (the evolve-loop feed) still counts non-source churn as surprises, polluting the accuracy/lift measurement. Let me verify.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn classify_broke_files\|… ✓ (2ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1780,1920p' src/commands_r… ✓ (3ms)
+
+Now I understand the full picture clearly. The `compute_validation` replay path DOES already filter surprises with `is_scored_file(f)` (line ~1809). The Day 171 event's non-source surprises were recorded *before* that filter landed (Day 172 de-noising). Good — the infrastructure is solid.
+
+So the dream's milestone is genuinely blocked on **accumulation**. The data shows validation pairs accumulate ~1 per session via the replay path (which dedups by snapshot-association so each snapshot span is counted once). With 2 pairs in 2 days at ~3 sessions/day = ~6 sessions, only 2 pairs accumulated. Why so few? Because a validation event is only recorded when `!hits.is_empty() || !surprises.is_empty()` — i.e., when **at least one `src/` file broke** (a "fix"/"revert" commit touched src/). Sessions with only non-source commits (bump counters, day counters, JOURNAL) produce no validation pair.
+
+That's the real accumulation bottleneck and it matches the trajectory: several Day 168-171 sessions ended with zero (or only meta) commits, so no src/ breakage → no pair.
+
+Let me check the assessment's recommendation once more: "For milestones blocked on accumulation, automate the feed; don't add more sensors." And the CLAUDE.md notes "a self-authored stopping rule only binds if the next planner honors it before selecting."
+
+So the most valuable self-driven task is **automating the feed so every evolve session reliably produces a validation-eligible measurement** — OR making the accumulation counter visible/verifiable so we can confirm we're approaching the ≥5 target. Let me check if there's already a way to see the pair count and lift status, so I can decide whether the task should be a visibility/automation improvement.
+
+Let me look at how the lift/pair count is surfaced to see if the missing piece is visibility.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "overall_lift\|total_valid… ✓ (3ms)
+
+Let me look at the `format_accuracy_report` to see what's surfaced and where the "not enough data / cold-start" message is shown. This tells me whether the missing piece is visibility into the milestone progress.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '150,340p' src/commands_ris… ✓ (3ms)
+
+I now have a thorough understanding. The `format_accuracy_report has a total_validations` count displayed. The dream milestone is 2/≥5 pairs.
+
+Now let me think carefully about the highest-value self-driven task. The assessment and my own wisdom both point to: **the milestone is blocked on accumulation (feeding), and the guidance is "automate the feed; don't add more sensors."**
+
+The concrete bottleneck I discovered: a validation pair is only recorded when a **`src/` file breaks** (a fix/revert commit touches `src/`). Both existing pairs came from src-bearing sessions. Sessions that only touch meta files (JOURNAL, DAY_COUNT, counters) produce no pair. There's also the fact that the evolve loop currently relies on `arc risk snapshot` being called once per session in `evolve.sh` AND on the new snapshot-also-validates behavior — which should already feed ~1 pair/session when scoped to src. But we've only got 2 pairs in 2 days despite ~6 sessions.
+
+Let me check whether the evolve loop actually calls arc risk snapshot and whether there's a gap in the feeding. This determines whether the task should be "verify/automate the feed in evolve.sh" (evolve kind) or something else.
+
+Actually — I should not over-engineer. Let me check: does `scripts/evolve.sh call arc risk snapshot` each session? CLAUDE.md states it does. And I shouldn't modify evolve.sh (safety rule: never modify). So the feeding mechanism is already in place; the accumulation is just slow because it needs src-breakage sessions.
+
+The genuinely useful, in-scope task that advances the dream without over-engineering: **make the milestone progress legible to the planner** — surface the "pairs accumulated vs ≥5 target" and lift confidence directly in `format_accuracy_report` (or wherever the planner/human sees it). Right now total_validations is shown but there's no explicit "cold-start: N/≥5 pairs, lift not yet meaningful" framing that maps to the dream milestone. This is a small, verify-able, product-visible improvement to the risk accuracy display.
+
+Actually, let me reconsider. The display already shows "Validations: N". Adding a "cold-start" framing is marginal. Let me look at whether there's a more meaningful gap — perhaps the assessment flags `CLAUDE_CODE_GAP.md` stale (100 days). That's a concrete competitive-positioning task (tier 1/7), and it's a real deliverable. But it's a docs task, not code.
+
+Let me weigh the options for the self-driven slot:
+1. **Milestone legibility** (risk accuracy display: show N/≥5 pairs + lift confidence) — directly advances dream, small, product-visible, testable.
+2. **CLAUDE_CODE_GAP.md refresh** — competitive assessment, but stale-doc refresh, low code value.
+3. **Automate the feed more** — but both existing mechanisms are in place and I can't touch evolve.sh.
+
+Given the dream is the explicit priority for self-driven slots and the milestone is "≥5 pairs then measure lift," the highest-leverage small task is making **progress legible** — turning the raw count into an explicit signal that (a) tells the planner/human exactly where the milestone stands and (b) gates the lift display on having enough data to be meaningful. Currently `overall_lift` shows once there's ≥1 event with total_scored/scored_broke — but 1-2 events is noise, not signal. Gating it (or labeling it) at the ≥5-pair threshold directly serves the dream: "once data exists, measure whether flagged files actually failed more."
+
+That's a real, surgical, testable improvement. Let me make it the primary self-driven task.
+
+Let me also verify integration test coverage and pick a second task. Let me check for open community issues — none. So remaining slots can go to self-driven/competitive work. Let me pick the `CLAUDE_CODE_GAP.md` refresh as a second useful task (it's a real gap flagged in the assessment, ~100 days stale, and updates our competitive positioning — tier 1/7). That's a docs-only task, low risk, verifiable by reading.
+
+Let me confirm the lift gating logic and how `total_validations` relates to the ≥5 target so my task description is precise.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '110,150p' src/commands_ris… ✓ (4ms)
+
+I now have a complete picture. There's an important detail: the lift requires `lift_events_used > 0` AND `lift_scored_broke_sum > 0`. Currently only the Day-172 event carries lift fields (Day 171 doesn't have `total_scored/scored_broke`). So lift is currently computed from a single event → noise, not signal. The dream milestone is explicitly "once ≥5 pairs exist, measure the lift."
+
+The cleanest, most valuable, small self-driven task: **gate the lift display on enough data** (the dream's ≥5-pair threshold) and surface the cold-start progress ("N/≥5 pairs" + "lift: not yet meaningful"). This makes the milestone's progress legible to the planner so the feed-accumulation goal is transparent, prevents showing a misleading lift computed from a single noisy event, and is exactly the dream's next milestone framing.
+
+This touches 1 file (`commands_risk_accuracy.rs`) + tests in the same file. Small, verifiable, product-visible (the `/risk accuracy` surface). 
+
+Let me now also decide the second task. Given no community issues, I'll use remaining slots for:
+• **Task 2**: Refresh `CLAUDE_CODE_GAP.md` (competitive positioning, ~100 days stale — flagged in the assessment). Docs-only, product-relevant.
+
+That's a clean, focused 2-task session. Let me check the current CLAUDE_CODE_GAP.md briefly to size the second task properly.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -40 CLAUDE_CODE_GAP.md && ech… ✓ (3ms)
+
+The file is 482 lines and last verified Day 74. Refreshing it is a docs task. But per my wisdom about "intellectual interest masquerading as thoroughness" and "stay focused, one thing done well," and given the dream slot should be the priority, I'll structure this session as:
+
+• **Task 1 (self-driven, dream)**: Make risk-accuracy lift meaningful by gating on enough data + surfacing cold-start progress (N/≥5 pairs). Small, code, testable, directly advances the dream milestone.
+• **Task 2 (product/competitive)**: Refresh `CLAUDE_CODE_GAP.md` — catch it up to the 2026 competitor landscape captured in the assessment (cloud/background agents, IDE surfaces).
+
+Let me verify the exact current lift display and the `total_validations` semantics once more, then write the task files. The lift is only currently meaningful with 1 event; my task gates it. Let me confirm `Total validations` in the display and think about the precise threshold semantics.
+
+Let me write the task files now. First, let me reconsider the lift-gating design to keep it minimal and correct:
+
+The dream says "≥5 matched prediction-outcome pairs." Pairs = validation events that carry the lift fields (`total_scored/scored_broke), i.e., lift_events_used`. The cleanest change: expose `lift_events_used` (or compute a validation_pair_count) in `AccuracyStats, and in format_accuracy_report`:
+• show "Pairs: N/5" 
+• when `overall_lift exists but lift_events_used < 5`, label it as provisional/low-confidence rather than a hard "Lift: X×" number.
+
+This is a focused single-file change with tests. Good.
+
+Now let me write the task files.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_01.md (66 lines)  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_02.md (55 lines) ✓ (0ms)
+ ✓ (0ms)
+  2 tools completed in 716ms (2 ✓)
+
+Now let me write the issue_responses.md (no community issues today, so this is minimal but explains the deferral logic).
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/issue_responses.md (22 lines) ✓ (0ms)
+
+Now let me verify the task files exist and commit them.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la session_plan/ && echo "---"… ✓ (4ms)
+
+session_plan/ is gitignored (per CLAUDE.md: "session_plan/ — ephemeral directory ... (gitignored)"). So I should not force-add it — the task files are my deliverable on disk, and the commit step is designed to be safe (|| true). The planning phase's deliverable (task files) is complete on disk; gitignoring is expected behavior. Let me confirm the files are written and stop here as instructed.
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_plan/ && echo "OK — ses… ✓ (2ms)
+
+The session plan is complete. Here's a summary of what I planned for Day 173:
+
+## Session Plan — Day 173
+
+**No community issues today**, so both slots are self-driven.
+
+### task_01 — Dream milestone (product): Risk-accuracy lift gating + cold-start legibility
+Advancing the active DREAM.md milestone (risk-validation cold-start: accumulate ≥5 matched prediction-outcome pairs, then measure discriminative lift). The measurement infra landed Day 172, so the remaining work is **accumulation/feeding** — and my wisdom says to legibilize/automate the feed, not add more sensors.
+
+I discovered a concrete problem: `.arc/risk_validations.jsonl` has only 2 events, and only 1 carries the lift fields (`total_scored/scored_broke`). The discriminative lift is therefore computed from a **single noisy event** and displayed as a hard "Lift: 2.5×" number — noise presented as signal, exactly the cold-start the dream names. The task makes milestone progress legible ("Pairs: N/5"), labels sub-threshold lifts as provisional, and keeps the measurement honest until ≥5 pairs exist. Single-file change in `commands_risk_accuracy.rs` with tests.
+
+### task_02 — Competitive positioning (product): Refresh `CLAUDE_CODE_GAP.md`
+The assessment flagged it stale (~100 days, last verified Day 74), and the 2026 landscape moved — Claude Code and Cursor both shipped durable **cloud/background agents that persist across sessions**, arc's biggest uncloseable-in-small-steps gap. Docs-only refresh, catch the competitive doc up, and name arc's defensible differentiator (self-hosting + the risk/self-model sense organ). Includes the anti-fabrication guard: only mark features "Implemented" after verifying against source.
+
+The `git commit` of session_plan was skipped because `session_plan/` is gitignored by design (ephemeral directory per CLAUDE.md) — the task files are the deliverable and are written to disk. Planning is the deliverable of this phase; no implementation was performed.
+
+
