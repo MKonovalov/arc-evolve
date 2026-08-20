@@ -31,6 +31,12 @@ pub(crate) struct AccuracyStats {
     /// break vs the baseline over all scored files. `None` when no usable
     /// event (carrying `total_scored`/`scored_broke`) exists yet.
     pub(crate) overall_lift: Option<f64>,
+    /// Number of validation events that carry the lift fields
+    /// (`total_scored`/`scored_broke`/`predicted_count`) and therefore actually
+    /// feed the pooled `overall_lift`. This is the "matched prediction-outcome
+    /// pair" count the dream tracks: the lift is only a confident measurement
+    /// once ≥5 such pairs accumulate (cold-start threshold).
+    pub(crate) lift_events_used: usize,
 }
 
 /// Compute trend by comparing the average accuracy of the last N events
@@ -71,6 +77,7 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
             best_day: None,
             worst_day: None,
             overall_lift: None,
+            lift_events_used: 0,
         };
     }
 
@@ -163,6 +170,7 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
         best_day,
         worst_day,
         overall_lift,
+        lift_events_used,
     }
 }
 
@@ -195,8 +203,27 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         None => "—".to_string(),
     };
 
+    // Cold-start / milestone legibility for the lift: the dream's active
+    // milestone is to accumulate ≥5 matched prediction-outcome pairs (events
+    // that actually feed the lift), then judge whether the lift is real. Below
+    // that threshold the lift is noise — a single event presented as a firm
+    // "2.5×" is exactly the cold-start problem the dream names. `lift_events_used`
+    // IS the matched-pair count: each lift-carrying validation event is one
+    // matched prediction-outcome pair feeding the pooled lift.
+    let pairs = stats.lift_events_used;
+    let pairs_str = format!("Pairs: {pairs}/5");
+
+    // Labels are byte-safe (no slicing); width handled by `{:<13}` padding.
     let lift_str = match stats.overall_lift {
-        Some(lift) if lift.is_finite() => format!("{lift:.1}×"),
+        Some(lift) if lift.is_finite() && pairs >= 5 => format!("{lift:.1}×"),
+        Some(lift) if lift.is_finite() => {
+            // Sub-threshold: label the measurement as provisional, not firm.
+            format!("~{lift:.1}× (provisional)")
+        }
+        _ if pairs > 0 => {
+            // Pairs exist but below both lift-availability and threshold.
+            format!("— (cold start: {pairs}/5)")
+        }
         _ => "—".to_string(),
     };
 
@@ -207,6 +234,7 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
          {BOLD}  │{RESET} Trend:        {:<16}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Best day:     {:<13}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+         {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
          {BOLD}  ╰────────────────────────────╯{RESET}\n",
         stats.total_validations,
@@ -217,6 +245,7 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         trend_str,
         best_str,
         worst_str,
+        pairs_str,
         lift_str,
     )
 }
@@ -571,6 +600,7 @@ mod tests {
             total_changed: 12,
             overall_hit_rate_pct: 58.333,
             overall_lift: Some(2.5),
+            lift_events_used: 7,
             trend: AccuracyTrend::Improving,
             best_day: Some((115, 80.0)),
             worst_day: Some((108, 20.0)),
@@ -583,5 +613,144 @@ mod tests {
         assert!(report.contains("Improving"));
         assert!(report.contains("Day 115"));
         assert!(report.contains("Day 108"));
+        assert!(report.contains("Pairs: 7/5"));
+        assert!(report.contains("2.5×"));
+        assert!(!report.contains("provisional"));
+    }
+
+    #[test]
+    fn test_lift_single_pair_is_provisional() {
+        // A single lift-carrying event computes an overall_lift, but the report
+        // must mark it provisional (below the dream's ≥5-pair threshold) rather
+        // than presenting a 1-event lift as a confident measurement.
+        let events = vec![ValidationEvent {
+            day: 172,
+            hit_count: 2,
+            total_changed: 3,
+            accuracy_pct: 66.7,
+            predicted_count: Some(4),
+            total_scored: Some(7),
+            scored_broke: Some(3),
+        }];
+        let stats = compute_accuracy_stats(&events);
+        assert!(
+            stats.overall_lift.is_some(),
+            "single pair still computes lift"
+        );
+        assert_eq!(stats.lift_events_used, 1);
+
+        let report = format_accuracy_report(&stats);
+        assert!(report.contains("Pairs: 1/5"));
+        assert!(
+            report.contains("provisional"),
+            "sub-threshold lift is labeled provisional"
+        );
+        assert!(
+            report.contains("~"),
+            "provisional lift is shown as approximate"
+        );
+    }
+
+    #[test]
+    fn test_lift_ge5_pairs_is_confident() {
+        // Five or more lift-carrying events produce a confident lift label (no
+        // "provisional" qualifier) per the dream's cold-start threshold.
+        let events: Vec<ValidationEvent> = (0..5)
+            .map(|i| ValidationEvent {
+                day: 170 + i as u32,
+                hit_count: 2,
+                total_changed: 3,
+                accuracy_pct: 66.7,
+                predicted_count: Some(4),
+                total_scored: Some(7),
+                scored_broke: Some(3),
+            })
+            .collect();
+        let stats = compute_accuracy_stats(&events);
+        assert_eq!(stats.lift_events_used, 5);
+        assert!(stats.overall_lift.is_some());
+
+        let report = format_accuracy_report(&stats);
+        assert!(report.contains("Pairs: 5/5"));
+        assert!(report.contains("×"), "confident lift renders the number");
+        assert!(!report.contains("provisional"));
+    }
+
+    #[test]
+    fn test_lift_events_used_counts_only_lift_carrying_events() {
+        // `lift_events_used` counts only events that carry the lift fields;
+        // old-format events without them contribute to total_validations but
+        // NOT to the matched-pair count feeding the lift.
+        let events = vec![
+            // Old-format — no lift fields.
+            ValidationEvent {
+                day: 110,
+                hit_count: 1,
+                total_changed: 3,
+                accuracy_pct: 33.3,
+                ..Default::default()
+            },
+            // Lift-carrying event 1.
+            ValidationEvent {
+                day: 111,
+                hit_count: 2,
+                total_changed: 3,
+                accuracy_pct: 66.7,
+                predicted_count: Some(4),
+                total_scored: Some(7),
+                scored_broke: Some(3),
+            },
+            // Lift-carrying event 2.
+            ValidationEvent {
+                day: 112,
+                hit_count: 1,
+                total_changed: 3,
+                accuracy_pct: 33.3,
+                predicted_count: Some(2),
+                total_scored: Some(5),
+                scored_broke: Some(2),
+            },
+        ];
+        let stats = compute_accuracy_stats(&events);
+        assert_eq!(stats.total_validations, 3);
+        assert_eq!(
+            stats.lift_events_used, 2,
+            "only the two lift-carrying events feed the lift"
+        );
+
+        let report = format_accuracy_report(&stats);
+        assert!(
+            report.contains("Pairs: 2/5") && report.contains("provisional"),
+            "below threshold → provisional label"
+        );
+    }
+
+    #[test]
+    fn test_lift_none_but_pairs_present_shows_cold_start() {
+        // When overall_lift is None (no usable lift) but lift-carrying pairs
+        // exist, the report shows a cold-start progress line rather than a bare
+        // "—" for the lift.
+        let events = vec![
+            // Lift-carrying event with scored_broke = 0 → lift resolves to None.
+            ValidationEvent {
+                day: 172,
+                hit_count: 0,
+                total_changed: 3,
+                accuracy_pct: 0.0,
+                predicted_count: Some(4),
+                total_scored: Some(7),
+                scored_broke: Some(0),
+            },
+        ];
+        let stats = compute_accuracy_stats(&events);
+        assert!(stats.overall_lift.is_none());
+        assert_eq!(stats.lift_events_used, 1);
+
+        let report = format_accuracy_report(&stats);
+        assert!(report.contains("Pairs: 1/5"));
+        assert!(
+            report.contains("cold start") && report.contains("1/5"),
+            "None lift with pairs shows the cold-start progress"
+        );
     }
 }
