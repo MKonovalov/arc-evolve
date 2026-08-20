@@ -434,6 +434,50 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_accuracy_trend_two_events_boundary() {
+        // The smallest series that can yield a direction: 2 events. The window
+        // must shrink to 1 so the first/last averaging windows are each a
+        // single event and must NOT overlap (a >5% swing is a valid signal).
+        let events = vec![
+            ValidationEvent {
+                day: 100,
+                hit_count: 1,
+                total_changed: 5,
+                accuracy_pct: 20.0,
+                ..Default::default()
+            },
+            ValidationEvent {
+                day: 101,
+                hit_count: 3,
+                total_changed: 5,
+                accuracy_pct: 70.0,
+                ..Default::default()
+            },
+        ];
+        assert_eq!(compute_accuracy_trend(&events), AccuracyTrend::Improving);
+    }
+
+    #[test]
+    fn test_compute_accuracy_trend_odd_length_no_overlap() {
+        // 5 events -> window = min(5, 2) = 2, first/last windows are disjoint
+        // slices ([0..2] and [3..5]). A monotonic rise must read as Improving,
+        // which fails if windows overlapped and the "last avg" diluted the rise
+        // with early high values.
+        let events: Vec<ValidationEvent> = [20.0, 40.0, 60.0, 80.0, 95.0]
+            .iter()
+            .enumerate()
+            .map(|(i, &pct)| ValidationEvent {
+                day: 100 + i as u32,
+                hit_count: 1,
+                total_changed: 5,
+                accuracy_pct: pct,
+                ..Default::default()
+            })
+            .collect();
+        assert_eq!(compute_accuracy_trend(&events), AccuracyTrend::Improving);
+    }
+
+    #[test]
     fn test_compute_accuracy_stats_best_worst_day() {
         let events = vec![
             ValidationEvent {
