@@ -37,7 +37,7 @@ pub(crate) use crate::commands_risk_emerging::{detect_emerging_risks, format_eme
 // (`AccuracyStats` and the private trend helper are only used inside the
 // accuracy module itself, so they aren't re-exported.)
 pub(crate) use crate::commands_risk_accuracy::{
-    compute_accuracy_stats, format_accuracy_report, AccuracyTrend,
+    compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
 };
 
 /// A single file's risk assessment with score and signal labels.
@@ -1527,7 +1527,24 @@ fn format_learning_status(weights_path: &std::path::Path) -> String {
 /// Handle the `/risk accuracy` subcommand.
 fn handle_risk_accuracy() {
     let events = load_validation_history_from(std::path::Path::new(RISK_VALIDATION_PATH));
-    let stats = compute_accuracy_stats(&events);
+    let mut stats = compute_accuracy_stats(&events);
+
+    // Per-signal accuracy breakdown (the dream's next measurement step):
+    // cross-reference snapshots against validations to see which of the 7 risk
+    // signals actually co-occurred with the hits. Reuse the same parsed
+    // `DetailedValidationEvent` structure the weight-learning path uses rather
+    // than re-parsing the files. Flatten per-event hit-signal lists into one
+    // per-hit-file list for `compute_per_signal_hits`.
+    let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+    let detailed = parse_detailed_events(&validation_content, &snapshot_content);
+    let mut hit_signals: Vec<Vec<usize>> = Vec::new();
+    for event in &detailed {
+        hit_signals.extend(event.hit_signals.iter().cloned());
+    }
+    if !hit_signals.is_empty() {
+        stats.per_signal_hits = Some(compute_per_signal_hits(&hit_signals));
+    }
 
     // Section 1: Overall accuracy summary
     let report = format_accuracy_report(&stats);
@@ -1539,8 +1556,6 @@ fn handle_risk_accuracy() {
     }
 
     // Section 2: Per-signal breakdown
-    let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
-    let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
     let learned_weights = load_learned_weights();
     let has_learned = std::path::Path::new(LEARNED_WEIGHTS_PATH).exists();
     let signal_section = format_signal_breakdown(

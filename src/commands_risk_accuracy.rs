@@ -7,6 +7,17 @@
 use crate::commands_risk_snapshots::ValidationEvent;
 use crate::format::*;
 
+/// The seven risk signal names, index-aligned with the 7-element weight arrays.
+pub(crate) const SIGNAL_NAMES: [&str; 7] = [
+    "churn",
+    "recency",
+    "size",
+    "complexity",
+    "test_density",
+    "coupling",
+    "revert_history",
+];
+
 // ── Risk prediction accuracy tracking ──
 
 /// Trend direction for accuracy over time.
@@ -37,6 +48,11 @@ pub(crate) struct AccuracyStats {
     /// pair" count the dream tracks: the lift is only a confident measurement
     /// once ≥5 such pairs accumulate (cold-start threshold).
     pub(crate) lift_events_used: usize,
+    /// Per-signal hit counts: `per_signal_hits[i]` = how many hit files had
+    /// signal `i` elevated. `Some` when the caller supplied signal detail
+    /// (from the parsed snapshot/validation cross-reference); `None` when no
+    /// signal data is available. Render (and trust) only behind `pairs >= 5`.
+    pub(crate) per_signal_hits: Option<[usize; 7]>,
 }
 
 /// Compute trend by comparing the average accuracy of the last N events
@@ -78,6 +94,7 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
             worst_day: None,
             overall_lift: None,
             lift_events_used: 0,
+            per_signal_hits: None,
         };
     }
 
@@ -171,10 +188,31 @@ pub(crate) fn compute_accuracy_stats(events: &[ValidationEvent]) -> AccuracyStat
         worst_day,
         overall_lift,
         lift_events_used,
+        per_signal_hits: None,
     }
 }
 
-/// Format the accuracy report as a compact box display.
+/// Compute per-signal hit counts from per-hit signal indices.
+///
+/// `hit_signals` is one entry per hit file, each a list of signal indices that
+/// were elevated for that file (the same `DetailedValidationEvent.hit_signals`
+/// shape the weight-learning path already parses in `commands_risk.rs`).
+/// Returns a 7-element array where `[i]` = number of hit files that had signal
+/// `i` elevated.
+pub(crate) fn compute_per_signal_hits(hit_signals: &[Vec<usize>]) -> [usize; 7] {
+    let mut counts = [0usize; 7];
+    for signals in hit_signals {
+        for &idx in signals {
+            if idx < 7 {
+                counts[idx] += 1;
+            }
+        }
+    }
+    counts
+}
+
+/// Format the accuracy report as a compact box display, followed by a
+/// per-signal breakdown once enough matched pairs have accumulated (≥5).
 pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
     if stats.total_validations == 0 {
         return format!(
@@ -227,7 +265,7 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         _ => "—".to_string(),
     };
 
-    format!(
+    let box_str = format!(
         "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
          {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
@@ -236,7 +274,7 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
          {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
          {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
-         {BOLD}  ╰────────────────────────────╯{RESET}\n",
+         {BOLD}  ╰───────────────────────────╯{RESET}\n",
         stats.total_validations,
         format!(
             "{hit_rate_rounded:.0}% ({}/{})",
@@ -247,7 +285,49 @@ pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
         worst_str,
         pairs_str,
         lift_str,
-    )
+    );
+
+    // Per-signal breakdown (the dream's next measurement step): behind the same
+    // `pairs >= 5` cold-start gate as the lift, show which risk signals actually
+    // co-occurred with the hits. Only rendered when the caller supplied the
+    // signal detail (from the parsed snapshot/validation cross-reference).
+    let mut out = box_str;
+    if let Some(per_signal_hits) = &stats.per_signal_hits {
+        let signal_block = fmt_per_signal_block(per_signal_hits, stats.total_hits, pairs);
+        out.push_str(&signal_block);
+    }
+    out
+}
+
+/// Render the compact per-signal accuracy breakdown.
+///
+/// One line per signal: name and hits-with-signal/total-hits. Gated on
+/// `pairs >= 5` so we never over-claim at cold-start N (aligns with the lift's
+/// cold-start discipline). `total_hits` is the denominator; a single hit file
+/// can have multiple signals elevated, so per-signal counts are not exclusive.
+fn fmt_per_signal_block(per_signal_hits: &[usize; 7], total_hits: usize, pairs: usize) -> String {
+    if pairs < 5 {
+        return String::new();
+    }
+    let mut out = format!("\n{BOLD}  Per-Signal Accuracy{RESET}\n");
+    out.push_str(&format!(
+        "  {:<16}{:<12}{}\n",
+        "Signal", "In hits", "Share of hits"
+    ));
+    for i in 0..7 {
+        let count = per_signal_hits[i];
+        let share = if total_hits > 0 {
+            count as f64 / total_hits as f64 * 100.0
+        } else {
+            0.0
+        };
+        out.push_str(&format!(
+            "  {:<16}{:<12}{share:.0}%\n",
+            SIGNAL_NAMES[i],
+            format!("{count}/{total_hits}"),
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -648,6 +728,7 @@ mod tests {
             trend: AccuracyTrend::Improving,
             best_day: Some((115, 80.0)),
             worst_day: Some((108, 20.0)),
+            per_signal_hits: None,
         };
         let report = format_accuracy_report(&stats);
         assert!(report.contains("Risk Prediction Accuracy"));
@@ -796,5 +877,31 @@ mod tests {
             report.contains("cold start") && report.contains("1/5"),
             "None lift with pairs shows the cold-start progress"
         );
+    }
+
+    #[test]
+    fn test_compute_per_signal_hits_counts_elevated_signals() {
+        // One hit file per Vec<usize>; a file can have multiple elevated signals.
+        // Here 5 hit files, four carrying real signal detail:
+        //   file A → signals [0 (churn), 3 (complexity)]
+        //   file B → signals [0 (churn)]
+        //   file C → signals [1 (recency)]
+        //   file D → signals [4 (test_density)]
+        //   file E → signals [99]  (out-of-range index must be ignored, no panic)
+        let hit_signals: Vec<Vec<usize>> = vec![
+            vec![0, 3],
+            vec![0],
+            vec![1],
+            vec![4],
+            vec![99], // out of range → must be ignored (no panic)
+        ];
+        let counts = compute_per_signal_hits(&hit_signals);
+        assert_eq!(counts[0], 2, "churn appears in A and B");
+        assert_eq!(counts[1], 1, "recency appears in C");
+        assert_eq!(counts[2], 0, "size not elevated in any hit");
+        assert_eq!(counts[3], 1, "complexity appears in A");
+        assert_eq!(counts[4], 1, "test_density appears in D");
+        assert_eq!(counts[5], 0, "coupling not elevated");
+        assert_eq!(counts[6], 0, "revert_history not elevated");
     }
 }
