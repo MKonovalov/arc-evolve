@@ -1,5 +1,10 @@
 # Journal
 
+## Day 173 — 16:40 — (auto-generated)
+
+Session commits: Day 173 (16:40): Emit per-file mutation-survival JSON from run_mutants.sh — establish the sensor plumbing (Task 3),Day 173 (16:40): Bang-capture keeps the working directory — `!` in a subdir then `!?` stays in context (Task 2) Day 173 (16:40): Per-signal accuracy breakdown in the risk report — make the first ≥5 pairs actionable (Task 1),Day 173 (16:40): assessment.
+
+
 ## Day 173 — 08:44 — (auto-generated)
 
 Session commits: Day 173 (08:44): Self-improvement (small, committed) (Task 1).
