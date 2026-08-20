@@ -300,6 +300,39 @@ pub struct BangResult {
     pub exit_code: Option<i32>,
     /// Combined stdout+stderr tail, capped by [`tail_for_capture`].
     pub output_tail: String,
+    /// The working directory the command ran in (char-boundary safe, so `!?`
+    /// can reference where output was produced). `None` when it couldn't be
+    /// resolved — the follow-up prompt then simply omits the line.
+    pub cwd: Option<String>,
+}
+
+/// Best-effort effective working directory for a bang command.
+///
+/// `!` passthrough runs via the REPL's shell (`sh -c`), which executes in a
+/// subshell, so a persistent cwd isn't trivially observable across
+/// invocations. We record the process's current directory, and if the command
+/// *starts* with an explicit `cd <path>` (optionally chained with `&&`), we
+/// apply that to the recorded dir so `!cd src` then `!?` is cwd-accurate.
+/// Uses only char-safe operations and never panics.
+fn bang_effective_cwd(cmd: &str) -> Option<String> {
+    let base = std::env::current_dir().ok()?;
+    // If the command doesn't start with "cd", it runs in the current dir.
+    let Some(rest) = cmd.trim().strip_prefix("cd") else {
+        return Some(base.display().to_string());
+    };
+    // Only treat it as an actual `cd` when a whitespace char follows "cd"
+    // (i.e. `cd <path>`). Anything else ("cdrom/eject", bare "cd" — which the
+    // shell resolves to $HOME but we can't observe portably) keeps the
+    // recorded current dir.
+    if !(rest.starts_with(' ') || rest.starts_with('\t') || rest.starts_with('\n')) {
+        return Some(base.display().to_string());
+    }
+    // Take the path before any `&&` chain, if present: `cd src && ls`.
+    let target = rest.trim().split("&&").next().map(str::trim).unwrap_or("");
+    if target.is_empty() {
+        return Some(base.display().to_string());
+    }
+    Some(base.join(target).display().to_string())
 }
 
 /// The last `!` command's captured result. Read (non-consuming) by `!?` so
@@ -376,9 +409,15 @@ pub fn build_bang_followup_prompt(res: &BangResult, question: &str) -> String {
     } else {
         format!("```\n{}\n```", res.output_tail.trim_end())
     };
+    // cwd line is additive: present when a dir is set, omitted otherwise.
+    let cwd_line = res
+        .cwd
+        .as_ref()
+        .map(|d| format!("\n    (ran in: {})", d))
+        .unwrap_or_default();
     format!(
-        "I ran this shell command in my terminal (via `!` passthrough):\n\n    $ {}\n\nIt {}. Output (tail):\n\n{}\n\n{}",
-        res.command, exit_desc, output, question
+        "I ran this shell command in my terminal (via `!` passthrough):\n\n    $ {}{}\n\nIt {}. Output (tail):\n\n{}\n\n{}",
+        res.command, cwd_line, exit_desc, output, question
     )
 }
 
@@ -470,6 +509,7 @@ fn run_bang_command(cmd: &str) {
         command: cmd.to_string(),
         exit_code,
         output_tail: tail_for_capture(&captured, BANG_CAPTURE_MAX_BYTES, BANG_CAPTURE_MAX_LINES),
+        cwd: bang_effective_cwd(cmd),
     });
 
     match status {
@@ -1935,6 +1975,7 @@ mod tests {
             command: "cargo test".to_string(),
             exit_code: Some(101),
             output_tail: "test foo ... FAILED".to_string(),
+            cwd: Some("/tmp/proj".to_string()),
         };
         let prompt = build_bang_followup_prompt(&res, "why did foo fail");
         assert!(prompt.contains("$ cargo test"));
@@ -1949,6 +1990,7 @@ mod tests {
             command: "npm test".to_string(),
             exit_code: Some(2),
             output_tail: "boom".to_string(),
+            cwd: None,
         };
         let prompt = build_bang_followup_prompt(&failed, "");
         assert!(prompt.contains("This command failed. Explain what went wrong and how to fix it."));
@@ -1958,6 +2000,7 @@ mod tests {
             command: "ls".to_string(),
             exit_code: Some(0),
             output_tail: "src\ndocs".to_string(),
+            cwd: None,
         };
         let prompt = build_bang_followup_prompt(&ok, "");
         assert!(prompt.contains("exited successfully (exit 0)"));
@@ -1971,11 +2014,56 @@ mod tests {
             command: "sleep 100".to_string(),
             exit_code: None,
             output_tail: "   ".to_string(),
+            cwd: None,
         };
         let prompt = build_bang_followup_prompt(&res, "what happened");
         assert!(prompt.contains("was terminated by a signal"));
         assert!(prompt.contains("(no output)"));
         assert!(!prompt.contains("```"));
+        // No resolvable dir → the "ran in" line is omitted.
+        assert!(!prompt.contains("ran in:"));
+    }
+
+    #[test]
+    fn test_build_bang_followup_prompt_includes_cwd_when_set() {
+        let res = BangResult {
+            command: "cd src && cargo build".to_string(),
+            exit_code: Some(0),
+            output_tail: "compiling".to_string(),
+            cwd: Some("/home/dev/proj/src".to_string()),
+        };
+        let prompt = build_bang_followup_prompt(&res, "");
+        assert!(prompt.contains("ran in: /home/dev/proj/src"));
+        // And a bare `!?` without a dir omits the line entirely.
+        let res2 = BangResult {
+            command: "pwd".to_string(),
+            exit_code: Some(0),
+            output_tail: "/home/dev/proj".to_string(),
+            cwd: None,
+        };
+        let prompt2 = build_bang_followup_prompt(&res2, "");
+        assert!(!prompt2.contains("ran in:"));
+    }
+
+    #[test]
+    fn test_bang_effective_cwd_applies_explicit_cd() {
+        // `cd` at the start is applied to the recorded dir.
+        let cwd = bang_effective_cwd("cd src && ls");
+        if let Some(c) = cwd {
+            let base = std::env::current_dir().unwrap();
+            assert!(c.ends_with("src"));
+            assert!(c.starts_with(&base.display().to_string()));
+        }
+        // A non-cd command keeps the current dir.
+        let cwd = bang_effective_cwd("ls -la");
+        let base = std::env::current_dir().unwrap().display().to_string();
+        assert_eq!(cwd.as_deref(), Some(base.as_str()));
+        // A command beginning with "cd" but not "cd <path>" (e.g. "cdrom")
+        // is NOT treated as a cd — keeps the current dir.
+        let cwd = bang_effective_cwd("cdrom/eject");
+        assert_eq!(cwd.as_deref(), Some(base.as_str()));
+        // An invalid current dir fails closed → None.
+        // (Not directly testable without chdir; skip that branch.)
     }
 
     #[test]

@@ -88,6 +88,7 @@ Output streams live to your terminal (via `sh -c` on Unix, `cmd /C` on Windows),
 ```
 
 - Bare `!?` uses a default question: after a failure, "explain what went wrong and how to fix it"; after a success, "summarize this output".
+- When the command ran somewhere other than the obvious place, `!?` also notes the working directory (a `(ran in: <dir>)` line) — for example after `!cd src && make`, so arc doesn't misframe relative paths. The line is omitted when no directory can be resolved.
 - `!? <question>` asks your own question about the output.
 - Works after successful commands too (the failure hint just doesn't appear).
 - If no `!` command has run yet, `!?` prints a one-liner and does nothing.
