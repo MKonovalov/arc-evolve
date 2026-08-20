@@ -1,0 +1,330 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+Let me look at the problematic file around the error location.
+
+
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:290..350 ✓ (1ms)
+
+There's an extra } at line 332. Let me remove it.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (5 → 5 lines) ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+Let me remove just the extra closing brace precisely.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (11 → 10 lines)
+            ));
+        }
+        out
+  - }
+    }
+    
+    #[cfg(test)]
+ ✓ (1ms)
+            ));
+        }
+        out
+  - }
+    }
+    
+    #[cfg(test)]
+
+Now let me run the verification steps.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo build 2>&1 | ta… ✓ (9.7s)
+
+Build passes. There's a dead-code warning for `compute_per_signal_hits`. Let me check how it's used — the task said it should be wired in. Let me check whether it's called anywhere and whether the callers pass signal detail.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "compute_per_signal_hits\… ✓ (4ms)
+
+compute_per_signal_hits is never called — where per_signal_hits: None is set in compute_accuracy_stats. The warning means the feature isn't fully wired. Let me look at compute_accuracy_stats to wire it in properly. Let me check the callers and the validation event parsing.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:95..205 ✓ (1ms)
+
+Now I see the issue: `compute_accuracy_stats sets per_signal_hits: None and compute_per_signal_hits` is never called. The task requires wiring the per-signal breakdown. Let me look at how the events carry signal data. Let me check the ValidationEvent/`DetailedValidationEvent` structure and how `compute_accuracy_stats` is called.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "compute_accuracy_stats\|… ✓ (4ms)
+
+Let me look at `ValidationEvent` in commands_risk_snapshots.rs to see if it has a hit_signals field.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct ValidationEvent\|h… ✓ (4ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:376..421 ✓ (1ms)
+
+The `ValidationEvent` struct does not carry `hit_signals. The ValidationEvent` is the aggregated per-snapshot record (hits count, not individual file signal detail). The per-hit signal data lives elsewhere.
+
+The task said: "The hit_signals data is already parsed by the learning path in `commands_risk.rs`; reuse the existing parsed-validation-event structure rather than re-parsing files."
+
+Let me look at how `compute_accuracy_stats` is called and check the risk report / validate command, plus how the learning path parses hit_signals.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "compute_accuracy_stats\|… ✓ (4ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "hit_signals" src/*.rs ✓ (7ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:135..195 ✓ (1ms)
+
+Now I understand the design. The `DetailedValidationEvent in commands_risk.rs` carries `hit_signals` per hit file. Let me look at how `parse_detailed_events` is called and where weight learning happens, to see how to thread the per-signal data into the accuracy report.
+
+Let me look at the `handle_risk` validate flow and how `compute_accuracy_stats / format_accuracy_report` get called.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1600..1670 ✓ (1ms)
+
+Let me look at how the `/risk validate` subcommand handler and `format_accuracy_report` are wired together, especially where `compute_accuracy_stats result feeds into format_accuracy_report`.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "format_accuracy_report\|c… ✓ (4ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1525..1555 ✓ (1ms)
+
+I see — `format_accuracy_report(&stats)` is called with `per_signal_hits: None`. The per-signal breakdown currently never gets populated at the call site. Let me look at `format_signal_breakdown` and how it uses `parse_detailed_events / parse_rich_validation_events`, to find the best place to compute the per-signal hits and thread them into the stats.
+
+Let me look at `format_signal_breakdown`.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn format_signal_breakdow… ✓ (3ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1300..1355 ✓ (1ms)
+
+Now let me look at format_signal_breakdown (line 1370) fully to understand how it consumes snapshots/validations and can produce per-signal hit data.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1370..1420 ✓ (1ms)
+
+This `format_signal_breakdown` already counts `signal_hit_counts` (which is exactly the per-signal hit data), but it's a separate section. The implemented `fmt_per_signal_block` in `commands_risk_accuracy.rs` is meant to render the per-signal block inside the accuracy report, and `compute_per_signal_hits` computes the counts, but `per_signal_hits` is never populated in `compute_accuracy_stats`.
+
+The task explicitly says to add per-signal breakdown to the accuracy report. Let me look at `format_accuracy_report` fully and understand the intended wiring. The cleanest fix that satisfies the task: populate `per_signal_hits in handle_risk_accuracy before calling format_accuracy_report`, by computing the per-signal hits from the parsed detailed events.
+
+Let me view `format_accuracy_report`.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:222..302 ✓ (1ms)
+
+I now understand the design. I need to wire `per_signal_hits` into the stats so `format_accuracy_report` renders the block. The cleanest approach: add a setter or a builder that lets `handle_risk_accuracy` populate `per_signal_hits` from `parse_detailed_events`.
+
+Let me check `AccuracyStats` fields and the current per_signal_hits to see if there's a way to set it after construction. The struct fields are `pub(crate)`, so I can mutate or add a helper. 
+
+Best approach given the design: In handle_risk_accuracy, after computing stats, compute per-signal hits from `parse_detailed_events and set stats.per_signal_hits, then pass to format_accuracy_report`.
+
+Let me check the AccuracyStats struct definition.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:20..80 ✓ (1ms)
+
+Now I have a full picture. I'll wire per_signal_hits into `handle_risk_accuracy in commands_risk.rs`. The plan:
+
+1. In `handle_risk_accuracy`, compute per-signal hits from `parse_detailed_events(snapshot_content, validation_content)` — this is the existing parsed structure the task references.
+2. Set `stats.per_signal_hits = Some(...)` before calling `format_accuracy_report`.
+
+But `compute_per_signal_hits` in commands_risk_accuracy takes `&[Vec<usize>]` but `parse_detailed_events returns Vec<DetailedValidationEvent>` where each has `hit_signals: Vec<Vec<usize>>`. I need to flatten. `compute_per_signal_hits takes one entry per hit file. DetailedValidationEvent.hit_signals` is already `Vec<Vec<usize>>` (one entry per hit file). So I need to concatenate across events.
+
+Let me check what `compute_per_signal_hits` is exported as and how to best use it. It's `pub(crate)`. Let me verify it's re-exported in the use statement in commands_risk.rs.
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:38..58 ✓ (1ms)
+
+I need to add `compute_per_signal_hits` to the re-export, then wire it up. Let me also check the existing test that asserts per-signal counts — the task said "add/extend a unit test asserting the per-signal breakdown counts correct numbers." Let me check existing tests in the accuracy module referencing per_signal / compute_per_signal_hits.
+
+
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_per_signal_hits\|… ✓ (3ms)
+
+No test exists for `compute_per_signal_hits`. Let me look at the end of the test module to see where I can add a test and confirm the existing test structure (SIGNAL_NAMES, etc).
+
+Let me look at an existing test to follow the fixture pattern around line 860-880.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:840..880 ✓ (1ms)
+
+Now I'll implement the wiring. Let me:
+
+1. Add `compute_per_signal_hits` to the re-export in `commands_risk.rs`.
+2. In `handle_risk_accuracy`, after computing stats, compute per-signal hits from `parse_detailed_events` and set `stats.per_signal_hits`.
+3. Add a unit test for `compute_per_signal_hits`.
+
+Let me make the edits. First, add the re-export:
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (3 → 3 lines)
+    pub(crate) use crate::commands_risk_accuracy::{
+  -     compute_accuracy_stats, format_accuracy_report, AccuracyTrend,
+  +     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
+    };
+ ✓ (1ms)
+    pub(crate) use crate::commands_risk_accuracy::{
+  -     compute_accuracy_stats, format_accuracy_report, AccuracyTrend,
+  +     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
+    };
+
+Now wire it into handle_risk_accuracy. Currently lines 1528-1534. Let me update it to compute per-signal hits before the report.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (19 → 34 lines)
+    /// Handle the `/risk accuracy` subcommand.
+    fn handle_risk_accuracy() {
+        let events = load_validation_history_from(std::path::Path::new(RISK_VALIDATION_PATH));
+  -     let stats = compute_accuracy_stats(&events);
+  +     let mut stats = compute_accuracy_stats(&events);
+  + 
+  +     // Per-signal accuracy breakdown (the dream's next measurement step):
+  +     // cross-reference snapshots against validations to see which of the 7 risk
+  +     // signals actually co-occurred with the hits. Reuse the same parsed
+  +     // `DetailedValidationEvent` structure the weight-learning path uses rather
+  +     // than re-parsing the files. Flatten per-event hit-signal lists into one
+  +     // per-hit-file list for `compute_per_signal_hits`.
+  +     let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+  +     let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+  +     let detailed = parse_detailed_events(&validation_content, &snapshot_content);
+  +     let mut hit_signals: Vec<Vec<usize>> = Vec::new();
+  +     for event in &detailed {
+  +         hit_signals.extend(event.hit_signals.iter().cloned());
+  +     }
+  +     if !hit_signals.is_empty() {
+  ... (13 more lines)
+ ✓ (1ms)
+    /// Handle the `/risk accuracy` subcommand.
+    fn handle_risk_accuracy() {
+        let events = load_validation_history_from(std::path::Path::new(RISK_VALIDATION_PATH));
+  -     let stats = compute_accuracy_stats(&events);
+  +     let mut stats = compute_accuracy_stats(&events);
+  + 
+  +     // Per-signal accuracy breakdown (the dream's next measurement step):
+  +     // cross-reference snapshots against validations to see which of the 7 risk
+  ... (13 more lines)
+
+Now let me verify the following lines still reference snapshot_content/`validation_content` correctly in the rest of `format_signal_breakdown` call.
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1545..1570 ✓ (1ms)
+
+Good, that's consistent. Now let me add a unit test for `compute_per_signal_hits` in the accuracy test module. Let me find the last test end to insert before the closing brace.
+
+
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:875..885 ✓ (0ms)
+
+
+  ╭─ Turn 28 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (6 → 31 lines)
+                report.contains("cold start") && report.contains("1/5"),
+                "None lift with pairs shows the cold-start progress"
+            );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_per_signal_hits_counts_elevated_signals() {
+  +         // One hit file per Vec<usize>; a file can have multiple elevated signals.
+  +         // Here 4 hit files:
+  +         //   file A → signals [0 (churn), 3 (complexity)]
+  +         //   file B → signals [0 (churn)]
+  +         //   file C → signals [1 (recency)]
+  +         //   file D → signals [4 (test_density)]  (invalid/out-of-range indices ignored)
+  +         let hit_signals: Vec<Vec<usize>> = vec![
+  +             vec![0, 3],
+  +             vec![0],
+  +             vec![1],
+  +             vec![4],
+  +             vec![99], // out of range → must be ignored (no panic)
+  +         ];
+  ... (10 more lines)
+ ✓ (1ms)
+                report.contains("cold start") && report.contains("1/5"),
+                "None lift with pairs shows the cold-start progress"
+            );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_per_signal_hits_counts_elevated_signals() {
+  +         // One hit file per Vec<usize>; a file can have multiple elevated signals.
+  ... (13 more lines)
+
+Wait — my test has 5 hit files (A,B,C,D and the out-of-range one), but I commented "4 hit files". Let me check `compute_per_signal_hits` to confirm out-of-range handling.
+
+
+  ╭─ Turn 29 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:202..216 ✓ (1ms)
+
+The implementation ignores out-of-range indices. My test has 5 vectors where the 5th is vec![99]. My comment says "4 hit files" which is slightly off (it's technically 5 vectors, 4 with real signals + 1 out-of-range). Let me fix the comment for accuracy. Actually the test still passes either way. Let me correct the wording.
+
+
+  ╭─ Turn 30 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (6 → 7 lines)
+            // One hit file per Vec<usize>; a file can have multiple elevated signals.
+  -         // Here 4 hit files:
+  +         // Here 5 hit files, four carrying real signal detail:
+            //   file A → signals [0 (churn), 3 (complexity)]
+            //   file B → signals [0 (churn)]
+            //   file C → signals [1 (recency)]
+  -         //   file D → signals [4 (test_density)]  (invalid/out-of-range indices ignored)
+  +         //   file D → signals [4 (test_density)]
+  +         //   file E → signals [99]  (out-of-range index must be ignored, no panic)
+ ✓ (1ms)
+            // One hit file per Vec<usize>; a file can have multiple elevated signals.
+  -         // Here 4 hit files:
+  +         // Here 5 hit files, four carrying real signal detail:
+            //   file A → signals [0 (churn), 3 (complexity)]
+            //   file B → signals [0 (churn)]
+            //   file C → signals [1 (recency)]
+  -         //   file D → signals [4 (test_density)]  (invalid/out-of-range indices ignored)
+  +         //   file D → signals [4 (test_density)]
+  +         //   file E → signals [99]  (out-of-range index must be ignored, no panic)
+
+Now let me run fmt, build, and test.
+
+
+  ╭─ Turn 31 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo build 2>&1 | ta… ✓ (9.4s)
+
+No more warnings. Now run the tests.
+
+
+  ╭─ Turn 32 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -40 ✓ (10.7s)
+
+There's an existing test constructing AccuracyStats directly. Let me fix it to add `per_signal_hits`. Let me find it.
+
+
+  ╭─ Turn 33 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:700..745 ✓ (1ms)
+
+

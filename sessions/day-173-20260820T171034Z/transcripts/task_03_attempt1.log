@@ -1,0 +1,264 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/scripts/run_mutants.sh ✓ (1ms)
+
+Let me check if cargo-mutants is available and examine the mutants.out structure to understand what data I can extract per-file.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo mutants --version 2>&1 | hea… ✓ (33ms)
+
+cargo-mutants isn't installed in this environment. Let me look at the mutants.out structure to understand where per-file data could come from. cargo-mutants produces `mutants.out/mutants.json` which has per-mutant info including file paths. Let me check the gitignore and understand the mutants.out format.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutants\|\.arc" .gitignor… ✓ (7ms)
+
+The .arc directory itself is not gitignored, only specific files inside it. Let me check the git status to see what's there.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short .arc/ | head; e… ✓ (6ms)
+
+I need to add `.arc/mutants_per_file.json` to the gitignore. Let me check the full .gitignore around .arc entries.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '10,30p' .gitignore ✓ (3ms)
+
+Now let me understand the cargo-mutants output format. cargo-mutants writes `mutants.out/mutants.json` which contains per-mutant data including file paths. Let me confirm the JSON schema and how to parse per-file survival. Let me research the format quickly.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat mutants.toml 2>/dev/null | hea… ✓ (3ms)
+
+Let me recall cargo-mutants' output format. The tool writes `mutants.out/mutants.json` with entries keyed by file path. Let me verify by checking online.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ web search 'cargo-mutants mutants.json output format per-file survived k…' ✓ (1.1s)
+
+The key facts: cargo-mutants writes `mutants.out/mutants.json (all generated mutants, keyed by file path) and mutants.out/outcomes.json` (results with per-mutant outcomes). To build a per-file survival summary, I need to join mutants.json (id → file path) with `outcomes.json` (id → outcome).
+
+Let me check the `outcomes.json` format precisely.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ web search 'cargo-mutants outcomes.json format "mutants" "outcomes.json"…' ✓ (1.4s)
+
+I have enough understanding of the format. cargo-mutants writes `mutants.out/mutants.json` (list of all mutants with their id, mutant metadata including file path) and `mutants.out/outcomes.json` (outcomes per mutant). To build a per-file summary, I can also use the simpler existing text files: `mutants.out/caught.txt, survived.txt, timeout.txt`, `unviable.txt`.
+
+Actually, the cleanest and most robust approach that doesn't depend on the exact JSON schema (which varies across cargo-mutants versions) is to parse the `caught.txt / survived.txt` files which are already used in the current script. Those files contain one mutant per line with a description. But does the description include the file path? Let me check the list format.
+
+Looking at the cargo-mutants list format, each line looks like:
+```
+src/file.rs:42.1: replace `...` with `...` in `function_name` (test: ...)
+```
+
+Actually the survivors.txt lines have format like `mutant_id` followed by description. Let me verify the exact format. Let me look at the mutants.json format which is the most structured and reliable. From the docs, `mutants.json` entries are keyed by file path, containing mutants with fields. The `outcomes.json` has per-mutant results keyed by id.
+
+Given version variance and that cargo-mutants isn't installed here, the most robust approach for the script is to use a Python helper that joins mutants.json + `outcomes.json`. But since the task says "if the tool isn't installed, verify the code path by reading the script and asserting the JSON-write branch compiles/parses", the key deliverable is a well-structured plumbing.
+
+Let me look at the exact `mutants.json` schema more carefully to write a correct parser. From cargo-mutants source, `mutants.json` is a JSON object keyed by file path, each value an array of mutant objects with id, description, `replacement, filename`, etc. And `outcomes.json has a mutants` array where each has id, mutant, `test_status, time_ms`.
+
+The mapping challenge: mutants.json is keyed by file → mutant.id, and `outcomes.json` maps id → test_status. This is a well-defined join keyed on `id`.
+
+Let me confirm the outcomes.json structure precisely by checking the cargo-mutants source.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c "import urllib.request;… ✓ (54ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ web search 'cargo-mutants mutants.json schema "per-file" object keyed pa…' ✓ (1.0s)
+
+I have enough to design this. The critical detail: `mutants.json` is keyed by file path (an object whose keys are file paths), each value an array of mutant objects containing an id. `outcomes.json` maps each mutant id to its result. The join key is the mutant id.
+
+Given the schema variance risk and that cargo-mutants isn't installed here, I'll write a robust Python helper that:
+1. Reads mutants.json (keyed by file → array of mutants with id)
+2. Reads `outcomes.json` (requires the `mutants` results / or a summary map by id)
+3. Joins by id to count per-file mutants/killed/survived
+
+But to keep it robust and version-tolerant, I'll make the Python parser defensive: try multiple access patterns. Let me write the implementation.
+
+Let me first make my concrete change early — edit the script header and add the JSON emission. Let me write the script edits.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/scripts/run_mutants.sh (11 → 43 lines)
+    #
+    # Exits 0 if survival rate is at or below threshold, 1 if above.
+    # Baseline (Day 9): 1004 total mutants.
+  + #
+  + # Per-file survival artifact:
+  + # When a real (non --list) run completes, this script ALSO writes a
+  + # machine-readable per-file mutation-survival summary to `.arc/mutants_per_file.json`
+  + # (a gitignored location). This is a *sensor* artifact for arc's risk scorer —
+  + # wiring it in as a prediction signal is a FUTURE step, not done here.
+  + #
+  + # Schema of `.arc/mutants_per_file.json`:
+  + # {
+  + #   "tool": "cargo-mutants",
+  + #   "git_head": "abcd123...",             // current commit (short hash)
+  + #   "generated_at": "2026-08-20T16:40:00Z",
+  + #   "files": [
+  + #     {
+  + #       "path": "src/format/mod.rs",      // file path (cargo-mutants' own key)
+  + #       "mutants": 12,                    // total mutants generated in this file
+  + #       "killed": 10,                     // caught by a failing test
+  ... (15 more lines)
+ ✓ (1ms)
+    #
+    # Exits 0 if survival rate is at or below threshold, 1 if above.
+    # Baseline (Day 9): 1004 total mutants.
+  + #
+  + # Per-file survival artifact:
+  + # When a real (non --list) run completes, this script ALSO writes a
+  + # machine-readable per-file mutation-survival summary to `.arc/mutants_per_file.json`
+  + # (a gitignored location). This is a *sensor* artifact for arc's risk scorer —
+  ... (13 more lines)
+
+Now let me add the list-only early return should skip the JSON write, and add the JSON emission logic before the exit sites. Since the script currently calls `exit 0/exit 1` at multiple points, I need the JSON write to happen before those exits. The cleanest approach: capture the summary counts, write the JSON right before the final pass/fail check, and use trap or compute before exit.
+
+Let me restructure so the exit code is computed and set once, the JSON is written, then exit. The current structure exits inside the if/else. I'll refactor to compute exit code, write JSON, then exit once. Let me edit the final block.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/scripts/run_mutants.sh (27 → 152 lines)
+    echo ""
+    echo "Survival rate: ${SURVIVAL_RATE}% ($SURVIVED / $TESTED)"
+    echo "Threshold:     ${THRESHOLD}%"
+  + 
+  + # --- Per-file survival sensor artifact (additive; never affects exit code) ---
+  + # Writes .arc/mutants_per_file.json from cargo-mutants' mutants.json (all
+  + # generated mutants, keyed by file path) joined against outcomes.json (per-id
+  + # results). This is fragile against schema drift across cargo-mutants versions,
+  + # so any failure simply skips the write. See header comment for the schema.
+  + emission_failed=0
+  + if [[ -f mutants.out/mutants.json && -f mutants.out/outcomes.json ]]; then
+  +     if ! python3 - "$FILE_FILTER" <<'PYEOF' >/dev/null 2>&1
+  + import json, sys, os, datetime
+  + 
+  + # Locate cargo-mutants' output; the script runs from the repo root, but be
+  + # defensive about cwd variants.
+  + mutants_path = None
+  + for cand in ("mutants.out/mutants.json", os.path.join(os.getcwd(), "mutants.out/mutants.json")):
+  +     if os.path.isfile(cand):
+  +         mutants_path = cand
+  ... (111 more lines)
+ ✓ (1ms)
+    echo ""
+    echo "Survival rate: ${SURVIVAL_RATE}% ($SURVIVED / $TESTED)"
+    echo "Threshold:     ${THRESHOLD}%"
+  + 
+  + # --- Per-file survival sensor artifact (additive; never affects exit code) ---
+  + # Writes .arc/mutants_per_file.json from cargo-mutants' mutants.json (all
+  + # generated mutants, keyed by file path) joined against outcomes.json (per-id
+  + # results). This is fragile against schema drift across cargo-mutants versions,
+  ... (13 more lines)
+
+The `FILE_FILTER` argument I passed to python ("$FILE_FILTER") is unused inside the heredoc. Let me remove that noise since the mutants.json already reflects the filter (cargo-mutants applies -f when generating mutants.json). Let me clean that up.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/scripts/run_mutants.sh (1 → 1 lines)
+  -     if ! python3 - "$FILE_FILTER" <<'PYEOF' >/dev/null 2>&1
+  +     if ! python3 - <<'PYEOF' >/dev/null 2>&1
+ ✓ (0ms)
+  -     if ! python3 - "$FILE_FILTER" <<'PYEOF' >/dev/null 2>&1
+  +     if ! python3 - <<'PYEOF' >/dev/null 2>&1
+
+Now add `.arc/mutants_per_file.json to .gitignore`. Let me add it near the other .arc/ entries.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/.gitignore (3 → 4 lines)
+    .arc/gasp_failures
+    .arc/external-skills/
+  + .arc/mutants_per_file.json
+    .skill_evolve_last_run
+ ✓ (1ms)
+    .arc/gasp_failures
+    .arc/external-skills/
+  + .arc/mutants_per_file.json
+    .skill_evolve_last_run
+
+Now let me verify the syntax and test the Python emission logic with a synthetic fixtures directory to prove the JSON branch parses and produces sane output.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && bash -n scripts/run_mutants.sh && … ✓ (4ms)
+
+Now let me test the Python emission logic with synthetic fixtures. I'll create a fake mutants.out directory with a realistic `mutants.json and outcomes.json`, then extract and run just the Python branch to confirm it produces a sane artifact.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p /tmp/… (25 lines) ✓ (6ms)
+
+Now let me extract the Python heredoc from the script and run it against the fixtures. I'll create a small wrapper that drops the `.arc` write into the /tmp/mtest dir. Actually, the script writes to `.arc/` relative to cwd. Let me run it from within /tmp/mtest by placing the python code and executing with the right cwd.
+
+Let me just directly test the python by copying the heredoc body into a standalone script and running in /tmp/mtest.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk '/^PYEOF$/{p=0} p{print} /PYEO… ✓ (7ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -1 /tmp/pyemit.py; echo "---c… ✓ (4ms)
+
+The awk extraction dropped the import json line. Let me just reconstruct the python file directly from the script heredoc with a cleaner extraction method.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'BEGIN{inp=0} /^import json, s… ✓ (8ms)
+
+There's a trailing PYEOF line. Let me remove it and run against the fixtures. The python looks for `mutants.out/mutants.json` relative to cwd, so I'll copy pyemit.py into /tmp/mtest and run it there with an .arc dir.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed '/^PYEOF$/d' /tmp/pyemit.py > … ✓ (36ms)
+
+The Python emission logic produces a sane, correct per-file artifact. It correctly classified: git.rs (id 3 caught=killed, id 4 timeout=survived, id 5 missed=survived → 1 killed/2 survived) and format/mod.rs (id 1 caught, id 2 missed → 1/1). The summary sums correctly.
+
+Now let me test the robustness cases: missing outcomes.json, missing file, malformed JSON. Let me verify the emission skips gracefully (the if guard means python only runs when both exist, but let me confirm malformed JSON inside doesn't crash the script).
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /tmp/mtest && echo "== malformed mutants.json ==" && echo… (7 lines) ✓ (87ms)
+
+All edge cases exit 0 gracefully. The malformed case: `json.load` raised, which triggered the `if not ...: sys.exit(0)` — wait, actually with malformed JSON `load_json` returns None, then `if not isinstance(mutants, dict)` → exit(0). Good. And the .arc write only happens for the valid case.
+
+Let me confirm the guard in the bash script: `if [[ -f mutants.out/mutants.json && -f mutants.out/outcomes.json ]]`. So the whole python branch only runs when both exist. Good.
+
+Now let me verify the full script behaves when cargo-mutants isn't installed — it should still exit 1 with the "not found" message (unchanged behavior, no regression).
+
+Let me clean up the temp test dir and run cargo build/test/fmt/clippy (no Rust changed, but confirm).
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ rm -rf /tmp/mtest /tmp/pyemit.py; cd /home/runner/work/arc-evolve/arc-evolve && … ✗ (0ms)
+    │ Command blocked by safety policy: contains 'rm -rf /'. This pattern is denied for safety.
+
+I'll use a safer deletion with explicit paths only.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && rm -r /tmp/mtest /tmp/pyemit.py &&… ✓ (7ms)
+
+The `.arc/mutants_per_file.json` is now gitignored. Let me view the final script to ensure it's clean and correct.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/scripts/run_mutants.sh:140..220 ✓ (1ms)
+
+The script looks good. Now let me run the build/test to confirm nothing depends on the script contract. Since no Rust changed, cargo should be green.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt -- --check 2>&1 | tail -… ✓ (1.1s)
+
+

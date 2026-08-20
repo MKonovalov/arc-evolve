@@ -1,0 +1,312 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status ✓ (9ms)
+
+Let me look at the two files I need to work with.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs ✓ (6ms)
+
+Let me read the full file, particularly the middle section with `compute_accuracy_stats` and `format_accuracy_report`.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:99..519 ✓ (3ms)
+
+Let me read the format_accuracy_report function fully.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:196..376 ✓ (2ms)
+
+Now let me understand the `ValidationEvent` structure and the hit_signals data. Let me look at commands_risk_snapshots.rs.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|struct Valid… ✓ (5ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|struct Valid… ✓ (6ms)
+
+Let me look at the `ValidationEvent` struct and how `hit_signals` is defined.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|struct Valid… ✓ (3ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:376..466 ✓ (1ms)
+
+I see the `ValidationEvent` currently does NOT include hit_signals or per-file signal data. The task mentions "The hit_signals data is already parsed by the learning path in `commands_risk.rs`". Let me look at how `commands_risk.rs` handles hit signals and reuses the parsed-validation-event structure.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|signal_hit_c… ✓ (3ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:120..300 ✓ (2ms)
+
+Now I understand the structure. The `DetailedValidationEvent in commands_risk.rs` has `hit_signals: Vec<Vec<usize>> and surprise_count. But the ValidationEvent` used by `commands_risk_accuracy.rs (in commands_risk_snapshots.rs`) doesn't carry per-hit signal data.
+
+The task says: "The hit_signals data is already parsed by the learning path in `commands_risk.rs`; reuse the existing parsed-validation-event structure rather than re-parsing files."
+
+Let me look at how `learn_weights_from_history` is called and whether it has access to signals, and where the accuracy stats are computed. Let me look at `handle_risk` and the accuracy/validate flow.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_accuracy_stats\|f… ✓ (5ms)
+
+Let me look at line 1376-1410 where signal_hit_counts is computed in the risk report context, and around line 1530 for how accuracy stats are computed.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1360..1440 ✓ (2ms)
+
+Now I see there's already a `format_signal_breakdown` function that shows per-signal predictive power (how often each signal appeared in hits). But the task wants a per-signal accuracy breakdown in the accuracy report, threaded through `compute_accuracy_stats/format_accuracy_report`, showing "hits-with-signal/total-hits" per signal, gated behind pairs >= 5.
+
+Let me look at how the accuracy report is invoked and understand the context. Let me look at lines 1520-1560.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1500..1620 ✓ (2ms)
+
+Now I understand the full picture. The `handle_risk_accuracy` already calls `format_signal_breakdown` which computes per-signal hit counts from `parse_detailed_events`. 
+
+The task wants this per-signal breakdown integrated into `compute_accuracy_stats/format_accuracy_report` as a compact per-signal line, gated behind `pairs >= 5. But format_accuracy_report` only receives `&AccuracyStats`, which doesn't have signal data.
+
+The task says the hit_signals data is already parsed by the learning path in commands_risk.rs — reuse the existing parsed-validation-event structure rather than re-parsing files. Since `format_accuracy_report` only takes &AccuracyStats, I need to add per-signal data to `AccuracyStats`. The challenge is that `compute_accuracy_stats only receives &[ValidationEvent]` which has no signal data.
+
+Let me look at how the existing `format_signal_breakdown` is used and think about the cleanest approach. The `handle_risk_accuracy` function is the single place that calls `format_accuracy_report`. It already has access to `snapshot_content and validation_content`.
+
+Since `compute_accuracy_stats` receives only `&[ValidationEvent]` (which has no signal data), and the task wants to "thread that into `format_accuracy_report`", the cleanest approach is to:
+1. Add a `per_signal_hits: [usize; 7]` field to `AccuracyStats` 
+2. Add a way to pass per-signal data into `compute_accuracy_stats` or compute it separately
+
+Let me check what `handle_risk` and other callers of `format_accuracy_report` look like. Let me find all callers.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "format_accuracy_report\|… ✓ (8ms)
+
+Let me look at the callers of `format_accuracy_report` more carefully:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "format_accuracy_report" … ✓ (6ms)
+
+So `format_accuracy_report` is only called from one place (line 1533 in commands_risk.rs) and from tests. Also, `compute_accuracy_stats is called from commands_risk_report.rs:177 and commands_risk.rs:1633`.
+
+Let me look at `commands_risk_report.rs:177` to understand its context.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs:150..210 ✓ (1ms)
+
+Now I have a clear picture. Let me design the approach:
+
+The cleanest design that reuses the existing parsed structure (per the task's instruction) is:
+
+1. Add a `per_signal_hits: Option<[usize; 7]> field to AccuracyStats` (None when below pairs threshold, or when no signal data).
+2. Since `compute_accuracy_stats only gets &[ValidationEvent]` (no signal data), and the only real caller of `format_accuracy_report is handle_risk_accuracy` which has access to snapshot/validation content, I'll add a separate function that computes per-signal hits from the `DetailedValidationEvent` structure and can be set on the stats before formatting.
+
+Actually, the task says "In `compute_accuracy_stats` (or a small new helper)". And "reuse the existing parsed-validation-event structure rather than re-parsing files." The `DetailedValidationEvent` structure is private in `commands_risk.rs`. 
+
+Let me think about what's cleanest. The simplest approach: add a new field `per_signal_hits: [usize; 7] (or Option) to AccuracyStats`, and add a small helper in `commands_risk_accuracy.rs` that takes the per-signal hit counts and total hits, and formats.
+
+Actually, let me reconsider. The `handle_risk_accuracy already has a format_signal_breakdown` that shows per-signal predictive power. But the task wants it moved/gated into the accuracy report behind `pairs >= 5`.
+
+Wait — the task is more specific: "derive a per-signal hit-rate / signal-precision so high-dimensional weight learning has per-signal evidence." And "Thread that into format_accuracy_report as a compact per-signal line (one line per signal: name, hits-with-signal/total-hits)."
+
+So the per-signal block should go INTO `format_accuracy_report, showing name, hits-with-signal/total-hits`. And gated behind `pairs >= 5`.
+
+Since `format_accuracy_report takes &AccuracyStats`, I'll add the per-signal data to `AccuracyStats`. To compute it, I need the hit signals. The cleanest place to compute is from the `DetailedValidationEvent` data.
+
+Let me look at how SIGNAL_NAMES and `label_to_index` are defined and shared.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES\|label_to_in… ✓ (4ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:78..118 ✓ (1ms)
+
+Now I have a clear picture. Let me design the implementation.
+
+**Plan:**
+1. Add `per_signal_hits: Option<[usize; 7]> and per_signal_total_hits: usize to AccuracyStats`. Actually, I'll use a simpler approach where `per_signal is a Vec<(usize, usize)> representing (hits_with_signal, total_hits)` per signal, but 7 is fixed so `[usize; 7]` for hits plus a shared total_hits works.
+
+Actually, the task says one line per signal: "name, hits-with-signal/total-hits". The `total_hits` denominator is the same for all signals (total hits across events). So I'll store `[usize; 7]` for hits-with-signal and reuse the existing total_hits.
+
+Let me add a field `per_signal_hits: [usize; 7]` to `AccuracyStats`, computed by a new helper. Since `compute_accuracy_stats` doesn't have signal data, I'll:
+• Keep `compute_accuracy_stats` defaulting `per_signal_hits` to [0; 7] (or use a separate parameter).
+• Add a small new function `compute_per_signal_hits(events: &[DetailedValidationEvent]) -> [usize; 7]` — but that would require `DetailedValidationEvent` to be shared.
+
+Actually, re-reading the task: "reuse the existing parsed-validation-event structure rather than re-parsing files." The `DetailedValidationEvent` is already used by `format_signal_breakdown` and `learn_weights_from_history`. The `handle_risk_accuracy` already calls `parse_detailed_events`. 
+
+Rather than plumbing signal data through `compute_accuracy_stats`, I think the cleanest is to pass per-signal data into `handle_risk_accuracy`'s report. But the task explicitly says to thread it into `format_accuracy_report`. 
+
+Let me make `format_accuracy_report` accept the per-signal data as an additional argument, defaulting gracefully. Actually, since `compute_accuracy_stats` is the natural owner of the stats, I'll add a field to `AccuracyStats` and a way to populate it.
+
+Let me make `AccuracyStats` have a `per_signal_hits: Option<[usize; 7]>` field, and add a setter-style helper `with_per_signal_hits`. But cleaner: add a separate function `compute_per_signal_hits_from_detailed(&[DetailedValidationEvent]) -> [usize; 7]` in `commands_risk_accuracy.rs, but DetailedValidationEvent is private in commands_risk.rs`.
+
+The cleanest is to make `DetailedValidationEvent and parse_detailed_events` accessible (they're fn, currently private). I could make them pub(crate). But commands_risk_accuracy is imported INTO commands_risk (via use at top), so having commands_risk_accuracy depend on commands_risk would be a circular module issue — though in Rust, modules in the same crate can cross-reference.
+
+Let me check the module structure — does `commands_risk use commands_risk_accuracy::*` and does `commands_risk_accuracy` need to use from `commands_risk`?
+
+Line 40 of commands_risk.rs: `use crate::commands_risk_accuracy::{compute_accuracy_stats, format_accuracy_report, ...}`. And commands_risk_accuracy.rs uses `use crate::commands_risk_snapshots::ValidationEvent`. So they're sibling modules, can cross-reference via `crate::`.
+
+I'll make `DetailedValidationEvent and parse_detailed_events pub(crate) in commands_risk.rs and write a helper in commands_risk_accuracy.rs that takes Vec<Vec<usize>>` (the hit_signals) to avoid the dependency. Actually simpler: make a standalone helper `compute_per_signal_hits(hit_signals_per_hit: &[Vec<usize>])`.
+
+Let me reconsider to keep it minimal and surgical. The task says:
+
+"Thread that into format_accuracy_report as a compact per-signal line (one line per signal: name, hits-with-signal/total-hits). Keep it behind the same pairs >= 5 gating"
+
+Since `format_accuracy_report receives &AccuracyStats`, and per-signal data isn't in `AccuracyStats`'s inputs, I'll add a `per_signal_hits: Option<[usize; 7]>` field to AccuracyStats and populate it in the one place that calls `format_accuracy_report` with access to signal data.
+
+Let me write the implementation. I'll:
+1. Add `per_signal_hits: Option<[usize; 7]>` to `AccuracyStats (default None in compute_accuracy_stats`).
+2. Add a helper function `compute_per_signal_hits(hit_signals: &[Vec<usize>]) -> [usize; 7]` in commands_risk_accuracy.rs that's pure and testable.
+3. In `format_accuracy_report, if per_signal_hits is Some and pairs >= 5`, render a per-signal block.
+4. In `handle_risk_accuracy` (commands_risk.rs), parse detailed events and set per_signal_hits on the stats before formatting.
+
+For the tests, I'll add a test for `compute_per_signal_hits and for format_accuracy_report` rendering the block.
+
+Let me get the `SIGNAL_NAMES` — I'll need them in commands_risk_accuracy.rs. Since they're const (private) in commands_risk.rs, I'll define the names locally in the formatting function (they're fixed 7 names, matching the task).
+
+Let me check the pairs threshold. In `format_accuracy_report, pairs = stats.lift_events_used`. The gating is `pairs >= 5`.
+
+Let me look at the import section of commands_risk.rs to know what's already imported.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1..51 ✓ (1ms)
+
+Now let me implement. I'll start by editing `commands_risk_accuracy.rs`:
+
+1. Add `per_signal_hits: Option<[usize; 7]>` to `AccuracyStats`.
+2. Add a pure helper `compute_per_signal_hits`.
+3. Update `compute_accuracy_stats` to set the field to None by default.
+4. Add the per-signal block to `format_accuracy_report`.
+
+Let me make the edits.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (4 → 15 lines)
+    use crate::commands_risk_snapshots::ValidationEvent;
+    use crate::format::*;
+  + 
+  + /// The seven risk signal names, index-aligned with the 7-element weight arrays.
+  + pub(crate) const SIGNAL_NAMES: [&str; 7] = [
+  +     "churn",
+  +     "recency",
+  +     "size",
+  +     "complexity",
+  +     "test_density",
+  +     "coupling",
+  +     "revert_history",
+  + ];
+    
+    // ── Risk prediction accuracy tracking ──
+ ✓ (0ms)
+    use crate::commands_risk_snapshots::ValidationEvent;
+    use crate::format::*;
+  + 
+  + /// The seven risk signal names, index-aligned with the 7-element weight arrays.
+  + pub(crate) const SIGNAL_NAMES: [&str; 7] = [
+  +     "churn",
+  +     "recency",
+  +     "size",
+  ... (7 more lines)
+
+Now add the per_signal_hits field to AccuracyStats:
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (7 → 12 lines)
+        /// pair" count the dream tracks: the lift is only a confident measurement
+        /// once ≥5 such pairs accumulate (cold-start threshold).
+        pub(crate) lift_events_used: usize,
+  +     /// Per-signal hit counts: `per_signal_hits[i]` = how many hit files had
+  +     /// signal `i` elevated. `Some` when the caller supplied signal detail
+  +     /// (from the parsed snapshot/validation cross-reference); `None` when no
+  +     /// signal data is available. Render (and trust) only behind `pairs >= 5`.
+  +     pub(crate) per_signal_hits: Option<[usize; 7]>,
+    }
+ ✓ (0ms)
+        /// pair" count the dream tracks: the lift is only a confident measurement
+        /// once ≥5 such pairs accumulate (cold-start threshold).
+        pub(crate) lift_events_used: usize,
+  +     /// Per-signal hit counts: `per_signal_hits[i]` = how many hit files had
+  +     /// signal `i` elevated. `Some` when the caller supplied signal detail
+  +     /// (from the parsed snapshot/validation cross-reference); `None` when no
+  +     /// signal data is available. Render (and trust) only behind `pairs >= 5`.
+  +     pub(crate) per_signal_hits: Option<[usize; 7]>,
+    }
+
+Now update `compute_accuracy_stats to set per_signal_hits: None` in both the empty and normal returns:
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (3 → 4 lines)
+                overall_lift: None,
+                lift_events_used: 0,
+  +             per_signal_hits: None,
+            };
+ ✓ (0ms)
+                overall_lift: None,
+                lift_events_used: 0,
+  +             per_signal_hits: None,
+            };
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (4 → 24 lines)
+            overall_lift,
+            lift_events_used,
+  +         per_signal_hits: None,
+  +     }
+  + }
+  + 
+  + /// Compute per-signal hit counts from per-hit signal indices.
+  + ///
+  + /// `hit_signals` is one entry per hit file, each a list of signal indices that
+  + /// were elevated for that file (the same `DetailedValidationEvent.hit_signals`
+  + /// shape the weight-learning path already parses in `commands_risk.rs`).
+  + /// Returns a 7-element array where `[i]` = number of hit files that had signal
+  + /// `i` elevated.
+  + pub(crate) fn compute_per_signal_hits(hit_signals: &[Vec<usize>]) -> [usize; 7] {
+  +     let mut counts = [0usize; 7];
+  +     for signals in hit_signals {
+  +         for &idx in signals {
+  +             if idx < 7 {
+  +                 counts[idx] += 1;
+  +             }
+  ... (4 more lines)
+ ✓ (0ms)
+            overall_lift,
+            lift_events_used,
+  +         per_signal_hits: None,
+  +     }
+  + }
+  + 
+  + /// Compute per-signal hit counts from per-hit signal indices.
+  + ///
+  ... (13 more lines)
+
+Now I need to check that the `compute_accuracy_stats` normal return already has the correct field list. Let me verify the struct initializer order matches. The struct field per_signal_hits was added after `lift_events_used`, and I added `per_signal_hits: None` after `lift_events_used` in both. Good.
+
+Now add the per-signal block to `format_accuracy_report`. Let me view the current formatting function's end to add the block.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:248..318 ✓ (1ms)
+
+

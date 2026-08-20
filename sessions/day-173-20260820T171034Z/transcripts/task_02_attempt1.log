@@ -1,0 +1,411 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && echo "---"… ✓ (8ms)
+
+Let me read the relevant sections of repl.rs.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '270,490p' src/repl.rs ✓ (5ms)
+
+Now I understand the structure. I need to:
+1. Add a cwd field to BangResult (working directory where the command ran)
+2. Capture the cwd when the command runs (detect cd at start, or record the actual dir)
+3. Include it in `build_bang_followup_prompt` as "ran in: <dir>"
+
+Let me look at how the bang command actually changes directory. The command runs via sh -c cmd. If a user does `!cd src, the sh -c "cd src"` runs in a subshell, so the parent cwd doesn't actually change. So I need to detect explicit cd verbs and apply them to the recorded dir.
+
+Let me check the existing tests more thoroughly.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1890,2050p' src/repl.rs | … ✓ (4ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "test_build_bang_followup_… ✓ (3ms)
+
+Adding a cwd: Option<String> field. Let me design the approach.
+
+The `!` command runs via `sh -c cmd`, which runs in a subshell — persistent cwd across invocations isn't trivially observable. So per the task, I'll detect explicit cd at the start of the bang command and apply it to the recorded dir. If no cd, record the current dir at capture time.
+
+Let me implement:
+
+1. Add cwd: Option<String> to BangResult.
+2. In `run_bang_command`, compute the effective cwd: start with `std::env::current_dir()`, then if the command begins with `cd <path>` (possibly chained with &&), apply it. Store in `BangResult`.
+3. In `build_bang_followup_prompt`, include a "ran in: <dir>" line when present.
+
+Let me write a helper to compute the effective cwd safely.
+
+Let me look at the full tests block to modify them.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1930,1990p' src/repl.rs ✓ (4ms)
+
+Now let me implement the changes. First, add the `cwd` field and the effective-cwd computation helper.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (9 → 46 lines)
+        pub exit_code: Option<i32>,
+        /// Combined stdout+stderr tail, capped by [`tail_for_capture`].
+        pub output_tail: String,
+  +     /// The working directory the command ran in (char-boundary safe, so `!?`
+  +     /// can reference where output was produced). `None` when it couldn't be
+  +     /// resolved — the follow-up prompt then simply omits the line.
+  +     pub cwd: Option<String>,
+  + }
+  + 
+  + /// Best-effort effective working directory for a bang command.
+  + ///
+  + /// `!` passthrough runs via the REPL's shell (`sh -c`), which executes in a
+  + /// subshell, so a persistent cwd isn't trivially observable across
+  + /// invocations. We record the process's current directory, and if the command
+  + /// *starts* with an explicit `cd <path>` (optionally chained with `&&`), we
+  + /// apply that to the recorded dir so `!cd src` then `!?` is cwd-accurate.
+  + /// Uses only char-safe operations and never panics.
+  + fn bang_effective_cwd(cmd: &str) -> Option<String> {
+  +     let base = std::env::current_dir().ok()?;
+  +     let path = cmd.trim().strip_prefix("cd")?.trim_start();
+  ... (21 more lines)
+ ✓ (1ms)
+        pub exit_code: Option<i32>,
+        /// Combined stdout+stderr tail, capped by [`tail_for_capture`].
+        pub output_tail: String,
+  +     /// The working directory the command ran in (char-boundary safe, so `!?`
+  +     /// can reference where output was produced). `None` when it couldn't be
+  +     /// resolved — the follow-up prompt then simply omits the line.
+  +     pub cwd: Option<String>,
+  + }
+  ... (13 more lines)
+
+Now update `build_bang_followup_prompt` to include the "ran in" line:
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (9 → 15 lines)
+        } else {
+            format!("```\n{}\n```", res.output_tail.trim_end())
+        };
+  +     // cwd line is additive: present when a dir is set, omitted otherwise.
+  +     let cwd_line = res
+  +         .cwd
+  +         .as_ref()
+  +         .map(|d| format!("\n    (ran in: {})", d))
+  +         .unwrap_or_default();
+        format!(
+  -         "I ran this shell command in my terminal (via `!` passthrough):\n\n    $ {}\n\nIt {}. Output (tail):\n\n{}\n\n{}",
+  -         res.command, exit_desc, output, question
+  +         "I ran this shell command in my terminal (via `!` passthrough):\n\n    $ {}{}\n\nIt {}. Output (tail):\n\n{}\n\n{}",
+  +         res.command, cwd_line, exit_desc, output, question
+        )
+ ✓ (1ms)
+        } else {
+            format!("```\n{}\n```", res.output_tail.trim_end())
+        };
+  +     // cwd line is additive: present when a dir is set, omitted otherwise.
+  +     let cwd_line = res
+  +         .cwd
+  +         .as_ref()
+  +         .map(|d| format!("\n    (ran in: {})", d))
+  ... (7 more lines)
+
+Now update the BangResult construction in run_bang_command:
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (5 → 6 lines)
+            command: cmd.to_string(),
+            exit_code,
+            output_tail: tail_for_capture(&captured, BANG_CAPTURE_MAX_BYTES, BANG_CAPTURE_MAX_LINES),
+  +         cwd: bang_effective_cwd(cmd),
+        });
+ ✓ (1ms)
+            command: cmd.to_string(),
+            exit_code,
+            output_tail: tail_for_capture(&captured, BANG_CAPTURE_MAX_BYTES, BANG_CAPTURE_MAX_LINES),
+  +         cwd: bang_effective_cwd(cmd),
+        });
+
+Now update the existing tests (they construct BangResult literals) and add new coverage. Let me update the three tests to add the cwd field, then add a test for cwd line presence/absence.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (8 → 9 lines)
+                command: "cargo test".to_string(),
+                exit_code: Some(101),
+                output_tail: "test foo ... FAILED".to_string(),
+  +             cwd: Some("/tmp/proj".to_string()),
+            };
+            let prompt = build_bang_followup_prompt(&res, "why did foo fail");
+            assert!(prompt.contains("$ cargo test"));
+ ✓ (1ms)
+                command: "cargo test".to_string(),
+                exit_code: Some(101),
+                output_tail: "test foo ... FAILED".to_string(),
+  +             cwd: Some("/tmp/proj".to_string()),
+            };
+            let prompt = build_bang_followup_prompt(&res, "why did foo fail");
+            assert!(prompt.contains("$ cargo test"));
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (14 → 16 lines)
+                command: "npm test".to_string(),
+                exit_code: Some(2),
+                output_tail: "boom".to_string(),
+  +             cwd: None,
+            };
+            let prompt = build_bang_followup_prompt(&failed, "");
+            assert!(prompt.contains("This command failed. Explain what went wrong and how to fix it."));
+  ···
+                command: "ls".to_string(),
+                exit_code: Some(0),
+                output_tail: "src\ndocs".to_string(),
+  +             cwd: None,
+            };
+ ✓ (1ms)
+                command: "npm test".to_string(),
+                exit_code: Some(2),
+                output_tail: "boom".to_string(),
+  +             cwd: None,
+            };
+            let prompt = build_bang_followup_prompt(&failed, "");
+            assert!(prompt.contains("This command failed. Explain what went wrong and how to fix it."));
+  ···
+  ... (5 more lines)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (10 → 55 lines)
+                command: "sleep 100".to_string(),
+                exit_code: None,
+                output_tail: "   ".to_string(),
+  +             cwd: None,
+            };
+            let prompt = build_bang_followup_prompt(&res, "what happened");
+            assert!(prompt.contains("was terminated by a signal"));
+            assert!(prompt.contains("(no output)"));
+            assert!(!prompt.contains("```"));
+  +         // No resolvable dir → the "ran in" line is omitted.
+  +         assert!(!prompt.contains("ran in:"));
+  +     }
+  + 
+  +     #[test]
+  +     fn test_build_bang_followup_prompt_includes_cwd_when_set() {
+  +         let res = BangResult {
+  +             command: "cd src && cargo build".to_string(),
+  +             exit_code: Some(0),
+  +             output_tail: "compiling".to_string(),
+  +             cwd: Some("/home/dev/proj/src".to_string()),
+  ... (34 more lines)
+ ✓ (1ms)
+                command: "sleep 100".to_string(),
+                exit_code: None,
+                output_tail: "   ".to_string(),
+  +             cwd: None,
+            };
+            let prompt = build_bang_followup_prompt(&res, "what happened");
+            assert!(prompt.contains("was terminated by a signal"));
+            assert!(prompt.contains("(no output)"));
+  ... (13 more lines)
+
+Let me review my `bang_effective_cwd` logic. There's a subtle bug: after `path.trim_start()`, I check `path.starts_with(' ')`. But I already trimmed start. Let me re-read my implementation carefully.
+
+```rust
+fn bang_effective_cwd(cmd: &str) -> Option<String> {
+    let base = std::env::current_dir().ok()?;
+    let path = cmd.trim().strip_prefix("cd")?.trim_start();
+    let target = if path.is_empty() {
+        return Some(base.display().to_string());
+    } else if path.starts_with(' ') || path.starts_with('\t') || path.starts_with('\n') {
+        path.trim()
+    } else {
+        return Some(base.display().to_string());
+    };
+    ...
+}
+```
+
+Wait — I did .trim_start() on path, so after that the `path.starts_with(' ')` check will never be true (no whitespace left). This is buggy. `cdrom/eject` would strip "cd" then trim → "rom/eject", which doesn't start with space, so it returns base — good (not treated as cd). But for cd src, after `.strip_prefix("cd")` we get " src" (with leading space), then `.trim_start()` removes it → "src". Now `path.starts_with(' ')` is false → returns base! That's wrong — `cd src` should apply src.
+
+Let me fix the logic. I should check for a space before trimming. Let me rewrite:
+
+```rust
+fn bang_effective_cwd(cmd: &str) -> Option<String> {
+    let base = std::env::current_dir().ok()?;
+    let rest = cmd.trim().strip_prefix("cd")?;
+    // "cd <path>" → apply path (only when a whitespace char follows "cd").
+    if !(rest.starts_with(' ') || rest.starts_with('\t') || rest.starts_with('\n')) {
+        // Not an actual cd (e.g. "cdrom/eject" or bare "cd"); keep current dir
+        // (bare "cd" would go to $HOME which we can't observe portably).
+        return Some(base.display().to_string());
+    }
+    let target = rest.trim().split("&&").next().map(str::trim).unwrap_or("");
+    if target.is_empty() {
+        return Some(base.display().to_string());
+    }
+    // Reject cd into something clearly not a path (e.g. comment) — resolve.
+    Some(base.join(target).display().to_string())
+}
+```
+
+Wait — but `cd src && ls: rest` = " src && ls", starts with space → good. target = trim → "src && ls", split on "&&" → "src " trimmed → "src". Good.
+
+This is cleaner. Let me rewrite.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (24 → 17 lines)
+    fn bang_effective_cwd(cmd: &str) -> Option<String> {
+        let base = std::env::current_dir().ok()?;
+  -     let path = cmd.trim().strip_prefix("cd")?.trim_start();
+  -     // Only treat it as `cd` if it's actually "cd <path>" at the start (i.e. a
+  -     // space or newline follows, or it's a bare "cd"). "cd" alone also changes
+  -     // dir (to $HOME via shell), but we can't observe $HOME portably here, so
+  -     // we only resolve an explicit relative/absolute path.
+  -     let target = if path.is_empty() {
+  -         return Some(base.display().to_string());
+  -     } else if path.starts_with(' ') || path.starts_with('\t') || path.starts_with('\n') {
+  -         path.trim()
+  -     } else {
+  -         return Some(base.display().to_string());
+  -     };
+  -     if target.starts_with("&&") {
+  +     let rest = cmd.trim().strip_prefix("cd")?;
+  +     // Only treat it as an actual `cd` when a whitespace char follows "cd"
+  +     // (i.e. `cd <path>`). Anything else ("cdrom/eject", bare "cd" — which the
+  +     // shell resolves to $HOME but we can't observe portably) keeps the
+  +     // recorded current dir.
+  ... (13 more lines)
+ ✓ (1ms)
+    fn bang_effective_cwd(cmd: &str) -> Option<String> {
+        let base = std::env::current_dir().ok()?;
+  -     let path = cmd.trim().strip_prefix("cd")?.trim_start();
+  -     // Only treat it as `cd` if it's actually "cd <path>" at the start (i.e. a
+  -     // space or newline follows, or it's a bare "cd"). "cd" alone also changes
+  -     // dir (to $HOME via shell), but we can't observe $HOME portably here, so
+  -     // we only resolve an explicit relative/absolute path.
+  -     let target = if path.is_empty() {
+  ... (13 more lines)
+
+Now let me build and test.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -20 ✓ (8.6s)
+
+Build passes. Now run the relevant tests.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test bang 2>&1 | tail -30 ✓ (18.6s)
+
+Line 2057 is the cdrom/eject assertion: bang_effective_cwd("cdrom/eject") returned None. My function uses `strip_prefix("cd")?` which succeeds for "cdrom/eject" (strips "cd" → "rom/eject"), but then `!starts_with whitespace` → returns base... wait that should return Some(base). But it returned None.
+
+Wait, let me check which assert is at 2057. Let me look.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2040,2060p' src/repl.rs ✓ (3ms)
+
+Line 2057 is the cdrom/eject assert. `bang_effective_cwd("cdrom/eject"): cmd.trim()` = "cdrom/eject", .strip_prefix("cd") → "rom/eject". My `?` operator returns None only if strip_prefix fails. It succeeds → "rom/eject". Then `rest.starts_with(' ')` false → return Some(base). So it should return Some(base), not None!
+
+Wait, but the base computed is `std::env::current_dir().ok()?` — that succeeded. Hmm. Let me check: maybe `Some(base)` where the assert is at 2057. Actually the failing assert says left: None. Let me check line 2057 exactly.
+
+Line 2057 is `assert_eq!(cwd.as_deref(), Some(base.as_str()));` — wait that's the `ls -la` line at 2052. Let me recount. The assertion at 2057: looking at the output `left: None, right: Some(...)`. 
+
+Actually wait — for ls -la, `strip_prefix("cd")` fails → returns None! Because ls -la doesn't start with "cd". My function's `strip_prefix("cd")?` operation means non-cd commands return None, not the base dir!
+
+That's the bug. Non-cd commands should return the base dir (Some(base)), not None. Let me reconsider the whole function semantics. The function should:
+• Always return Some(base) for the current dir when no explicit cd.
+• Return None only when `current_dir()` fails.
+
+So `strip_prefix` returning None should fall through to base, not early-return None. Let me fix.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/repl.rs (17 → 20 lines)
+    fn bang_effective_cwd(cmd: &str) -> Option<String> {
+        let base = std::env::current_dir().ok()?;
+  -     let rest = cmd.trim().strip_prefix("cd")?;
+  +     // If the command doesn't start with "cd", it runs in the current dir.
+  +     let Some(rest) = cmd.trim().strip_prefix("cd") else {
+  +         return Some(base.display().to_string());
+  +     };
+        // Only treat it as an actual `cd` when a whitespace char follows "cd"
+        // (i.e. `cd <path>`). Anything else ("cdrom/eject", bare "cd" — which the
+        // shell resolves to $HOME but we can't observe portably) keeps the
+ ✓ (1ms)
+    fn bang_effective_cwd(cmd: &str) -> Option<String> {
+        let base = std::env::current_dir().ok()?;
+  -     let rest = cmd.trim().strip_prefix("cd")?;
+  +     // If the command doesn't start with "cd", it runs in the current dir.
+  +     let Some(rest) = cmd.trim().strip_prefix("cd") else {
+  +         return Some(base.display().to_string());
+  +     };
+        // Only treat it as an actual `cd` when a whitespace char follows "cd"
+        // (i.e. `cd <path>`). Anything else ("cdrom/eject", bare "cd" — which the
+        // shell resolves to $HOME but we can't observe portably) keeps the
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test bang 2>&1 | tail -15 ✓ (20.1s)
+
+Bang tests pass. Now run full fmt, clippy, build, test.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (18.2s)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -25 ✓ (1m 0s)
+
+All tests pass. Now check docs — does `docs/src/usage/repl.md` document !/!?? The task says add a one-line note if so.
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "!?\|bang\|passthrough\|!`… ✓ (2ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "bang\|passthrough" docs/s… ✓ (5ms)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '67,100p' docs/src/usage/re… ✓ (3ms)
+
+The docs already document !? and describe what's captured. Let me add a one-line mention of the cwd context. Let me look at the section text and add a note where it describes what's captured.
+
+The line "its command line, exit code, and output tail" is the natural spot. I'll mention the "ran in" context.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/usage/repl.md (1 → 1 lines) ✓ (0ms)
+
+Let me add a note after the bullet list about the cwd context.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/usage/repl.md (1 → 2 lines)
+    - Bare `!?` uses a default question: after a failure, "explain what went wrong and how to fix it"; after a success, "summarize this output".
+  + - When the command ran somewhere other than the obvious place, `!?` also notes the working directory (a `(ran in: <dir>)` line) — for example after `!cd src && make`, so arc doesn't misframe relative paths. The line is omitted when no directory can be resolved.
+ ✓ (0ms)
+    - Bare `!?` uses a default question: after a failure, "explain what went wrong and how to fix it"; after a success, "summarize this output".
+  + - When the command ran somewhere other than the obvious place, `!?` also notes the working directory (a `(ran in: <dir>)` line) — for example after `!cd src && make`, so arc doesn't misframe relative paths. The line is omitted when no directory can be resolved.
+
+Now let me verify fmt check and full build once more (already did), then commit.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt -- --check && cargo buil… ✓ (1.1s)
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add -A && git commit -m "Day 1… ✓ (14ms)
+
+

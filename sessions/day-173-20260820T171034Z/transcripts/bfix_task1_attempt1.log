@@ -1,0 +1,345 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll investigate the current state of the code to fix the errors.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git diff --stat ✓ (10ms)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk_accurac… ✓ (4ms)
+
+Now I understand the state. The implementation added SIGNAL_NAMES, per_signal_hits field, and `compute_per_signal_hits` but never wired them into `format_accuracy_report`. Let me look at the current file.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:1..41 ✓ (1ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:40..120 ✓ (1ms)
+
+Let me see the rest of compute_accuracy_stats and the whole `format_accuracy_report` function, plus what data structures are available (ValidationEvent fields).
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:119..279 ✓ (1ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:278..458 ✓ (1ms)
+
+Now let me look at the test at line 678 (the one failing with the missing field) and the ValidationEvent struct.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:457..617 ✓ (1ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:616..736 ✓ (1ms)
+
+I see the failing test at line 678 uses a manual `AccuracyStats { ... }` initializer without `per_signal_hits`. The core issue: the implementation added the field/function but never wired them into `format_accuracy_report`, so:
+1. `SIGNAL_NAMES` unused
+2. `per_signal_hits` field never read
+3. `compute_per_signal_hits` never used
+4. The manual struct in the test at line 678 is missing the field
+
+Let me check the `ValidationEvent` struct to understand what data I have available for signal hits.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pub struct ValidationEven… ✓ (3ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "ValidationEvent" src/comm… ✓ (3ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:376..426 ✓ (1ms)
+
+Now I understand the data model. `ValidationEvent` has no per-signal field yet. The task says to reuse the existing parsed-validation-event structure. Let me look at how `commands_risk.rs` parses hit_signals from the validation events.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|DetailedVali… ✓ (4ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:145..260 ✓ (2ms)
+
+Now I understand the architecture. `rosity's DetailedValidationEvent in commands_risk.rs` parses hit_signals by cross-referencing validations against snapshots. This is the "existing parsed-validation-event structure" the task mentions.
+
+Now I need to figure out the cleanest fix. The implementation that was written is incomplete:
+• Added `SIGNAL_NAMES, per_signal_hits field, compute_per_signal_hits` helper
+• But never wired them into `format_accuracy_report`, and never thread the actual signal data in.
+
+The task wants per-signal breakdown in `format_accuracy_report` behind `pairs >= 5` gating. Let me look at how `compute_accuracy_stats` is called and where the report is rendered, to understand how to thread signal data through.
+
+Let me look at the `handle_risk` validation path and where the accuracy report is invoked with validation events.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_accuracy_stats\|f… ✓ (4ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1360..1480 ✓ (2ms)
+
+Now let me look at the `handle_risk` validation branch (line 1530) to see how the accuracy report is generated:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1500..1590 ✓ (1ms)
+
+Now I fully understand the architecture. The `handle_risk_accuracy` at line 1528 already has a Section 2 "Per-Signal Breakdown" via `format_signal_breakdown` in `commands_risk.rs` — but that's a *predictive-power* breakdown (how often each signal appears in hits vs total hits), not the specific per-signal breakdown behind `pairs >= 5` gating with signal-precision per-hit.
+
+The task specifically wants the per-signal breakdown in **`format_accuracy_report** in commands_risk_accuracy.rs`, behind `pairs >= 5` gating. The issue is that the field `per_signal_hits` was never populated and the report never renders it.
+
+Let me now decide the simplest, correct fix that satisfies the task and the tests:
+
+1. **Fix the failing test** at line 678: add `per_signal_hits: None (or Some(...)`) to the manual struct initializer.
+2. **Wire per_signal_hits into `format_accuracy_report`**: render a compact per-signal line behind `pairs >= 5`.
+3. **Use SIGNAL_NAMES** in the rendering so it's no longer dead code.
+4. **Use `compute_per_signal_hits`** somewhere so it's not dead code.
+5. **Populate `per_signal_hits`** in `handle_risk_accuracy` by threading the signal data.
+
+Let me look at the `import of handle_risk_accuracy` in commands_risk.rs — actually, `handle_risk_accuracy` is a local function in `commands_risk.rs`. The accuracy module only exports `compute_accuracy_stats, format_accuracy_report`, `AccuracyTrend`.
+
+Let me think about the cleanest design. The `commands_risk_accuracy module's compute_accuracy_stats takes only &[ValidationEvent]` which has no signal data. The signal data lives in `commands_risk.rs's parse_detailed_events` which cross-references snapshots.
+
+The task says: "The hit_signals data is already parsed by the learning path in commands_risk.rs; reuse the existing parsed-validation-event structure rather than re-parsing files."
+
+So the approach: `handle_risk_accuracy` in `commands_risk.rs will compute per_signal_hits from parse_detailed_events(...)` (already available there) and pass it into a helper that produces the per-signal line, gated by `pairs >= 5`.
+
+But `compute_accuracy_stats` sets `per_signal_hits: None`. So the report would never show it unless we populate it.
+
+Let me design:
+• Add a public helper in `commands_risk_accuracy.rs: fmt_per_signal_block(per_signal_hits: &[usize; 7], total_hits: usize, pairs: usize) -> String` that renders the per-signal lines but only when `pairs >= 5`. This uses SIGNAL_NAMES (fixing dead code) and `compute_per_signal_hits` could be used.
+
+Actually, let me reconsider. The cleanest and most testable approach that also fixes the dead-code warnings:
+
+The field `per_signal_hits: Option<[usize; 7]>` in `AccuracyStats` — we should populate it via the caller and read it in `format_accuracy_report. But compute_accuracy_stats` always sets it to `None`.
+
+Option: Add a setter/modifier or make `handle_risk_accuracy` build stats and then set the field. But `AccuracyStats` fields are pub(crate), so `handle_risk_accuracy in commands_risk.rs can mutate stats.per_signal_hits = Some(...)`.
+
+Wait — `handle_risk_accuracy` is in `commands_risk.rs, and it calls compute_accuracy_stats(&events)`. But `parse_detailed_events` needs snapshot+validation content. Let me restructure:
+
+In `handle_risk_accuracy`, after building stats:
+```rust
+let per_signal = {
+    let detailed = parse_detailed_events(&validation_content, &snapshot_content);
+    let hit_signals: Vec<Vec<usize>> = detailed.iter().flat_map(|e| e.hit_signals.clone()).collect();
+    Some(compute_per_signal_hits(&hit_signals))
+};
+let mut stats = compute_accuracy_stats(&events);
+stats.per_signal_hits = per_signal;
+let report = format_accuracy_report(&stats);
+```
+
+Then in `format_accuracy_report`, render the per-signal block when `stats.per_signal_hits is Some` AND `pairs >= 5`.
+
+And add a unit test using `format_accuracy_report` with a `per_signal_hits: Some(...) and lift_events_used >= 5` to assert the breakdown counts.
+
+Let me first check the total number of hits available — I need to render "hits-with-signal/total-hits". Total hits = `stats.total_hits`. Per signal: `per_signal_hits[i]` / total hits? But a single hit file may have multiple signals elevated, so `sum(per_signal_hits)` can exceed total hits. That's fine — task says "name, hits-with-signal/total-hits".
+
+Let me look at what SIGNAL_NAMES is in commands_risk.rs (there's already one there presumably).
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES\|label_to_in… ✓ (4ms)
+
+There's a `SIGNAL_NAMES in commands_risk.rs` too. The new one in `commands_risk_accuracy.rs` duplicates it. Let me check the existing one in commands_risk.rs:
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:78..96 ✓ (1ms)
+
+The two `SIGNAL_NAMES` match exactly. Now let me decide the cleanest fix. I'll keep `command_risk_accuracy.rs`'s `SIGNAL_NAMES` (needed there for rendering) and wire everything together.
+
+Let me now write the fix. Here's my plan:
+
+1. **`format_accuracy_report`**: render the per-signal block when `per_signal_hits is Some` and pairs >= 5. This uses `SIGNAL_NAMES`.
+2. **`handle_risk_accuracy** in commands_risk.rs`: compute per_signal_hits from `parse_detailed_events and set stats.per_signal_hits`.
+3. **Fix the test** at line 678 to include the missing field.
+4. Add a unit test for the per-signal breakdown.
+5. **Use `compute_per_signal_hits** in handle_risk_accuracy` (or in the accuracy module).
+
+Let me look at the exact format of the report box to add a per-signal line row. The current box is built with a format! that has fixed rows. I'll add the per-signal block after the main box.
+
+Let me look at the full `format_accuracy_report` once more (lines 214-288) and refactor it to build the box then append the per-signal section.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:214..289 ✓ (1ms)
+
+Now I have a complete picture. Let me implement the fix.
+
+I'll modify format_accuracy_report to build the box into a string, then append a per-signal block when `per_signal_hits is Some` and pairs >= 5. I'll add a small helper `fmt_per_signal_block` that renders the per-signal lines using `SIGNAL_NAMES`.
+
+Let me edit `format_accuracy_report`:
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (2 → 3 lines)
+  - /// Format the accuracy report as a compact box display.
+  + /// Format the accuracy report as a compact box display, followed by a
+  + /// per-signal breakdown once enough matched pairs have accumulated (≥5).
+    pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
+ ✓ (1ms)
+  - /// Format the accuracy report as a compact box display.
+  + /// Format the accuracy report as a compact box display, followed by a
+  + /// per-signal breakdown once enough matched pairs have accumulated (≥5).
+    pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (22 → 64 lines)
+  -     format!(
+  +     let box_str = format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
+  ···
+             {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+  -          {BOLD}  │{RESET} {:<13}{BOLD}│{RESET}\n\
+  -          stats.total_validations,
+  +          {BOLD}  ╰───────────────────────────╯{RESET}\n",
+  +         stats.total_validations,
+            format!(
+                "{hit_rate_rounded:.0}% ({}/{})",
+                stats.total_hits, stats.total_changed
+  ···
+            worst_str,
+            pairs_str,
+            lift_str,
+  ... (45 more lines)
+ ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+I mis-copied the trailing lines. Let me read the exact lines 267-288.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:267..292 ✓ (0ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (21 → 64 lines)
+  -     format!(
+  +     let box_str = format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
+  ···
+             {BOLD}  │{RESET} Worst day:    {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+  -          stats.total_validations,
+  +          {BOLD}  ╰───────────────────────────╯{RESET}\n",
+  +         stats.total_validations,
+            format!(
+                "{hit_rate_rounded:.0}% ({}/{})",
+                stats.total_hits, stats.total_changed
+  ···
+            worst_str,
+            pairs_str,
+            lift_str,
+  -     )
+  ... (44 more lines)
+ ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+My old_text omitted line 277 (the `         {BOLD}  │{RESET} {:<13}{BOLD}│{RESET}\n\` line). Let me get the exact text again — line 276 ends with \n\ and there's a continuation on line 277. Let me look more carefully:
+
+Lines 275-277:
+```
+          {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+          {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+          {BOLD}  │{RESET} {:<13}{BOLD}│{RESET}\n\
+```
+
+My first attempt included that {:<13} row and the second didn't. Let me use the exact text with all lines 268-289.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (22 → 65 lines)
+  -     format!(
+  +     let box_str = format!(
+            "\n{BOLD}  ╭─ Risk Prediction Accuracy ─╮{RESET}\n\
+             {BOLD}  │{RESET} Validations:  {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Hit rate:     {:<13}{BOLD}│{RESET}\n\
+  ···
+             {BOLD}  │{RESET} {:<27}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} Lift:         {:<13}{BOLD}│{RESET}\n\
+             {BOLD}  │{RESET} {:<13}{BOLD}│{RESET}\n\
+  -          stats.total_validations,
+  +          {BOLD}  ╰───────────────────────────╯{RESET}\n",
+  +         stats.total_validations,
+            format!(
+                "{hit_rate_rounded:.0}% ({}/{})",
+                stats.total_hits, stats.total_changed
+  ···
+            worst_str,
+            pairs_str,
+            lift_str,
+  -     )
+  ... (44 more lines)
+ ✗ (2ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs.
+
+The format! block has a complex multi-line string with \n\ continuations. The issue is likely the exact spacing. Let me use a more targeted approach — I'll replace just the specific unique lines rather than the whole block. Let me replace from `    format!(` through the end of function using a smaller unique anchor.
+
+Actually, the simplest approach: I'll replace line 268-289 by targeting the `pairs_str,\n        lift_str,\n    )\n}` tail which is more unique. Let me edit just the closing portion.
+
+Actually, let me reconstruct the edit differently. The whole `format!(...)` call with all its args is what I'm replacing with `let box_str = format!(...)` plus the per-signal append. Let me do it in two smaller edits.
+
+First, replace the opening `format!(` line and the args list with `let box_str = format!(` — but the args are part of the block.
+
+Let me instead rewrite the whole function cleanly using a distinctive anchor. I'll target the block starting at `    format!(` and ending at `    )\n}`. Since my old_text isn't matching due to whitespace, let me re-read the raw bytes precisely.
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '267,290p' src/commands_ris… ✓ (4ms)
+
+The exact block lines 268-289 are visible. The problem may be that my old_text's final `    )\n}` combined with the arrow chars. Let me try a smaller, precise replacement targeting the whole function from `format!( to the final }`. I'll do it via a Python script to avoid whitespace mismatch issues.
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 << 'EO… (17 lines) ✓ (20ms)
+
+The `... (5 more similar lines)` implies the file-read tool is collapsing; but actually that's from the python heredoc printing — no, wait, that "5 more similar lines" appeared in the output. That's odd. Actually that's just the display. Let me do the replacement entirely in python to be safe.
+
+The block spanning index 267 through the closing } (which is at index 288, since line 289 is }). Let me verify by printing with line numbers in python:
+
+
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 << 'EO… (8 lines) ✓ (20ms)
+
+I see now — there's no line 277! The file jumps from 276 directly to 278. Wait, that's because line 277 is empty? Let me check. Line indices: 276 is index 275, then index 276 (line 277) is missing from output — that means line 277 exists but wasn't printed? Actually I printed all of 266-289. I see 277 is absent from the output even though I requested range(266,290) which includes index 276 = line 277.
+
+Wait, the output shows index positions 275 (line 276) then jumps to 278. So line 277 (index 276) is missing! That's suspicious. Let me recheck — the loop prints i+1 which is the line number, and I see 276 then 278. So line 277 is being skipped. That's impossible in a normal file.
+
+Oh wait — I misread. The loop prints index 266→289. Let me list: 267,268,269,270,271,272,273,274,275,276,278,279... So line 277 (index 276) is NOT printed. That suggests raw line at index 276 might have special content. Let me check more carefully — actually repr would show it. Let me look at the raw bytes around there.
+
+Actually this might be that the earlier read_file output at line 277 showed `         {BOLD}  │{RESET} {:<13}{BOLD}│{RESET}\n\` and I assumed there's a row. But the actual file apparently doesn't have it. Let me just re-print to be sure.
+
+
+  ╭─ Turn 28 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l src/commands_risk_accuracy.r… ✓ (5ms)
+
+The awk output doesn't clearly show line numbers due to the echo. Let me just do the python replacement directly — I'll replace the exact block from index 267 (`    format!(`) to index 288 (the } closing the function, which is line 289).
+
+Let me verify line 289 is } (it is, from output: `289 '}\n'`). So block is lines[267:289] (indices 267..288). I'll replace lines[267:289] with new content, keeping index 289 (`}`) intact. Wait — line 289 } is the function's closing brace. My new block should produce the function including its own closing brace. Let me build the new block to replace lines[267:289], where the new block ends with the function's }.
+
+Let me write the replacement via python.
+
+
+  ╭─ Turn 29 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 << 'PY… (85 lines) ✓ (22ms)
+
+

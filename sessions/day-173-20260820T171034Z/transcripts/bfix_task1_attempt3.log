@@ -1,0 +1,84 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+Let me look at the relevant file to understand the `AccuracyStats` struct and the failing test.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '680,820p' src/commands_ris… ✓ (6ms)
+
+Now let me look at the `AccuracyStats` struct and the `compute_accuracy_stats` function, plus the per_signal_hits field.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "per_signal_hits\|struct A… ✓ (4ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '30,220p' src/commands_risk… ✓ (5ms)
+
+Now I understand. The `per_signal_hits` field was added to the struct but the test at line 721 still initializes AccuracyStats without it (using struct literal). Let me look at the failing test — `test_format_accuracy_report_with_data` at line ~718.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '716,760p' src/commands_ris… ✓ (3ms)
+
+The failing test is `test_format_accuracy_report_with_data` at line 721, which uses a struct literal without `per_signal_hits`. I need to add per_signal_hits: None to this literal.
+
+Let me check what the test asserts to make sure adding None doesn't break the assertions (e.g. it checks the report "provisional"). Since `per_signal_hits: None` means the per-signal block won't render, and the test uses `total_hits: 7 / lift_events_used: 7` (≥5 pairs via lift), let me check the assertions. Let me look at the full test body.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '760,810p' src/commands_ris… ✓ (4ms)
+
+The simplest fix for the compile error is to add `per_signal_hits: None` to the struct literal in `test_format_accuracy_report_with_data`. Let me apply that fix.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs (6 → 7 lines)
+                trend: AccuracyTrend::Improving,
+                best_day: Some((115, 80.0)),
+                worst_day: Some((108, 20.0)),
+  +             per_signal_hits: None,
+            };
+            let report = format_accuracy_report(&stats);
+            assert!(report.contains("Risk Prediction Accuracy"));
+ ✓ (1ms)
+                trend: AccuracyTrend::Improving,
+                best_day: Some((115, 80.0)),
+                worst_day: Some((108, 20.0)),
+  +             per_signal_hits: None,
+            };
+            let report = format_accuracy_report(&stats);
+            assert!(report.contains("Risk Prediction Accuracy"));
+
+Now let me check if there are any other `AccuracyStats` struct literals missing the new field elsewhere in the codebase.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "AccuracyStats {" src/ ✓ (6ms)
+
+Only the one literal I fixed exists. Now let me run fmt, build, and test.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo build 2>&1 | ta… ✓ (9.6s)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -30 ✓ (1m 19s)
+
+All tests pass. Let me also run clippy to make sure lint is clean.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo clippy --all-targets -- -D w… ✓ (16.8s)
+
+All green. The fix was minimal: the per_signal_hits field was added to the `AccuracyStats` struct, which broke the single struct-literal in `test_format_accuracy_report_with_data` (line 721). I added `per_signal_hits: None` to that test's struct literal.
+
+Verified:
+• `cargo fmt` — clean
+• `cargo build` — clean
+• `cargo test` — 88 passed, 0 failed
+• `cargo clippy --all-targets -- -D warnings` — clean
+
+
