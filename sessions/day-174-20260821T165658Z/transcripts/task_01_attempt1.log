@@ -1,0 +1,394 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the repo and finding a small, concrete improvement to make. This is a fallback task, so I should bias toward finishing quickly.
+
+Let me look at git status and recent changes first, then pick a small improvement.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short && git log --on…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls .arc/ && cat .arc/risk_snapshot… ✓ (5ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 863ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good — the risk validation data now exists (2 entries). The dream milestone is about accumulating validation data. Let me look at the current state of things. Recent commits show the mutation sensor was folded into risk scoring today, and the risk report got signal tags.
+
+Let me pick a small, concrete improvement. Let me look at what's recently changed and find something small. Let me look at the risk accuracy code to see how it handles the validation data — maybe there's a small gap there.
+
+Actually, the instruction says: pick the FIRST real improvement I find and implement its SMALLEST correct version. Timebox to ~5 tool calls for exploration.
+
+Let me look at a couple things quickly:
+1. The `commands_risk_accuracy.rs` — since validation data now exists (sparse), maybe there's a division-by-zero or edge case with tiny data.
+2. Check for any TODO/FIXME/known small gaps.
+
+Let me search for obvious small issues. A quick grep for TODO/unwrap/panic in risk files, or check the accuracy computation with the sparse data.
+
+Actually let me be efficient: check `compute_accuracy_stats` for division-by-zero on empty/small data — that's a classic small bug worth fixing with a test.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,120p' src/commands_risk_…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "TODO\|FIXME\|unwrap()\|ex… ✓ (3ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 753ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the accuracy computation more, especially the `compute_per_signal_hits` function which computes per-signal hit counts. There may be a discrepancy in how the signals map. Let me look at the whole per-signal section.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '120,330p' src/commands_ris… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the rest of the file, especially the tests, to understand what's there and find a good small improvement.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '330,700p' src/commands_ris… ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me keep reading to find the per-signal computation and where `per_signal_hits` gets set. The compute_accuracy_stats sets `per_signal_hits: None` always. Let me look for how it's computed and what's missing. Also check `ValidationEvent` struct and whether there's a field for hit signals.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '700,907p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "per_signal_hits\|PerSigna… ✓ (4ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 717ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look for a good small improvement. Let me check what the current code state is around line 1656 in commands_risk.rs to understand where per-signal hits come from. But first — task guidance says pick the FIRST real improvement. Let me look for something concrete.
+
+Let me check the lift computation for a subtle bug: `hit_count` — in the lift aggregation, `lift_hit_sum += e.hit_count`. Wait, `hit_count` is the number of predicted files that actually changed. `predicted_count` is the number of flagged files. `total_scored` is whole scored population, `scored_broke` is count of scored files that broke. So flagged_rate = hits/predicted, baseline rate = scored_broke/total_scored. That seems right.
+
+Let me look at how ValidationEvent's Default works and check for a genuinely small opportunity. Let me check the `worst_day`/`best_day` tie-breaking — if two days have the same accuracy, the first one wins. Not a bug.
+
+Let me check compute_accuracy_trend: `window = min(5, len/2).max(1)`. For len=2, window=1 — OK. For len=3, window = min(5,1).max(1) = 1 — events[..1] vs events[2..] — disjoint, OK.
+
+Hmm. Let me consider a genuinely useful small improvement: in `fmt_per_signal_block`, it renders per-signal "In hits" share among total hits, but the per-signal hits include signals from hit files only. There's a startup bias concern.
+
+Actually wait — the instructions say bias toward FINISHING. Let me look at something concrete and obviously flawed. Let me search the whole file for edge cases that could panic or produce wrong output.
+
+Let me look at the box_str format to make sure the Lift line renders correctly, and check `pairs_str` width of 13 — "Pairs: 5/5" is 11 chars, fine.
+
+Let me look at commands_risk.rs around line 1656 to see how hit_signals is collected, and whether there's a small bug in the flow. Actually, let me take the pragmatic path: run a quick scan for recent git history to see what was recently done and look for an obvious small gap.
+
+Actually, a cleaner approach: let me look at the first thing that catches my eye as a genuine flaw. Let me re-read the lift calc:
+
+```rust
+let flagged_rate = lift_hit_sum as f64 / lift_predicted_sum as f64;
+let baseline_rate = lift_scored_broke_sum as f64 / lift_total_scored_sum as f64;
+if baseline_rate > 0.0 {
+    Some(flagged_rate / baseline_rate)
+}
+```
+
+The guard `lift_scored_broke_sum > 0` is in the `if lift_events_used > 0 && ...` condition. OK.
+
+Look at `compute_accuracy_stats` events loop: `total_changed` sums `e.total_changed` for ALL events (including old format), but for the modern events `total_changed` is presumably the number of changed files among the SCORED population... Let me look at what total_changed means in the writer. Let me check commands_risk_snapshots.rs to see how validation events are written.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1620,1680p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "ValidationEvent {" src/co… ✓ (3ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `hit_signals` field in `ValidationEvent` and how it's populated. Let me look at lines 370-440 of commands_risk_snapshots.rs.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '370,440p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals" src/commands… ✓ (3ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 829ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `handle_risk_accuracy` flow. The `hit_signals` currently only come from `detailed` events. Let me look at that section more closely.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1630,1662p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "detailed\|Detail\|hit_sig… ✓ (3ms)
+ ✓ (5ms)
+  2 tools completed in 779ms (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '150,270p' src/commands_ris… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the current state and think about a small, concrete improvement. Let me look at the recent commits and what the current state of the code is. The session is a "fallback task" — pick the FIRST real improvement I find and implement its SMALLEST version.
+
+Let me look at what's around. Recent work: risk report legibility with per-file signal tags. Let me check the `handle_risk_accuracy` flow — there's a duplicated computation: `parse_detailed_events` is called twice (once at line 1650 for hit_signals, and also in `handle_risk_accuracy` for the learned weights section at line 1486?). Let me look at the surrounding code to see if there's redundancy.
+
+Actually let me look at handle_risk_accuracy fully to see if parse_detailed_events is called multiple times.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1470,1680p' src/commands_r… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the current state. There is a `handle_risk_accuracy` function in `src/commands_risk.rs` that:
+1. Loads validation events
+2. Computes accuracy stats
+3. Computes per-signal hits via `parse_detailed_events` (cross-referencing validation and snapshot content)
+4. Sets `stats.per_signal_hits = Some(compute_per_signal_hits(&hit_signals))`
+5. Prints report + signal breakdown + recent events
+
+The `format_accuracy_report` function renders per_signal_hits only if `pairs >= 5`. Looking at `fmt_per_signal_block`, it gates on `pairs < 5` returning empty string.
+
+Now, what's the "smallest real improvement" I can make here? Let me look for actual deficiencies. The task is a fallback task: pick the FIRST real improvement I find and implement its SMALLEST correct version.
+
+Let me think about what I found so far:
+1. There's an `unwrap_or_default()` for read of RISK_SNAPSHOT_PATH in handle_risk_accuracy - fine.
+2. `expect()` in tests - fine.
+
+Let me look at the `parse_detailed_events` — it looks up snapshot signals by `day`, matching snapshot day to validation event day. Note this cross-references by day. But there's a subtle bug potential: validation events for a snapshot recorded but validated later. But that's existing behavior.
+
+Actually let me look for a real, small bug. Let me check `fmt_per_signal_block`'s gating: the report only shows per-signal counts when pairs >= 5. And `compute_per_signal_hits` counts per-signal hits even when fewer than 5 pairs... it's just not displayed. Fine.
+
+Let me look for something concrete and verifiable. A good candidate: the accuracy report's "Pairs: X/5" uses `lift_events_used` — events carrying predicted_count/total_scored/scored_broke. But per-signal hits require `hit_signals` which come from cross-referencing snapshots with validation events by day. Hmm.
+
+Let me look at `parse_detailed_events` more carefully. It stores `snapshot_signals` keyed by `day` — using the LAST snapshot per day. Validation events reference `day` — but wait, the actual top-10 risk snapshot recorded earlier in the session is the prediction; the validation event happens later, possibly on a different day. Cross-referencing by day seems fragile — validation events from day N+1 might reference the snapshot recorded on day N. Hmm, but that's existing architecture, not necessarily a bug I should fix in a "small committed" task.
+
+Let me instead check for a genuine small bug. Let me run the existing test suite quickly to see everything passes, and check clippy for warnings. Also let me look at the `RISK_SUBCOMMANDS` to see what's exposed.
+
+Actually, one thing I noticed: in `handle_risk_accuracy`, the comment says "Section 2: Per-signal breakdown" then builds `signal_section` with `format_signal_breakdown` — that function produces "Per-Signal Breakdown" with "Predictive" bars and weights. And separately `fmt_per_signal_block` in commands_risk_accuracy.rs produces "Per-Signal Accuracy". These are two different things.
+
+Let me look for something more concrete — maybe a genuine bug in `bash` command output or something else entirely. Actually, since it's a fallback task, maybe I should look for low-hanging fruit: an `unwrap()` in non-test code that could panic on production data, or a missing test for a recent change.
+
+Let me check the most recently changed files: src/repl.rs, src/commands_risk_*.rs. The recent commits:
+- "Make the risk report legible: show per-file signal tags (incl. new mutation sensor) at a glance (Task 2)"
+- "Fold the mutation-survival sensor into the risk sense organ's file scoring (Task 1)"
+
+So the mutation sensor was added today. There might be a gap: `SIGNAL_NAMES` has 7 signals, and the mutation-survival sensor is the 7th ("revert_history"?) — wait. Let me check: SIGNAL_NAMES = churn, recency, size, complexity, test_density, coupling, revert_history — that's 7. But the commit mentions a "mutation sensor" being folded in. Let me check how mutation survival is loaded and whether the signal names include mutation.
+
+Let me look at `load_mutation_survival` in commands_risk.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutation\|MUTATION\|SIGNA…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show c363368 --stat | head -30 ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 1.1s (2 ✓)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '40,100p' src/commands_risk… ✓ (4ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '100,120p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutation_survival\|mut " … ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 898ms (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-elevolve 2>/dev/null; cd /home/runner/work/a… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at how snapshots record signals vs the `label_to_index` mapping. The snapshot records `signals` as `["▲churn","▲low-test"]` etc. `label_to_index` maps labels to indices — note the mapping: `▲recent` → 1 (recency), `▲size` → 2, `▲reverts` → 6, `▲low-test` → 4, `▲coupled` → 5. But `▲churn` → 0, and there's no mapping for complexity (index 3) or `▲mut-surv` (the new mutation signal).
+
+So when the new "▲mut-surv" signal (added yesterday in commit c363368) appears in snapshots, `label_to_index` returns None for it. Let me check where `label_to_index` is used.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "label_to_index" src/  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '186,200p' src/commands_ris… ✓ (4ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 3.8s (2 ✓)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '192,206p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '192,215p' src/commands_ris… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `sed` output is showing `...` where it seems there are hidden lines. Let me read the file directly with read_file.
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:186..231 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the mechanism. `label_to_index` maps signal labels to indices. `▲mut-surv` is a new signal label (added in the mutation sensor commit c363368), but `label_to_index` doesn't know about it, so it returns `None` — the mutation signal's index gets dropped when parsing snapshots for weight-learning / per-signal accuracy.
+
+But wait — the mutation survival signal is an 8th signal beyond the 7-element array. The arrays are `[f64; 7]` and `SIGNAL_NAMES` has 7 entries. Adding "▲mut-surv" to `label_to_index` would require an index — but there is no index 7; the arrays are length 7. Actually `compute_per_signal_hits` has `if idx < 7` guard, and `compute_adjusted_weights` also has `if idx < 7`. So the 7-element weight system can't accommodate an 8th signal without widening all the arrays (RISK_WEIGHTS, SIGNAL_NAMES, per_signal_hits, etc.).
+
+Hmm. That would be a larger change. Let me think about what's the smallest correct improvement here.
+
+Option A: Make the mutation-survival sensor count. The mutation survival is an additive term `MUTATION_WEIGHT * ms` in the score, and throws a `▲mut-surv` tag. But the tag is dropped by `label_to_index` when parsing snapshots, meaning the weight-learning path and per-signal accuracy never see this signal — the sensor's contribution to the predictive signal set is invisible to measurement. This is a genuine "the sense organ has a blind spot" bug — it's the exact theme of my dream (umwelt, sense organs).
+
+But widening everything to 8 signals is a bigger change touching RISK_WEIGHTS (7 → 8? No — actually the mutation term is additive, weight 0.10, outside the 7-signal weighted sum that normalizes to 1.0). So the cleanest approach: keep the 7-signal core, but let `label_to_index` map `▲mut-surv` to... hmm, there's no slot.
+
+Alternative: map `▲mut-surv` to index 3 (complexity)? No — that would conflate signals.
+
+Let me look at how the snapshot JSON is built and how signals in top_10 are recorded. The snapshot recording writes signals list per file. Then validation parsing maps labels back to indices. If a label is unparseable, the signal is dropped.
+
+Actually, let me reconsider. What's the smallest, most honest improvement? Let me look for something simpler and more clearly scoped.
+
+Let me re-read the task: "Make ONE small, concrete improvement and COMMIT it." Fallback task. Bias to FINISH.
+
+Candidates I've seen:
+1. The `▲mut-surv` label gap: the mutation survival signal added this morning is dropped in `label_to_index` — the weight-learning/per-signal-accuracy paths can't see it. This is a real, concrete, self-contained gap introduced by a recent commit. Fixing it properly = widening signal arrays to 8, which is a moderate change. But wait — is there an even smaller correct fix?
+
+Actually, let me think again about what `label_to_index` is used for: parsing snapshot top_10 entries into per-file signal index lists, used by (a) `compute_adjusted_weights` (weight learning) and (b) `compute_per_signal_hits` for the per-signal accuracy block, both of which have `if idx < 7` guards and 7-element arrays.
+
+The mutation sensor is deliberately additive (outside the 7). So the mutation signal genuinely has no home in the 7-element system. Options:
+- Widen to 8 signals everywhere: modifies RISK_WEIGHTS (7 → 8, adding mutation as an 8th weight slot), SIGNAL_NAMES, per_signal_hits arrays, compute_adjusted_weights, compute_per_signal_hits... that's a lot of surgery for a fallback task.
+- Keep it minimal: since mutation is additive and separate, the cleanest minimal fix might be different.
+
+2. Alternative candidate: Look at other small things. Let me check the report rendering for `▲mut-surv` legibility. Actually the "risk report legible" commit (3f99fda) was Task 2 this morning and showed per-file signal tags incl. mutation.
+
+Hmm, wait. Let me reconsider the scope. The task says pick the FIRST real improvement. The mut-surv label gap is real and concrete. But the fix might be legitimately small: I could map the mutation tag such that it participates... no clean slot.
+
+Let me look at another candidate instead — something simpler. Let me look at the report file for the "mut" tag rendering, or look at `top_risk_files` etc. Actually, let me search for other disconnected threads.
+
+Actually — let me reconsider. Maybe the smallest correct version of fixing the mut-surv visibility is: since the mutation survival tag is dropped at label parse time, the per-signal accuracy block will never show `mut-surv` (it's not even in SIGNAL_NAMES). But that's a "by design" 7-signal display.
+
+Hold on — is there really nothing simpler? Let me look at the `▲mut-surv` insertion in `FileRisk.signals` — it pushes "▲mut-surv" but `SIGNAL_NAMES` doesn't have a display context for it... but the report commit (3f99fda) "show per-file signal tags (incl. new mutation sensor)" handled display.
+
+OK here's another angle: keep the change truly minimal and honest — extend `label_to_index` to return an index for `▲mut-surv`, widen the signal arrays from 7 to 8. Actually let me count the places that need widening:
+
+- `SIGNAL_NAMES` in commands_risk.rs (7 entries) and commands_risk_accuracy.rs (7 entries) — duplicated consts!
+- `RISK_WEIGHTS: [f64; 7]`
+- `compute_adjusted_weights` → `[f64; 7]` arrays
+- `learn_weights_from_history` → `[f64; 7]`
+- `compute_per_signal_hits` → `[usize; 7]`, guard `idx < 7`
+- `AccuracyStats.per_signal_hits: Option<[usize; 7]>`
+- `fmt_per_signal_block` loop `for i in 0..7`
+- `format_signal_breakdown` loop `for i in 0..7`
+- The `signals` mapping in snapshot JSON writing (check where top_10 signals are serialized — does it use SIGNAL_NAMES?)
+
+That's a real refactor. For a fallback "small, committed" task, that's probably too big. Also, semantically, the mutation weight is additive and NOT normalized into the same 0..1 weighted-sum space — folding it into the 7 as an 8th weighted signal would change score semantics (risk scores would sum to 1.0 + mutation 0.10 max anyway). Hmm, actually currently score = weighted sum of 7 (max ≈ 1.0... let me check if weights sum to 1) + mutation term up to 0.10. Making it an 8th weight slot with weight 0.10 would keep the same scoring if the array sum doesn't need to be 1.0... Let me check: RISK_WEIGHTS sum = 0.30+0.15+0.15+0.10+0.10+0.10+0.10 = 1.0. And learn_weights_from_history validates `(sum - 1.0).abs() > 0.05` → returns defaults. So the weights array must sum to 1.0. Adding an 8th weight slot of 0.10 would make sum 1.10, breaking validation unless I renormalize... too invasive.
+
+So the truly minimal honest fix for the mut-surv measurement gap is NOT widening the array system.
+
+Let me step back and pick a different, simpler improvement. Options:
+
+- Find a real bug in `parse_detailed_events`: it uses `snapshot_signals.insert(day, ...)` and "Use the latest snapshot for each day" — but validation events are associated with `git_hash_from`/`git_hash_to`, not day necessarily. Multiple snapshots on the same day would just take the last. Fine.
+
+- Look at `label_to_index`: the labels for complexity... wait! Notice: `SIGNAL_NAMES` includes "complexity" at index 3, "test_density" at 4, "coupling" at 5, "revert_history" at 6. The `label_to_index` maps "▲reverts" → 6, "▲low-test" → 4, "▲coupled" → 5. What about "▲complex"? Is there a label for complexity? In `compute_file_risk_scores` the signals pushed are: "▲churn", "▲recent", "▲size", "▲reverts", "▲low-test", "▲coupled", "▲mut-surv". There's NO complexity label pushed! So the complexity signal (index 3) is never emitted as a tag — meaning the snapshot never records complexity elevation, so complexity never contributes to per-signal accuracy or weight learning. Hmm, that's a pre-existing gap.
+
+Actually wait — is complexity in the signals? Let me check: the signals list in compute_file_risk_scores pushes churn, recent, size, reverts, low-test, coupled, mut-surv. Sure enough no complexity. But `label_to_index` has no "▲complex" mapping either — consistent. So complexity is silently absent from the signal-tag system. Adding it would be: push "▲complex" when norm_complexity[i] > 0.5, add label_to_index mapping... but index 3 has no weight slot issue — 3 exists in the 7-array. THIS is a small, correct fix: complexity is one of the 7 signals with weight 0.10, but it never gets a tag emitted, so its elevated state never shows in the report or feeds weight learning. That's a genuine blind spot in the very sense organ my dream is about!
+
+Let me verify: is norm_complexity computed? Yes: `raw_complexity` → normalized. In the score: `+ norm_complexity[i] * weights[3]`. So complexity DOES affect scores but is never tagged. The report shows per-file signal tags — complexity-elevated files show none of the ▲ tags for complexity. And snapshot-based validation can't credit complexity for hits.
+
+So the fix: 
+1. In `compute_file_risk_scores`, add signal push for complexity: `if norm_complexity[i] > 0.5 { signals.push("▲complex"); }` — matching the threshold convention (0.5 like the others).
+2. Add `"▲complex" => Some(3)` to `label_to_index`.
+3. Since `SIGNAL_NAMES[3]` is "complexity" and `format_signal_breakdown` displays `SIGNAL_NAMES`, the display already handles it.
+
+Wait, but do I need to check what the threshold for complexity is? Let me check how the report renders. Also check the snapshot writer serializes `signals` from FileRisk — yes it reads entry["signals"] as labels.
+
+Do snapshots already contain "▲complex" from past runs? No — since it was never pushed. Adding the push now means new snapshots will include it; old snapshots won't. `label_to_index` handles unknown labels (None, ignored). Backward compatible.
+
+Is there a test for label_to_index? Let me check. And a test for the signals being emitted? Let me look at the tests in commands_risk.rs around signal emission.
+
+This is a genuinely small, correct, well-scoped improvement: "complexity is a first-class risk signal (weight 0.10) but is never emitted as a tag, so the /risk report and the snapshot→validation measurement pipeline can't see when complexity is the reason a file ranks high. Emit ▲complex like the other six signals."
+
+Let me verify there isn't already a "▲complex" handling somewhere (maybe label_to_index has it but the push is missing — that would be odd). From my earlier read: label_to_index maps churn, recent, size, reverts, low-test, coupled. No complex. And signals push list: churn, recent, size, reverts, low-test, coupled, mut-surv. No complex. Consistent — complexity tag is entirely missing.
+
+Hmm wait, but also let me double check the Report commit: 3f99fda "show per-file signal tags (incl. new mutation sensor)". Let me look at what the report does with signals — maybe it uses SIGNAL_NAMES indices? Let me check format in commands_risk_report.rs.
+
+Let me look at how signals are rendered in the report to make sure "▲complex" will display correctly, and check what thresholds/semantics to match. Also check whether complexity had a label in the past (git history of label_to_index). Let me be quick — I've used ~8 tool calls; time to decide. This candidate is solid: smallest correct version = push tag + label_to_index mapping + a test.
+
+Wait — one more consideration: `signals.push("▲mut-surv")` has `if ms > 0.0` — mutation is additive so just presence matters. For complexity, matching the norm > 0.5 convention used by others. But raw complexity normalized? `norm_complexity` — let me confirm the exact variable name. From the score line: I saw `+ norm_accel[i] * weights[1]` etc. Let me grep for norm_complexity.
+
+Also I must check whether the mutation signal tag really got pushed in the commit — yes line 965.
+
+Now, about the "▲complex" label in `label_to_index` — index 3. Wait, actually is "complexity" really meant to be taggable? Let me check the snapshot JSON writer to understand the top_10 signals field format and whether SIGNAL_NAMES is used to serialize. Let me look at where snapshots write signals.
+────────────────────────────────────────────────────────────────────────────────
+The mutation-survival sensor has a tag (`▲mut-surv`) but the complexity signal — one of the 7 weighted signals — never gets a tag emitted at all. Let me verify.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "norm_complexity\|norm_acc…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "signals" src/commands_ris… ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 958ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture:
+
+1. `compute_file_risk_scores` computes 7 signals: churn, recency (accel), size, complexity, test_density, coupling, revert_history.
+2. The `signals` tags emitted: `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`, `▲mut-surv`.
+3. **Complexity has NO tag** — `norm_complexity[i]` never contributes a signal tag. This is a real gap: complexity is 10% of the weighted score, but there's no way to see in the report/snapshot which files are high-complexity.
+4. `label_to_index` maps labels to indices for the per-signal accuracy tracking. There's no label for complexity (index 3) — `▲complex` is missing.
+
+The report in `commands_risk_report.rs` shows per-file signal tags via `file_risk_summary` — let me check that too. Task 2 today (3f99fda) was "Make the risk report legible: show per-file signal tags". So the report shows tags from `file_risk.signals`. Complexity gets no tag, which means the report can't tell you why a file scored high on complexity.
+
+This is a small, real, concrete improvement: **add the missing `▲complex` tag for high-complexity files, and map it in `label_to_index` so the per-signal accuracy tracking can see it.**
+
+Wait — but label_to_index uses `▲`-prefixed labels from snapshots. And `compute_per_signal_hits` counts indices 0..7. If I add `"▲complex" => Some(3)` to label_to_index and emit `▲complex` when `norm_complexity[i] > 0.5`, that makes the complexity signal visible in:
+- the report (file risk summary tags)
+- the snapshot (signals array persisted)
+- per-signal accuracy tracking (parse_detailed_events → compute_per_signal_hits → per-signal breakdown)
+
+This is exactly the "per-signal accuracy breakdown" the dream wants — with complexity missing from both tags and the index map, one of the 7 signals can never appear in the accuracy breakdown.
+
+Let me check the threshold convention: churn, accel, size, revert, test all use > 0.5; coupling uses > 0.7. Complexity should use > 0.5 for consistency.
+
+Let me also check `file_risk_summary` in commands_risk_report.rs to see how tags are rendered, and check if there's a test on signals that would need updating.
+
+Also check `compute_file_risk_scores` tests — there are tests with expected signals. Let me search for tests asserting signals.
+
+This is small and surgical: 
+1. Add `"▲complex" => Some(3)` to `label_to_index`.
+2. Add the tag emission in the loop: `if norm_complexity[i] > 0.5 { signals.push("▲complex"); }`
+3. Add a test.
+
+Let me check existing tests that construct expected signals and verify nothing asserts an exact signal list that would now include "▲complex" (tests construct FileRisk directly, so no). Let me check the snapshot tests with real compute (test_risk_snapshot... uses `risks` created manually, probably fine).
+
+Let me look at how `label_to_index` is used and also confirm SIGNAL_NAMES[3] = "complexity". Yes.
+
+Also check `format_signal_breakdown` uses SIGNAL_NAMES — complexity row exists in the per-signal breakdown table but will always show 0% predictive until the tag exists. Adding the tag makes the signal observable end-to-end.
+
+Let me write the change.
+────────────────────────────────────────────────────────────────────────────────
+Found a real, small gap: the risk scorer weights **complexity** (10% of score, index 3 of `SIGNAL_NAMES), but compute_file_risk_scores` never emits a `▲complex` tag for high-complexity files, and label_to_index has no mapping for it. Consequence: complexity can never appear in the report's per-file tags, the persisted snapshot, or the dream's per-signal accuracy breakdown — one of the 7 signals is invisible end-to-end. Let me verify the report rendering and existing tests before editing
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "file_risk_summary\|signal…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "▲" src/commands_risk.rs s… ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 1.1s (2 ✓)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '97,105p' src/commands_risk…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "▲complex\|complexity" sr… ✓ (3ms)
+ ✓ (6ms)
+  2 tools completed in 847ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Confirmed. Complexity (index 3, weight 0.10) is missing:
+1. In `commands_risk.rs`: no `signals.push("▲complex")` when `norm_complexity[i] > 0.5` in `compute_file_risk_scores`
+2. In `label_to_index`: no `"▲complex" => Some(3)` mapping
+3. In `commands_risk_report.rs`: `file_signal_tags` has no `"▲complex" => push_tag(&mut tags, "complex")` mapping and `signal_labels_to_description` has no `"▲complex" => Some("complex code")` mapping
+
+Let me check what the other complexity signal labels are referenced anywhere, and check how the report displays things. Also check `docs/` for the risk documentation to see if complexity is documented as a signal.
+
+Let me look at the docs on /risk.
+────────────────────────────────────────────────────────────────────────────────
+Confirmed the gap. Complexity (index 3) is missing from three places. Let me check docs and then make
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "complexity" docs/src/ | …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '155,215p' src/commands_ris… ✓ (3ms)
+ ✓ (7ms)
+  2 tools completed in 7ms (2 ✓)
+
+
