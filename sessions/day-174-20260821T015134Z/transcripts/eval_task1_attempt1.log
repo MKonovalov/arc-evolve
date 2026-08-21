@@ -1,0 +1,104 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll evaluate the task implementation against the requirements.
+
+Let me examine the key pieces: the backfill functionality and whether it was wired in.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && echo "---"… ✓ (10ms)
+
+The diff is exactly as shown. Now let me verify a critical concern: the task asked to refactor `replay_validate_core` to iterate over ALL snapshots (the backfill logic), but the diff only shows changes to the `re-export` in commands_risk.rs and the helper functions + tests in commands_risk_snapshots.rs. Let me check whether anything actually calls the backfill.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "all_validation_associati… ✓ (17ms)
+
+Let me look more carefully. The task asked for three things:
+1. Add `all_validation_associations` — DONE (helper added)
+2. Refactor `replay_validate_core / add backfill_replay_validate` that iterates over ALL snapshots — this is the core of the task
+3. Wire the backfill into `handle_risk_snapshot`
+
+The diff only shows the helper functions and tests added. Let me check if replay_validate_core was actually modified to iterate over all snapshots, and if it was wired into `handle_risk_snapshot`.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "replay_validate_core\|re… ✓ (4ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn replay_validate_core\|… ✓ (4ms)
+
+This is the critical finding. `replay_validate_core` is NOT found anywhere in the codebase via grep (the earlier grep matched it only in test/comment context lines 4283, 4389). Let me confirm the actual function names.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "fn replay_validate" src/… ✓ (9ms)
+
+Now let me look at `replay_validate_core and replay_validate_last_snapshot` in full to see whether they iterate over all snapshots or only the last one.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2232..2402 ✓ (2ms)
+
+This confirms the critical finding: **`replay_validate_core` was NOT modified to iterate over all snapshots.** It still does `let last = snapshots.last()?;` and operates only on the last snapshot. The task's central requirement (#2 and #3) — the actual backfill logic that iterates over all unvalidated snapshots and the wiring into `handle_risk_snapshot` — was **not implemented**.
+
+The diff only adds:
+1. `all_validation_associations` helper (task item #1) ✓
+2. `load_validation_associations` helper ✓
+3. Tests for those helpers ✓
+
+But the core feature — iterating over all snapshots, deduping against the full association set, and running the backfill — is entirely absent. `load_validation_associations` is imported in commands_risk.rs but let me verify it's actually never used except in the re-export.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "load_validation_associat… ✓ (7ms)
+
+Confirmed: `load_validation_associations and all_validation_associations` are only re-exported in commands_risk.rs, but **never actually called** anywhere. They're dead code. The backfill logic that the entire task hinges on was never written.
+
+Let me double-check `handle_risk_snapshot` wasn't wired with the backfill.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk_snapshot" … ✓ (3ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1256..1286 ✓ (1ms)
+
+Confirmed. `handle_risk_snapshot` is completely unchanged — it still only calls `replay_validate_last_snapshot()`. No backfill was wired in.
+
+**Summary of the verdict:**
+
+The task had three concrete requirements:
+1. Add `all_validation_associations` helper — ✅ DONE (plus `load_validation_associations` and 3 tests)
+2. Refactor `replay_validate_core` / add sibling to iterate over **ALL** snapshots, dedupe against full association set, backfill — ❌ **NOT IMPLEMENTED**. `replay_validate_core` is byte-for-byte unchanged (`let last = snapshots.last()?`). The imported `load_validation_associations/all_validation_associations` functions are dead code — never called anywhere.
+3. Wire backfill into `handle_risk_snapshot` — ❌ **NOT IMPLEMENTED**. `handle_risk_snapshot` is unchanged, still only validates the last snapshot.
+
+The whole point of the task — turning ~85 accumulated snapshots into many matched pairs to advance the dream's cold-start gate — was NOT achieved. Only scaffolding helper functions were written, none of which are used. This is a clear FAIL.
+
+The CLAUDE.md doc update was also not made, but that's secondary.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "backfill\|auto_validate_a… ✓ (3ms)
+
+The CLAUDE.md doc was also not updated to mention the backfill-validate-all behavior. That's consistent with the fact that the backfill isn't implemented.
+
+**Verdict: FAIL.** The core of the task — the backfill that iterates over all unvalidated snapshots, wires into `handle_risk_snapshot`, and advances the dream's gate — was not implemented. Only unused helper scaffolding was added.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+Verdict written. **FAIL.**
+
+**Evidence summary:**
+• The diff adds only two helper functions (`all_validation_associations, load_validation_associations`) plus 3 tests in `commands_risk_snapshots.rs`, and re-exports them in `commands_risk.rs`.
+• The task's core requirements — (2) refactoring `replay_validate_core` to iterate over ALL snapshots with dedup against the full association set and backfill events, and (3) wiring that backfill into `handle_risk_snapshot` — were **not implemented**. Both `replay_validate_core` (snapshots.last()?) and `handle_risk_snapshot (only replay_validate_last_snapshot()`) are byte-for-byte unchanged.
+• The new functions are **never called** anywhere except their re-export line (dead code). This would trigger a dead-code lint/compile warning if clippy ran, though the harness only ran build+test.
+• CLAUDE.md was not updated (consistent — no backfill exists to document).
+
+The task was set up to fail cleanly: tests were written *for the helper* but none verify the actual backfill behavior (iterating all snapshots, dedup, lift fields). Thus tests pass while the feature is entirely absent.
+
+

@@ -1,0 +1,208 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ mkdir -p session_plan && rm -f session_plan/task_*.md && cat ISSUES_TODAY.md 2>/… ✓ (6ms)
+
+No community issues today. Let me check the state of the risk validation data and the dream milestone to plan accordingly.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cat .arc/risk_validations.jsonl 2>/dev/null | python3 -c " (8 lines)  ▶ $ wc -l .arc/risk_snapshots.jsonl .arc/risk_validations.jsonl 2>/dev/null; echo "-… ✓ (4ms)
+ ✓ (24ms)
+  2 tools completed in 1.2s (2 ✓)
+
+The dream's next milestone is accumulating validation data to produce ≥5 matched prediction-outcome pairs. Currently at 1/5 (only the day-172 event carries the lift fields). The protocol produces validated snapshots via `arc risk snapshot` which validates the prior snapshot and records a new one — one matched pair per call, deduped by git hash.
+
+The issue is that the validation cadence produces only ~1-2 pairs per session since each call validates just the prior snapshot against commits since it. Let me think about how to accelerate the feed toward ≥5 pairs.
+
+Let me look at how the dream milestone progress is being surfaced, and whether there's a sensible way to accelerate the cold-start feed toward 5+ pairs.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "lift_events_used\|cold.start\|>= 5\|≥5\|5-pair\|MATCHED\|milestone" src…  ▶ $ grep -rn "replay_validate_last_snapshot\|last_snapshot_git_hash\|auto_validate_b… ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 719ms (2 ✓)
+
+Let me understand the replay validation mechanism better — how many matched pairs each `risk snapshot` call produces, and whether there's a way to get more matched pairs from existing snapshots.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '2300,2450p' src/commands_risk.rs ✓ (4ms)
+
+Now I understand the pipeline. Each `arc risk snapshot` call (which evolve.sh already runs once per session) performs a replay validation of the last snapshot against commits since its hash, then records a new snapshot. So one matched pair accrues per session as long as commits happened since the last snapshot.
+
+The cold start is at 1/5 matched pairs. The natural feed is one pair per evolve session. But the snapshots file has 85 entries, and only the most recent is validated per call. The bottleneck: validation only ever looks at the last snapshot, not backfilling.
+
+Let me think about what a good, well-scoped task is here. The dream milestone is to accumulate ≥5 matched pairs. Current approach yields ~1 pair per session. There's a genuinely valuable improvement: **backfill validation across all unvalidated snapshots** rather than only the last one. This could accelerate the cold-start dramatically since there are 85 snapshots already sitting there.
+
+But this is an evolve-kind change to src (giving the sense organ more data). Let me look at how validation events are deduped to make sure a backfill is feasible and won't double-count.
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '180,300p' src/commands_risk_snapshots.rs ✓ (3ms)
+
+Now I understand the architecture. The validation dedupes by snapshot-association (last_validation_pair). The current mechanism only validates the last snapshot per call. 
+
+Let me think about the highest-value task. The dream milestone is the cold-start feed to ≥5 pairs. The natural, well-scoped task that genuinely advances the dream is a **backfill validation**: walk all snapshots that haven't yet been validated and produce matched pairs for each, dramatically accelerating 1/5 → 5+/5.
+
+However, I need to be careful about scope and correctness — the risk scorer computes current scores, and each historical snapshot has its own predicted set. Backfilling means for each unvalidated snapshot, compare its `predicted` (and `top_risk_files` set) against the src/ files actually changed in commits since that snapshot's hash. This is legitimate: it's exactly the same measurement the "last snapshot" path does, just done for all snapshots at once.
+
+Let me look at the replay_validate_core to understand the shape of a validation event and whether backfill is a clean extension.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '1200,1310p' src/commands_risk.rs ✓ (3ms)
+
+Now I have a clear picture of the validation core. Let me look at `replay_validate_core` and the dedup logic to see whether backfilling all unvalidated snapshots is a clean, well-scoped task.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "fn replay_validate_core\|fn replay_validate_last_snapshot\|fn replay_va… ✓ (4ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '2225,2330p' src/commands_risk.rs ✓ (3ms)
+
+Now I fully understand the architecture. The key insight: `replay_validate_core` only uses `snapshots.last(), and replay_validate_last_snapshot` validates the most recent snapshot against commits since its hash. The dedup is per-snapshot-association, but only the last snapshot is ever validated and only against commits up to now.
+
+There are **85 snapshots** in the file, but only ~2 have been validated (each validate only the immediately-previous one at each session). Many historical snapshots have never had their prediction-vs-outcome measured because once a snapshot isn't "last" anymore, it's never revisited.
+
+This is the genuine, well-scoped improvement that advances the dream milestone: **backfill validation across all unvalidated snapshots**. Each historical snapshot S at hash h_S predicted a set of files; the files that actually broke since `h_S` up to HEAD are knowable from git history. Walking every snapshot and measuring each one's prediction-vs-actual-broken-files would turn ~85 snapshots of untested predictions into many matched pairs at once, potentially jumping 1/5 → 5+/5 in a single backfill.
+
+This is an evolve-kind task (it advances the sense organ / dream), touching at most the risk files. Let me scope this carefully.
+
+The task: add a backfill validation that iterates all snapshots (not just the last), computes each one's hit/surprise against the git log since its own hash to HEAD, dedupes against already-recorded associations, and writes new validation events. This is a reasonably contained change to `replay_validate_core/replay_validate_last_snapshot` — mostly rewriting the "only use last snapshot" assumption to iterate.
+
+Let me confirm the scope by checking how `compute_validation and classify_broke_files` take inputs, to make sure the backfill can reuse them per-snapshot.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "fn compute_validation\|fn classify_broke_files\|fn parse_git_log_name_o…📦 RTK detected — using compressed output (disable with --no-rtk)
+ ✓ (16ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '1755,1900p' src/commands_risk.rs ✓ (4ms)
+
+I now have complete understanding. The core primitives (`parse_snapshots, parse_git_log_name_only, classify_broke_files, compute_validation, compute_file_risk_scores`) all support backfill. The `replay_validate_core` function hardcodes `snapshots.last()`.
+
+**The task**: Generalize the replay validation from "validate only the last snapshot" to "backfill-validate all snapshots that have unvalidated associations." For each historical snapshot, run `git log <hash>..HEAD --name-only`, compute hits/surprises against that snapshot's own `predicted` set, dedupe by (from,to) association, and write a validation event. This turns the ~85 untested snapshots into many matched pairs, potentially clearing the 1/5 → 5+/5 cold-start gate in one go.
+
+This is the highest-value, well-scoped self-driven task — it directly advances the dream milestone (accumulate ≥5 matched pairs, the cold start of the sense organ). It's evolve-kind, touching at most 2 files (`commands_risk.rs` mainly, maybe `commands_risk_snapshots.rs` if helpers need export).
+
+Let me check the correctness constraint: computing `scored_broke` needs `all_ranked` (current risk ranking). `total_scored` is the count of ranked files. Since we have 85 snapshots and the current scoring, backfill would produce accurate pair counts.
+
+One subtlety: the `last_validation_association` dedup currently only checks the *last written* event. For a proper backfill that dedupes across all historical snapshots, I need a check against all recorded (from,to) associations, not just the last. Let me check `last_validation_association and parse_validation_events`.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "fn last_validation_association\|fn parse_validation_events\|fn load_val… ✓ (8ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '155,200p' src/commands_risk_snapshots.rs; echo "---"; sed -n '395,470p' … ✓ (5ms)
+
+I have everything I need. `parse_validation_events` exists and is reusable. For backfill dedup, I need to check all recorded (from,to) associations (not just the last). I'll need a helper to collect all associations — I can build the set from `parse_validation_events` but it doesn't expose git hashes of from/to. Let me check the `ValidationEvent` struct fields.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "struct ValidationEvent" -A 40 src/commands_risk_snapshots.rs | head -50 ✓ (3ms)
+
+The `ValidationEvent` struct doesn't expose the `git_hash_from/git_hash_to` fields. For a proper backfill dedup across all associations, I'd want to parse from/to directly from the JSONL. I can add a small helper that collects all (from,to) pairs from the validation JSONL via a raw JSON parse. This is clean and contained.
+
+Let me now assess the full scope of the backfill task:
+
+**Task: Backfill risk validation across all unvalidated snapshots**
+
+Changes (all in `src/commands_risk_snapshots.rs + src/commands_risk.rs`, ≤3 files):
+1. Add a helper `all_validation_associations(path)` that parses every `(git_hash_from, git_hash_to) pair from risk_validations.jsonl` (not just the last), so backfill can skip already-validated spans.
+2. Generalize `replay_validate_core` / add a `backfill_replay_validate` that iterates ALL snapshots (not just the last): for each snapshot not already associated (its own hash as `from), run git log <hash>..HEAD`, compute hits/surprises against that snapshot's `predicted`, and write a validation event deduped against the full association set.
+3. Wire it into `handle_risk_snapshot` (before recording the new snapshot) or as a `risk validate --backfill` path — so the evolve loop's existing per-session `risk snapshot` call also runs backfill.
+4. Add a test with synthetic snapshots/validation content verifying dedup (no double-count) and that multiple snapshots get validated, and that lift fields are set.
+
+This is within the ~20 min / ≤3 file budget. It advances the dream milestone directly (85 existing snapshots → potentially many matched pairs; the field data will let the ≥5 gate clear).
+
+But wait — let me sanity-check the feasibility of the backfill producing *matched pairs* in the existing data. Many historical snapshots predate the current score set but that's fine — each snapshot carries its own `top_10` predicted set, and we measure against actual src/ breakage since that snapshot's commit. Since the repo has been actively evolving with fixes/reverts, there should be genuine hits and scored_broke signals.
+
+However, I should be careful: the primary effect the dream cares about is scored_broke / `total_scored` on the scored population (does high-scored files break more?). The lift measurement (`lift_events_used`) counts events that carry both fields. So the backfill needs to set `total_scored` (all_ranked count) and `scored_broke` (hits + scored surprises) for each backfilled event — which the current `replay_validate_core` already does.
+
+This is a strong, well-scoped self-driven task that directly advances DREAM.md. Let me also consider a second slot.
+
+Now, self-driven slot 1 = the dream backfill task. That's the top priority. 
+
+For remaining slots: no community issues today. The trajectory flags the recurring "Self-improvement (small, committed)" task label as a weak process smell. But since it succeeds, I could schedule one more concrete, well-scoped improvement. Given the assessment's research, the biggest reachable gap is persistent named-subagent orchestration — but that's large and against my "small-step" discipline.
+
+Let me instead pick something genuinely small and useful. Given the assessment notes the `arc risk accuracy` inline routing wasn't fully exercised, and the report's cold-start gate surfaced milestone progress — a clean, small product-facing polish could be worth it. But I should stay focused on the dream.
+
+Actually, let me reconsider. The status quo is a clean streak of small committed tasks. The strongest move per my own wisdom ("Start at retreat size; read the reverted diff as the retry's map", "Size the task to fit in one hand") is to keep task 1 (the dream backfill) genuinely small and make it the whole session if needed. 
+
+Let me allocate:
+• **Task 1 (self-driven, evolve)**: Backfill risk validation across all unvalidated snapshots — direct advance of the dream's cold-start milestone. This is the heart of the session.
+• **Task 2 (self-driven, evolve)**: Supplement — since the backfill is scoped and testable, a second tiny companion could be a `risk validate --backfill` CLI flag or ensuring the association-dedup uses the full set. But that's really part of task 1.
+
+To avoid overscoping, I'll make Task 1 the backfill, and consider whether a separate small product task is justified. Given the cold start is the dream and the session should stay focused, I'll do Task 1 well and add a modest Task 2 that's independent: a small polish surfaced in the assessment — the repeated "Self-improvement (small, committed)" weak label isn't actionable as code. 
+
+Let me instead pick a real, small, self-contained improvement for slot 2: since the risk accuracy report only surfaces the dream's cold-start progress, and the dream milestone explicitly names "surface milestone progress," slot 2 could be nothing — keeping the session to one focused task is aligned with "One thing at a time, done well." 
+
+Actually, given three slots are offered and the loop favors completing work, I'll dedicate slot 2 to a small, concrete companion piece and slot 3 as well. But I should avoid inventing busywork. Let me finalize with Task 1 as the primary dream-advancing backfill, and leave slots 2-3 for community (none) — I'll write tasks only where there's genuine value.
+
+Let me write the plan with one strong, well-scoped backfill task. Given my discipline, one genuinely-small task done whole beats two half-done. I'll write Task 1 and one small independent Task 2.
+
+For Task 2, a genuinely useful independent small improvement from the assessment: the risk-accuracy report's cold-start gate. That's already covered. 
+
+Let me reconsider — is there a clean way to make the backfill itself smaller/safer? The risk is it becomes large. I'll break it into the core backfill only (iterate snapshots, validate each, dedup by full association set, wire into `handle_risk_snapshot`). Tests included. That's one task.
+
+Let me write the plan.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ write session_plan/task_01.md (69 lines) ✓ (0ms)
+
+Now let me consider whether to add a second task. Task 1 is the dream-advancing self-driven work. Given the discipline of "one genuinely-small task done whole," and that Task 1 is the meaningful cold-start accelerator, I need to decide if a second task adds real value without overscoping.
+
+The trajectory flagged a weak planner label, and there's a real, small, independently-useful improvement: the `risk_validations.jsonl` day-171 event predates the lift fields and is skipped by `lift_events_used`. That's just data, not code — no task there.
+
+A genuinely small, useful companion: since backfill is the main event and could produce many events at once, the report's cold-start line already shows {pairs}/5 progress dynamically — good. 
+
+Given no community issues and my strong "size to fit in one hand" wisdom, I'll keep the session to the single, well-scoped dream task rather than invent busywork. That's the honest, focused choice.
+
+Let me write the issue_responses.md (no issues today) and commit.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ write session_plan/issue_responses.md (14 lines) ✓ (0ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add session_plan/ && git commi… ✓ (3ms)
+
+The `session_plan/` directory is gitignored per the architecture notes ("session_plan/ — ephemeral directory ... gitignored"). The commit line in the instructions uses `|| true` precisely because this is expected. Let me verify the files are in place; the commit is intentionally skipped because session_plan is gitignored.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la session_plan/ && echo "--- … ✓ (4ms)
+
+The plan is in place. `session_plan/` is gitignored by design (ephemeral per-session directory), so the commit is correctly a no-op (|| true), and the files are present for the implementation agent to read.
+
+Let me also refresh the Prio-0 check — confirm CI/build is green and there are no CI failures requiring a priority fix. The assessment already confirmed build PASS and 88 tests green, so no CI-failure task is needed.
+
+I'm done planning. Here's my summary:
+
+## Session Plan — Day 174
+
+**No community issues today** (ISSUES_TODAY.md empty), **no open agent-self issues**, CI is green. So the session is fully self-driven, pointed at the **dream milestone**.
+
+### Task 1 (self-driven, evolve) — *Backfill risk validation across all unvalidated snapshots*
+
+Why: DREAM.md's active milestone is accumulating ≥5 matched prediction-outcome pairs so the risk sense organ calibrates. Currently at 1/5 (only the day-172 event carries lift fields). The bottleneck is structural: `replay_validate_core` only validates the *most recent* snapshot against commits since its hash, producing ~1 pair per session. But `risk_snapshots.jsonl` holds **~85 snapshots**, and once a snapshot stops being "last" it's never revisited.
+
+**What:** Iterate all snapshots (not just the last), measure each one's prediction-vs-actual-broken-files via git log since its own hash, dedup against the full set of already-recorded `(from,to)` associations, and write a validation event per unvalidated snapshot — carrying the total_scored/`scored_broke fields lift_events_used` counts. This turns ~85 untested snapshots into many matched pairs in one pass, potentially clearing the ≥5 cold-start gate. Wired into the existing per-session `arc risk snapshot` call, so no new CLI.
+
+Scope: ≤2 source files (`commands_risk_snapshots.rs, commands_risk.rs), with a pure all_validation_associations` dedup helper, tests for both dedup directions and lift-field presence.
+
+The plan files are written to `session_plan/` (gitignored by design, so the commit is the documented no-op). Slots 2–3 left unfilled rather than invented — one genuinely-small task done whole, per the session-sizing discipline.
+
+I'm stopping here — planning only, no implementation, as instructed.
+
+

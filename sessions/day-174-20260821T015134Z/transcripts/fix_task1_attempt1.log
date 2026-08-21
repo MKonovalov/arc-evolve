@@ -1,0 +1,628 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+I'll start by examining the current state of the relevant files to understand what exists and what needs to be completed.
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && echo "---S…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs ✓ (6ms)
+ ✓ (9ms)
+  2 tools completed in 663ms (2 ✓)
+
+Let me look at the full relevant sections of the snapshots file and the commands_risk file.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:88..508 ✓ (2ms)
+
+Let me see the middle section of the snapshots file (lines 185-458) to understand the existing helpers.
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:185..465 ✓ (2ms)
+
+Now let me look at the `replay_validate_core, replay_validate_last_snapshot, compute_validation, and handle_risk_snapshot` functions in `commands_risk.rs`.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_core\|rep… ✓ (5ms)
+
+Let me read the key sections of commands_risk.rs: the replay_validate functions (2100-2420) and handle_risk_snapshot (1250-1300) and handle_risk (950-980).
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1256..1376 ✓ (1ms)
+
+Now let me read the replay_validate_core and replay_validate_last_snapshot sections (2100-2420).
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2100..2420 ✓ (2ms)
+
+Now I have a good understanding. Let me check the imports at the top of commands_risk.rs and how `compute_validation, classify_broke_files, parse_git_log_name_only`, and `load_validation_associations` are used.
+
+Let me look at the imports (lines 1-30) and the `compute_validation` signature.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (30 lines) ✓ (1ms)
+
+Now let me look at `compute_validation` and its return type `ValidationResult`, plus `classify_broke_files and parse_git_log_name_only`.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1840..1970 ✓ (1ms)
+
+Now I understand the structure. Let me design the backfill function. The plan:
+
+1. Add a pure helper `backfill_replay_validate` (or reuse `replay_validate_core`) that iterates over all snapshots. Since `replay_validate_core` only handles the last snapshot, I'll write a sibling `backfill_replay_validate_all` that:
+   • Reads all snapshots
+   • Reads all validation associations (dedup)
+   • Runs `git log <hash>..HEAD` for each snapshot not already recorded as a validated from
+   • Computes validation and writes event
+   • Returns a count of recorded events
+
+Let me look at how the existing tests for replay_validate_core are structured to match the design (especially `test_replay_validate_core_persists_lift_measurement` at line 4190).
+
+Let me check the existing tests and the `classify_broke_files, parse_git_log_name_only, is_scored_file` helpers.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:4105..4235 ✓ (1ms)
+
+Let me look at the test helpers (snapshot_jsonl, git_log_output, `temp_validation_file`) used in tests.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn snapshot_jsonl\|fn git… ✓ (3ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:4066..4111 ✓ (1ms)
+
+Now I have a complete picture. Let me design my implementation.
+
+The task asks me to:
+1. Add `all_validation_associations` - already done (in snapshots.rs, lines 194-228)
+2. Refactor/backfill in `commands_risk.rs` - iterate ALL snapshots, dedup against full association set, write events with lift fields.
+3. Wire the backfill into `handle_risk_snapshot` before recording.
+
+Since `replay_validate_core` already writes lift fields and dedups by `last_validation_association`, my design is to write a `backfill_replay_validate_all` function that iterates each snapshot, and for each non-empty-predicted snapshot whose git_hash is NOT already a validated from, run git log and call a per-snapshot core routine.
+
+The cleanest approach: create a new function that does the backfill using `load_validation_associations` for the full dedup set, and iterates all snapshots. For each unvalidated snapshot, run git log and compute/write.
+
+Let me think about how to reuse `replay_validate_core`. The issue is `replay_validate_core` only takes ONE snapshot (it takes `snapshot_content` and does `snapshots.last()`). I could refactor `replay_validate_core` to accept an explicit snapshot, OR write a sibling `backfill_replay_validate_all`.
+
+The task says: "Refactor `replay_validate_core` (or add a sibling `backfill_replay_validate`)". I'll add a sibling function that loops. But to avoid duplication of the per-snapshot write logic, I'll refactor `replay_validate_core` to have an inner helper that operates on a single snapshot. Let me refactor.
+
+Let me refactor `replay_validate_core` to extract a per-snapshot core, then `replay_validate_core` becomes a thin wrapper, and add `backfill_replay_validate_all`.
+
+Let me design:
+
+```rust
+fn replay_validate_one(
+    last: &ParsedSnapshot,
+    git_log: &str,
+    all_ranked: Option<&[String]>,
+    validation_path: &std::path::Path,
+    head_hash: &str,
+) -> Option<ReplayValidated>
+```
+
+Actually the current `replay_validate_core` uses `snapshots.last()`. Let me refactor so that `replay_validate_core` parses snapshots, gets last, then delegates to `replay_validate_one`. Then backfill iterates over all snapshots, calling `replay_validate_one` for each with its own git log, deduped against full association set.
+
+But there's a subtlety: `replay_validate_one` currently dedups using `last_validation_association` (only last). For backfill I need dedup against the full set before calling. So in the backfill loop, I'll check the full association set before calling `replay_validate_one. Also replay_validate_one` has its own dedup check against last — but that check is fine to keep; it won't double-record because we already check the full set. Actually, calling `replay_validate_one` re-reads the file's last association each time. Since backfill writes new events, the last association changes. The internal dedup checks `from == last.git_hash && to == head_hash` — if that specific span was already recorded it won't re-record. That's exactly what we want. Good.
+
+Let me write the refactor. I'll change `replay_validate_core` to delegate to a new `replay_validate_one`.
+
+Let me implement `replay_validate_one` by extracting the body of `replay_validate_core` after the `last` extraction. Then:
+
+```rust
+fn replay_validate_core(
+    snapshot_content: &str,
+    git_log: &str,
+    all_ranked: Option<&[String]>,
+    validation_path: &std::path::Path,
+    head_hash: &str,
+) -> Option<ReplayValidated> {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let last = snapshots.last()?;
+    if last.predicted.is_empty() {
+        return None;
+    }
+    if git_log.trim().is_empty() {
+        return None;
+    }
+    replay_validate_one(&last, git_log, all_ranked, validation_path, head_hash)
+}
+```
+
+Wait, but `replay_validate_one` also needs the empty-predicted and empty-git-log checks? The original `replay_validate_core` checks both before `compute_validation`. I kept those checks in `replay_validate_core` wrapper. For the backfill, I'll call `replay_validate_one` directly after checking predicted non-empty and git log non-empty within the loop.
+
+Let me write `replay_validate_one` to contain the compute + write logic (mirroring current `replay_validate_core` body from the `parse_git_log_name_only` onward). Let me keep the empty-git-log and empty-predicted checks in the caller(s) rather than duplicating in `replay_validate_one`, to match tests. Actually, the existing tests call `replay_validate_core` with empty log expecting None, and empty predictions expecting None. So I keep those checks in `replay_validate_core` wrapper. Good.
+
+Now let me implement:
+
+```rust
+/// Core replay for a single snapshot (shared by `replay_validate_core` and the
+/// backfill loop). Parses the git log, classifies breakage, computes validation,
+/// and (deduped) writes a lift-carrying validation event.
+fn replay_validate_one(
+    snapshot: &crate::commands_risk_snapshots::ParsedSnapshot,
+    git_log: &str,
+    all_ranked: Option<&[String]>,
+    validation_path: &std::path::Path,
+    head_hash: &str,
+) -> Option<ReplayValidated> {
+    // Parse commits and classify breakage
+    let entries = parse_git_log_name_only(git_log);
+    let commit_count = entries.len();
+    let broke_files = classify_broke_files(&entries);
+
+    let result = compute_validation(&snapshot.predicted, &broke_files, all_ranked, commit_count);
+
+    let hits: Vec<String> = result.hits.clone();
+    let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();
+
+    let total_scored = all_ranked.map(|ranked| ranked.len());
+    let scored_broke = if hits.is_empty() && surprises.is_empty() {
+        None
+    } else {
+        Some(hits.len() + surprises.len())
+    };
+
+    let mut recorded = false;
+    if !hits.is_empty() || !surprises.is_empty() {
+        let already = last_validation_association(validation_path)
+            .is_some_and(|(from, to)| from == snapshot.git_hash && to == head_hash);
+        if !already {
+            let total_changed = hits.len() + surprises.len();
+            let accuracy_pct = if total_changed > 0 {
+                (hits.len() as f64 / total_changed as f64) * 100.0
+            } else {
+                0.0
+            };
+            let accuracy_pct_rounded = (accuracy_pct * 10.0).round() / 10.0;
+            if let Err(e) = write_validation_event(
+                validation_path,
+                snapshot.day as u32,
+                "replay",
+                snapshot.predicted.len(),
+                &hits,
+                &surprises,
+                accuracy_pct_rounded,
+                &snapshot.git_hash,
+                head_hash,
+                total_scored,
+                scored_broke,
+            ) {
+                eprintln!("  {DIM}(warning: could not record risk validation event: {e}){RESET}");
+            } else {
+                recorded = true;
+            }
+        }
+    }
+
+    Some(ReplayValidated {
+        day: snapshot.day,
+        git_hash: snapshot.git_hash.clone(),
+        head_hash: head_hash.to_string(),
+        predicted: snapshot.predicted.clone(),
+        result,
+        recorded,
+    })
+}
+```
+
+Then `replay_validate_core` delegates.
+
+Now the backfill function:
+
+```rust
+/// Backfill: validate EVERY unvalidated risk snapshot (not just the last) by
+/// replaying each one's predictions against commits since its git_hash.
+///
+/// This is the cold-start unblock for the dream's prediction-meter gate: the
+/// `.arc/risk_snapshots.jsonl` file accumulates ~85 snapshots, but until now
+/// only the most recent was ever replayed, so each session produced at most one
+/// new matched pair. Backfilling turns all accumulated unvalidated snapshots
+/// into matched pairs in a single pass.
+///
+/// Dedup invariance: a snapshot-span already recorded as a validated `from`
+/// association (per the full association set) is skipped — never double-counted.
+/// Each snapshot without a recorded association, non-empty predictions, and
+/// non-empty git log since its hash gets a lift-carrying validation event
+/// (trigger "replay", `total_scored`/`scored_broke` set). Returns the number of
+/// events recorded. Unvalidated snapshots that have no commits since them are
+/// skipped (nothing to validate yet — they become valid once new commits land).
+fn backfill_replay_validate() -> usize {
+    let content = match std::fs::read_to_string(RISK_SNAPSHOT_PATH) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return 0,
+    };
+    let snapshots = parse_all_snapshots(&content);
+    let validation_path = std::path::Path::new(RISK_VALIDATION_PATH);
+
+    // Full dedup set: every (from,to) span already recorded.
+    let recorded_from: std::collections::HashSet<String> =
+        load_validation_associations(validation_path)
+            .into_iter()
+            .map(|(from, _)| from)
+            .collect();
+
+    let all_risks = compute_file_risk_scores();
+    let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
+    let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
+
+    let mut recorded = 0;
+    for snap in &snapshots {
+        if snap.predicted.is_empty() {
+            continue;
+        }
+        // Dedup: skip already-validated spans.
+        if recorded_from.contains(&snap.git_hash) {
+            continue;
+        }
+        if snap.git_hash == "unknown" {
+            continue;
+        }
+        let log_output = match crate::git::run_git(&[
+            "log",
+            &format!("{}..HEAD", snap.git_hash),
+            "--name-only",
+            "--oneline",
+        ]) {
+            Ok(o) if !o.trim().is_empty() => o,
+            _ => continue, // no commits since this snapshot (nothing to validate yet)
+        };
+        if let Some(v) = replay_validate_one(
+            snap,
+            &log_output,
+            Some(&all_ranked),
+            validation_path,
+            &head_hash,
+        ) {
+            if v.recorded {
+                recorded += 1;
+            }
+        }
+    }
+    recorded
+}
+```
+
+Now wire into `handle_risk_snapshot` before the last-snapshot call. Let me add a call to `backfill_replay_validate()` at the start of `handle_risk_snapshot`.
+
+Now the task requires a pure, testable dedup test — "given synthetic snapshots + a validation file that already records one span, the backfill correct dedups". Since the backfill does I/O and git, I should structure a testable inner function. Let me make a testable version that takes snapshot content, validation path, and a git-log provider closure, so I can test with synthetic data without touching the real repo.
+
+Let me refactor backfill to have an inner `backfill_replay_validate_with` that takes snapshot content, a closure `git_log_for: &dyn Fn(&str) -> Option<String>` returning git log for a given hash, and the all_ranked + head_hash. This lets tests inject synthetic git logs.
+
+Let me design:
+
+```rust
+fn backfill_replay_validate_with<F>(
+    snapshot_content: &str,
+    validation_path: &std::path::Path,
+    all_ranked: &[String],
+    head_hash: &str,
+    git_log_for: &F,
+) -> usize
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let recorded_from: std::collections::HashSet<String> =
+        load_validation_associations(validation_path)
+            .into_iter()
+            .map(|(from, _)| from)
+            .collect();
+
+    let mut recorded = 0;
+    for snap in &snapshots {
+        if snap.predicted.is_empty() || snap.git_hash == "unknown" {
+            continue;
+        }
+        if recorded_from.contains(&snap.git_hash) {
+            continue; // dedup: skip already-validated spans
+        }
+        let log_output = match git_log_for(&snap.git_hash) {
+            Some(o) if !o.trim().is_empty() => o,
+            _ => continue,
+        };
+        if let Some(v) = replay_validate_one(
+            snap,
+            &log_output,
+            Some(all_ranked),
+            validation_path,
+            head_hash,
+        ) {
+            if v.recorded {
+                recorded += 1;
+            }
+        }
+    }
+    recorded
+}
+
+fn backfill_replay_validate() -> usize {
+    let content = match std::fs::read_to_string(RISK_SNAPSHOT_PATH) {
+        Ok(c) if !c.trim().is_empty() => c,
+        _ => return 0,
+    };
+    let all_risks = compute_file_risk_scores();
+    let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();
+    let head_hash = crate::git::run_git(&["rev-parse", "--short", "HEAD"])
+        .unwrap_or_else(|_| "HEAD".to_string())
+        .trim()
+        .to_string();
+    backfill_replay_validate_with(
+        &content,
+        std::path::Path::new(RISK_VALIDATION_PATH),
+        &all_ranked,
+        &head_hash,
+        &|hash| {
+            crate::git::run_git(&[
+                "log",
+                &format!("{hash}..HEAD"),
+                "--name-only",
+                "--oneline",
+            ])
+            .ok()
+        },
+    )
+}
+```
+
+There's a subtle issue with `replay_validate_one`'s internal dedup: it checks `last_validation_association` which re-reads the file each time. When backfilling multiple snapshots, after writing one event, the next snapshot's `replay_validate_one` dedup check reads the last association. If a later snapshot happens to have the same `from.hash/to` as the just-written one, it'd skip — but that's correct (dedup). And the `recorded_from` set won't include the just-written snapshot's hash (it was computed before the loop), but `replay_validate_one`'s internal last-association check covers that too since it re-reads. Actually wait — for the SAME snapshot in the loop, the internal check in `replay_validate_one` checks `from == last.git_hash && to == head_hash` against the last association. Since a given hash only appears once in the loop (snapshots are distinct), and we already pre-filtered by `recorded_from`, there's no double counting. The internal check is a redundant safety net. Good.
+
+Now for the test of dedup, I want to verify no duplicate (from,to) associations are written. Let me write a test using backfill_replay_validate_with with synthetic snapshots (multi-line JSONL), a validation file pre-seeded with one span, and a git_log_for closure.
+
+Let me now also handle the `recorded_from` dedup test: seed a validation file with one span (from hashA), and have snapshots hashA + hashB. The backfill should skip hashA (already recorded), validate hashB. Verify one new event written, no duplicates.
+
+Let me also update CLAUDE.md.
+
+Now let me implement. First, edit `replay_validate_core to extract replay_validate_one`.
+
+Let me make the edits.
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (26 → 7 lines)
+        all_ranked: Option<&[String]>,
+        validation_path: &std::path::Path,
+        head_hash: &str,
+  - ) -> Option<ReplayValidated> {
+  -     // Load the most recent snapshot
+  -     let snapshots = parse_all_snapshots(snapshot_content);
+  -     let last = snapshots.last()?;
+  -     if last.predicted.is_empty() {
+  -         return None;
+  -     }
+  - 
+  -     // Nothing to validate if there are no commits since the snapshot.
+  -     if git_log.trim().is_empty() {
+  -         return None;
+  -     }
+  - 
+  -     // Parse commits and classify breakage
+  -     let entries = parse_git_log_name_only(git_log);
+  -     let commit_count = entries.len();
+  -     let broke_files = classify_broke_files(&entries);
+  ... (4 more lines)
+ ✓ (1ms)
+        all_ranked: Option<&[String]>,
+        validation_path: &std::path::Path,
+        head_hash: &str,
+  - ) -> Option<ReplayValidated> {
+  -     // Load the most recent snapshot
+  -     let snapshots = parse_all_snapshots(snapshot_content);
+  -     let last = snapshots.last()?;
+  -     if last.predicted.is_empty() {
+  ... (13 more lines)
+
+Now I need to add the delegation body inside `replay_validate_core` (after the opening brace) and add the `replay_validate_one` function. Let me view the current state around that area.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2213..2303 ✓ (1ms)
+
+I see the previous edit removed the body's opening and the last-snapshot retrieval. Now the function body is broken. I need to rewrite the whole `replay_validate_core` into a delegation + add `replay_validate_one`. Let me replace the entire broken section (lines 2232-2302).
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (71 → 198 lines)
+        all_ranked: Option<&[String]>,
+        validation_path: &std::path::Path,
+        head_hash: &str,
+  - ) -> Option<ReplayValidated>
+  + ) -> Option<ReplayValidated> {
+  +     // Load the most recent snapshot
+  +     let snapshots = parse_all_snapshots(snapshot_content);
+  +     let last = snapshots.last()?;
+  +     if last.predicted.is_empty() {
+  +         return None;
+  +     }
+  + 
+  +     // Nothing to validate if there are no commits since the snapshot.
+  +     if git_log.trim().is_empty() {
+  +         return None;
+  +     }
+  + 
+  +     // Delegate the compute + (deduped) persist to the single-snapshot core.
+  +     replay_validate_one(&last, git_log, all_ranked, validation_path, head_hash)
+  + }
+  ... (156 more lines)
+ ✓ (1ms)
+        all_ranked: Option<&[String]>,
+        validation_path: &std::path::Path,
+        head_hash: &str,
+  - ) -> Option<ReplayValidated>
+  + ) -> Option<ReplayValidated> {
+  +     // Load the most recent snapshot
+  +     let snapshots = parse_all_snapshots(snapshot_content);
+  +     let last = snapshots.last()?;
+  ... (13 more lines)
+
+Now I need to wire the backfill into `handle_risk_snapshot`. Let me update it to run the backfill first (before the last-snapshot validation and before recording the new snapshot).
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (9 → 21 lines)
+    fn handle_risk_snapshot() {
+  +     // Backfill-validate EVERY unvalidated snapshot FIRST (not just the last).
+  +     // This is the dream's cold-start unblock: the ~85 accumulated snapshots
+  +     // become many matched prediction-outcome pairs in one pass, deduped so no
+  +     // recorded span is ever double-counted. Each backfilled event carries
+  +     // total_scored/scored_broke, so it counts toward the lift gate.
+  +     let backfilled = backfill_replay_validate();
+  +     if backfilled > 0 {
+  +         println!(
+  +             "  {DIM}📊 Risk backfill: validated {backfilled} previously-unvalidated snapshot(s){RESET}"
+  +         );
+  +     }
+  + 
+        // Validate the PRIOR snapshot against commits since its git_hash BEFORE
+        // writing the new one. Order matters: replay_validate_last_snapshot treats
+        // the currently-last snapshot as the prediction and replays it against
+ ✓ (1ms)
+    fn handle_risk_snapshot() {
+  +     // Backfill-validate EVERY unvalidated snapshot FIRST (not just the last).
+  +     // This is the dream's cold-start unblock: the ~85 accumulated snapshots
+  +     // become many matched prediction-outcome pairs in one pass, deduped so no
+  +     // recorded span is ever double-counted. Each backfilled event carries
+  +     // total_scored/scored_broke, so it counts toward the lift gate.
+  +     let backfilled = backfill_replay_validate();
+  +     if backfilled > 0 {
+  ... (8 more lines)
+
+Now let me add tests. I'll add tests for `backfill_replay_validate_with` covering dedup. Let me add them in the test module after the existing `test_replay_validate_core_distinct_hash_records_each` test. Let me view that area to find a good insertion point.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:4420..4520 ✓ (1ms)
+
+Let me see the rest of this test to understand the structure and find an insertion point after it.
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:4519..4549 ✓ (1ms)
+
+Now let me add tests for the backfill dedup before line 4528 (the closing brace of the test module). I'll insert after the `test_risk_snapshot_validate_accumulation_tmpdir` test (which ends at line 4527).
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (3 → 171 lines)
+  +         let _ = std::fs::remove_dir_all(dir);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_backfill_replay_validate_dedups_and_records_lift() {
+  +         // Lock in the core backfill invariant: given synthetic snapshots + a
+  +         // validation file that already records one span, the backfill skips the
+  +         // recorded span (dedup) and validates the rest — and every new event
+  +         // carries the lift fields (total_scored/scored_broke), so it counts
+  +         // toward `lift_events_used`. No (from,to) association may be duplicated.
+  +         //
+  +         // Three snapshots:
+  +         //   snapA — already recorded as a validated `from` → must be SKIPPED.
+  +         //   snapB — unvalidated; a fix commit touches its predicted file → hit.
+  +         //   snapC — unvalidated; no commits since its hash → nothing to validate.
+  +         let snapshots = format!(
+  +             "{}\n{}\n{}",
+  +             snapshot_jsonl("snapA", 170, &["src/mod_a.rs"]),
+  +             snapshot_jsonl("snapB", 171, &["src/mod_b.rs"]),
+  +             snapshot_jsonl("snapC", 172, &["src/mod_c.rs"]),
+  ... (151 more lines)
+ ✓ (1ms)
+  +         let _ = std::fs::remove_dir_all(dir);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_backfill_replay_validate_dedups_and_records_lift() {
+  +         // Lock in the core backfill invariant: given synthetic snapshots + a
+  +         // validation file that already records one span, the backfill skips the
+  +         // recorded span (dedup) and validates the rest — and every new event
+  ... (13 more lines)
+
+Now let me update CLAUDE.md's `commands_risk_snapshots.rs` bullet to add a sentence about the backfill-validate-all behavior. Let me find that bullet.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_after_failu… ✓ (3ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ search 'Both meter halves are CLI-callable' in /home/runner/work/arc-evolve/arc-evolve/CLAUDE.md ✓ (2ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/CLAUDE.md (1 → 1 lines)
+  - Both meter halves are CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence.
+  + Both meter halves are CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence. Since Day 174 the `arc risk snapshot` flow also runs a `backfill_replay_validate()` first (before writing the new snapshot): it iterates EVERY unvalidated snapshot (not just the last) and replays each one's predictions against commits since its git_hash, deduped against the full association set (`load_validation_associations` — every recorded `from` span is skipped so a snapshot-span is never double-counted) and writing each new event with `total_scored`/`scored_broke` lift fields so it counts toward the dream's lift gate — this turns the ~85 accumulated snapshots into many matched pairs at once, unblocking the cold-start. The existing last-snapshot replay then runs as before (dedup makes double-counting impossible).
+ ✓ (1ms)
+  - Both meter halves are CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence.
+  + Both meter halves are CLI-callable AND recording (`arc risk snapshot`; `arc risk validate`), enabling a human-approved automated cadence. Since Day 174 the `arc risk snapshot` flow also runs a `backfill_replay_validate()` first (before writing the new snapshot): it iterates EVERY unvalidated snapshot (not just the last) and replays each one's predictions against commits since its git_hash, deduped against the full association set (`load_validation_associations` — every recorded `from` span is skipped so a snapshot-span is never double-counted) and writing each new event with `total_scored`/`scored_broke` lift fields so it counts toward the dream's lift gate — this turns the ~85 accumulated snapshots into many matched pairs at once, unblocking the cold-start. The existing last-snapshot replay then runs as before (dedup makes double-counting impossible).
+
+Now let me build and run the tests. Let me first check that `ParsedSnapshot` field access works in `replay_validate_one` — it uses `snapshot.day, snapshot.git_hash, snapshot.predicted`. Let me run the build.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -30 ✓ (8.3s)
+
+Build succeeds but there's an unused import warning for `all_validation_associations` in the non-test code (it's only used in tests now). Wait — actually it was already imported before. Let me check: `all_validation_associations` is used in my new tests but not in non-test code. Since it's a `pub(crate) use` re-export, the unused warning triggers because it's not referenced in non-test code within this module.
+
+Actually, wait — the re-export `pub(crate) use` makes it available to the crate but the warning says it's unused in this module's non-test code. Let me check if I should remove it from the import or keep it. The original task said `all_validation_associations` was "re-exported but never called" — that was flagged as dead code. Now I actually use it in tests. The clippy with -D warnings will fail on this unused import.
+
+Let me check: the import at line 13 lists `all_validation_associations`. Since it's only used in tests now, the non-test build warns. I should remove it from the non-test import list since tests use `super::*`. Let me remove it from the import.
+
+Let me check what's actually used in non-test code. `all_validation_associations` — used only in my new tests. `load_validation_associations` — used in `backfill_replay_validate_with` (non-test). So I need to keep `load_validation_associations` import but remove `all_validation_associations`.
+
+Wait, but the task evaluator earlier flagged that `all_validation_associations/load_validation_associations` were "dead code (re-exported but never called)". Now `load_validation_associations is used, and all_validation_associations` is used in tests (which access via super::*, not the import). So removing `all_validation_associations` from the `pub(crate) use` line... but it's a re-export. Is `all_validation_associations` needed by anything else in the crate? Let me search.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "all_validation_associati… ✓ (6ms)
+
+It's only used in tests (lines 4611, 4689) which come from `super::*` — wait, actually `super::*` includes the re-exported name `all_validation_associations` because it's `pub(crate) use`-re-exported at module level. So tests access it via super::* regardless of whether it's in the `use statement. The use` statement at line 13 is for the non-test module scope.
+
+So I can remove `all_validation_associations` from line 13's use statement — but then the tests would still get it via super::* because the re-export... wait no. `super::*` in tests means `use super::*` which brings in items in the parent module's namespace, including those brought in by `use crate::commands_risk_snapshots::{...}`. If I remove it from that use statement, it won't be in `commands_risk`'s namespace anymore, and tests won't see it.
+
+But `all_validation_associations` is still defined in `commands_risk_snapshots.rs` and tests there test it directly. For the tests in `commands_risk.rs`, I could either keep the import (with #[allow]) or reference it fully-qualified. 
+
+The cleanest: keep `all_validation_associations` re-exported but it's genuinely now used by tests. The unused-import warning is because non-test code doesn't use it. Options:
+1. Remove from the `use` list, and in my tests call `crate::commands_risk_snapshots::all_validation_associations` directly.
+2. Keep it in the use list with an allow.
+
+The original code had it in the use list and it was flagged as dead (unused entirely). Now it's used by tests. But the non-test warning persists. Let me just remove it from the use statement and use fully-qualified path in tests. Actually, simpler: since tests use `super::*`, and the re-export is `pub(crate) use`, I can keep it available to tests by having tests reference the snapshots module directly. Let me remove it from line 13 import and update my two test usages to use the full path.
+
+Actually, wait — the simpler and more honest approach given the task's framing: `all_validation_associations` is a helper that belongs in the snapshots module (where it's tested) and is re-exported for external use. Since it's only used by tests now within commands_risk, let me just use the fully-qualified path in tests and remove it from the non-test import. Let me update.
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (7 → 7 lines)
+    pub(crate) use crate::commands_risk_snapshots::{
+  -     all_validation_associations, auto_risk_snapshot, auto_validate_after_failure,
+  -     build_risk_snapshot_json, last_validation_association, load_validation_associations,
+  -     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  -     risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  -     RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  +     last_validation_association, load_validation_associations, load_validation_history_from,
+  +     parse_all_snapshots, parse_validation_events, risk_autosnapshot_enabled,
+  +     write_risk_snapshot_to, write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH,
+  +     RISK_VALIDATION_PATH,
+    };
+ ✓ (1ms)
+    pub(crate) use crate::commands_risk_snapshots::{
+  -     all_validation_associations, auto_risk_snapshot, auto_validate_after_failure,
+  -     build_risk_snapshot_json, last_validation_association, load_validation_associations,
+  -     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  -     risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  -     RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  +     last_validation_association, load_validation_associations, load_validation_history_from,
+  ... (4 more lines)
+
+

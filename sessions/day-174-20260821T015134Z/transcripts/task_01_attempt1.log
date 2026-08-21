@@ -1,0 +1,290 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status ✓ (7ms)
+
+Let me examine the relevant code in the two files.
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_last_snap… ✓ (3ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '150,220p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '220,300p' src/commands_ris… ✓ (3ms)
+
+Now let me look at the `parse_all_snapshots and ParsedSnapshot and last_validation_pair` fully:
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '180,200p' src/commands_ris… ✓ (4ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '300,480p' src/commands_ris… ✓ (4ms)
+
+Now let me look at the `ValidationEvent` git_hash fields — I notice parsed events store hits, but not git_hash. Let me look at how `git_hash_from` is accessed later and check the `replay_validate_core` in commands_risk.rs.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_core\|rep… ✓ (3ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2214,2410p' src/commands_r… ✓ (4ms)
+
+Now let me look at how `handle_risk_snapshot` calls these (line 1257 area) and understand the run_git usage. Let me look at the test harness and how `replay_validate_core tests pass a snapshot_content` string.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1230,1290p' src/commands_r… ✓ (3ms)
+
+Now I understand the structure. Let me look at the `run_git` usage and how `replay_validate_core` tests look, plus `compute_validation` and ReplayValidated:
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1839,1900p' src/commands_r… ✓ (4ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2198,2214p' src/commands_r… ✓ (3ms)
+
+Now I understand the current architecture well. Let me plan the implementation:
+
+1. Add `all_validation_associations(content) in src/commands_risk_snapshots.rs` - parses every (from,to) pair from the validation JSONL.
+2. Add a `backfill_replay_validate` sibling in `commands_risk.rs` that iterates over ALL snapshots, dedups against already-validated associations, and validates each.
+3. Wire the backfill into `handle_risk_snapshot` (before the last-snapshot validation).
+
+Let me look at the existing tests in commands_risk_snapshots.rs for association handling:
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '480,620p' src/commands_ris… ✓ (4ms)
+
+Let me look at the existing test for `last_validation_pair` and how it's used, and check the existing replay_validate_core tests in commands_risk.rs more closely:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "last_validation_pair\|las… ✓ (3ms)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1020,1060p' src/commands_r… ✓ (3ms)
+
+Now let me look at the existing `replay_validate_core` tests to understand testing patterns, and the `lift_events_used` function to be sure of the field requirements:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "lift_events_used" src/com… ✓ (3ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "lift_events_used" src/com… ✓ (2ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '145,200p' src/commands_ris… ✓ (3ms)
+
+I have a full understanding now. A lift-carrying event requires `predicted_count` (always set), `total_scored`, and `scored_broke` to be present. `scored_broke` is only set to Some when hits or surprises non-empty. Good.
+
+Now let me plan the implementation. I'll:
+
+1. In `commands_risk_snapshots.rs: add all_validation_associations(content)` public helper + a `validation_associations(content)` internal pure function + tests.
+2. In `commands_risk.rs`: add a backfill_replay_validate function that iterates all snapshots, dedups, validates each. Refactor the per-snapshot body into a helper so both `replay_validate_core` and the backfill share it.
+3. Wire backfill into `handle_risk_snapshot`.
+
+Let me design the refactoring. Currently `replay_validate_core takes snapshot_content`, git_log, all_ranked, `validation_path, head_hash`, and internally picks `.last()`. I'll refactor to extract a per-snapshot function `validate_one_snapshot(snapshot, git_log, all_ranked, validation_path, head_hash, associations) that returns Option<ReplayValidated>` and does the dedup against the full association set.
+
+Then:
+• `replay_validate_core` = load last snapshot, call `validate_one_snapshot` with the full association set.
+• `backfill_replay_validate` = iterate all snapshots, for each not-deduped, run git log, call `validate_one_snapshot`.
+
+Let me look at the `parse_git_log_name_only` signature and `is_scored_file`:
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_git_log_name_onl… ✓ (3ms)
+
+Now let me start implementing. First, the `all_validation_associations helper in commands_risk_snapshots.rs`:
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (8 → 49 lines)
+        let from = v.get("git_hash_from")?.as_str()?.to_string();
+        let to = v.get("git_hash_to")?.as_str()?.to_string();
+        Some((from, to))
+  + }
+  + 
+  + /// Parse every `(git_hash_from, git_hash_to)` association from the validation
+  + /// JSONL content, skipping malformed lines. Unlike `last_validation_pair`
+  + /// (which only returns the most recent span), this collects ALL recorded spans
+  + /// so the backfill validator can dedup against every already-validated
+  + /// snapshot without double-counting any of them.
+  + pub(crate) fn all_validation_associations(content: &str) -> Vec<(String, String)> {
+  +     let mut pairs = Vec::new();
+  +     for line in content.lines() {
+  +         let trimmed = line.trim();
+  +         if trimmed.is_empty() {
+  +             continue;
+  +         }
+  +         let v: serde_json::Value = match serde_json::from_str(trimmed) {
+  +             Ok(v) => v,
+  +             Err(_) => continue, // skip malformed lines
+  ... (25 more lines)
+ ✗ (174ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs.
+
+The comment is "double-count" not "Double-count". Let me fix:
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (8 → 49 lines)
+        let from = v.get("git_hash_from")?.as_str()?.to_string();
+        let to = v.get("git_hash_to")?.as_str()?.to_string();
+        Some((from, to))
+  + }
+  + 
+  + /// Parse every `(git_hash_from, git_hash_to)` association from the validation
+  + /// JSONL content, skipping malformed lines. Unlike `last_validation_pair`
+  + /// (which only returns the most recent span), this collects ALL recorded spans
+  + /// so the backfill validator can dedup against every already-validated
+  + /// snapshot without double-counting any of them.
+  + pub(crate) fn all_validation_associations(content: &str) -> Vec<(String, String)> {
+  +     let mut pairs = Vec::new();
+  +     for line in content.lines() {
+  +         let trimmed = line.trim();
+  +         if trimmed.is_empty() {
+  +             continue;
+  +         }
+  +         let v: serde_json::Value = match serde_json::from_str(trimmed) {
+  +             Ok(v) => v,
+  +             Err(_) => continue, // skip malformed lines
+  ... (25 more lines)
+ ✓ (0ms)
+        let from = v.get("git_hash_from")?.as_str()?.to_string();
+        let to = v.get("git_hash_to")?.as_str()?.to_string();
+        Some((from, to))
+  + }
+  + 
+  + /// Parse every `(git_hash_from, git_hash_to)` association from the validation
+  + /// JSONL content, skipping malformed lines. Unlike `last_validation_pair`
+  + /// (which only returns the most recent span), this collects ALL recorded spans
+  ... (13 more lines)
+
+Now let me add tests for `all_validation_associations`. Let me add them after the `test_last_validation_pair_missing_field` test:
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (9 → 48 lines)
+                last_validation_pair(jsonl),
+                None,
+                "missing from/to fields → None"
+  +         );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_all_validation_associations_returns_all_pairs() {
+  +         let jsonl = "{\"day\":1,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"bbb\"}\n{\"day\":2,\"git_hash_from\":\"aaa\",\"git_hash_to\":\"ccc\"}\n{\"day\":3,\"git_hash_from\":\"ddd\",\"git_hash_to\":\"eee\"}";
+  +         assert_eq!(
+  +             all_validation_associations(jsonl),
+  +             vec![
+  +                 ("aaa".to_string(), "bbb".to_string()),
+  +                 ("aaa".to_string(), "ccc".to_string()),
+  +                 ("ddd".to_string(), "eee".to_string()),
+  +             ],
+  +             "should return ALL (from,to) pairs, not just the last"
+  +         );
+  +     }
+  + 
+  ... (24 more lines)
+ ✓ (0ms)
+                last_validation_pair(jsonl),
+                None,
+                "missing from/to fields → None"
+  +         );
+  +     }
+  + 
+  +     #[test]
+  +     fn test_all_validation_associations_returns_all_pairs() {
+  ... (13 more lines)
+
+Now let's refactor `commands_risk.rs`. First, let me look at the imports at top:
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,40p' src/commands_risk.r… ✓ (3ms)
+
+I need to add `all_validation_associations and load_validation_associations` to the re-export. Let me update the import:
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (6 → 7 lines)
+    pub(crate) use crate::commands_risk_snapshots::{
+  -     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  -     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  -     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     all_validation_associations, auto_risk_snapshot, auto_validate_after_failure,
+  +     build_risk_snapshot_json, last_validation_association, load_validation_associations,
+  +     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  +     risk_autosnapshot_enabled, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  +     RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    };
+ ✓ (1ms)
+    pub(crate) use crate::commands_risk_snapshots::{
+  -     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  -     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  -     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     all_validation_associations, auto_risk_snapshot, auto_validate_after_failure,
+  +     build_risk_snapshot_json, last_validation_association, load_validation_associations,
+  +     load_validation_history_from, parse_all_snapshots, parse_validation_events,
+  ... (3 more lines)
+
+Now let me refactor `replay_validate_core` to extract a per-snapshot helper and add the backfill. Let me replace the `replay_validate_core` function with a shared per-snapshot body plus the backfill function:
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (94 → 200 lines)
+        let snapshots = parse_all_snapshots(snapshot_content);
+        let last = snapshots.last()?;
+        if last.predicted.is_empty() {
+  +         return None;
+  +     }
+  + 
+  +     let already_validated = load_validation_associations(validation_path);
+  +     validate_one_snapshot(last, git_log, all_ranked, validation_path, head_hash, &already_validated)
+  + }
+  + 
+  + /// The per-snapshot core of replay validation: given ONE parsed snapshot and
+  + /// the list of already-recorded `(from,to)` associations, compute and persist
+  + /// (deduped) a validation event for that snapshot's span `git_hash..head_hash`.
+  + ///
+  + /// Shared by both `replay_validate_core` (last snapshot) and
+  + /// `backfill_replay_validate` (every unvalidated snapshot).
+  + fn validate_one_snapshot(
+  +     snapshot: &ParsedSnapshot,
+  +     git_log: &str,
+  +     all_ranked: Option<&[String]>,
+  ... (144 more lines)
+ ✗ (1ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs.
+
+The comment block is longer than I thought. Let me read the exact content:
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2198,2330p' src/commands_r… ✓ (3ms)
+
+Let me read the full comment before `replay_validate_core`:
+
+
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2214,2235p' src/commands_r… ✓ (3ms)
+
+
