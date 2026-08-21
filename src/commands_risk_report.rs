@@ -114,6 +114,49 @@ fn signal_labels_to_description(signals: &[&str]) -> String {
     }
 }
 
+/// Compact per-file signal tags for the risk report (e.g. `[churn, accel, mut 50%]`).
+///
+/// Maps the raw `▲`-prefixed signal labels to short comma-separated names so a
+/// reader can tell at a glance *which* signals drove a file's score. Ordered
+/// deterministically (score-signal order, mutation sensor last). Returns an
+/// empty string when no signal fired — never hallucinates tags.
+fn file_signal_tags(risk: &FileRisk) -> String {
+    // Raw signal label → compact tag (ordered to match the sensor layout).
+    let mut tags: Vec<String> = Vec::new();
+    for signal in &risk.signals {
+        match *signal {
+            "▲churn" => push_tag(&mut tags, "churn"),
+            "▲recent" => push_tag(&mut tags, "accel"), // recent-acceleration sensor
+            "▲size" => push_tag(&mut tags, "size"),
+            "▲low-test" => push_tag(&mut tags, "low-test"),
+            "▲coupled" => push_tag(&mut tags, "coupled"),
+            "▲reverts" => push_tag(&mut tags, "reverts"),
+            // The mutation sensor is shown via the `mut N%` value tag below
+            // (same condition: `▲mut-surv` is pushed iff mutation_survival > 0.0),
+            // so the raw label is not mapped here to avoid duplicating it.
+            _ => {}
+        }
+    }
+    // Surface the mutation-survival sensor with its survival % whenever non-zero.
+    if risk.mutation_survival > 0.0 {
+        let pct = (risk.mutation_survival * 100.0).round() as u64;
+        push_tag(&mut tags, &format!("mut {pct}%"));
+    }
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!("[{}]", tags.join(", "))
+    }
+}
+
+/// Append `tag` to `tags` unless an identical one is already present (dedupes
+/// the bare `mut` signal tag against the `mut N%` value tag).
+fn push_tag(tags: &mut Vec<String>, tag: &str) {
+    if !tags.iter().any(|t| t == tag) {
+        tags.push(tag.to_string());
+    }
+}
+
 /// Format risk scores into a human-readable report.
 pub(crate) fn format_risk_report(risks: &[FileRisk], show_all: bool) -> String {
     if risks.is_empty() {
@@ -131,16 +174,7 @@ pub(crate) fn format_risk_report(risks: &[FileRisk], show_all: bool) -> String {
 
     let limit = if show_all { risks.len() } else { 15 };
     for risk in risks.iter().take(limit) {
-        let mut signals_str = risk.signals.join(" ");
-        // Surface the mutation-survival sensor (behavioral signal) as a `mut`
-        // tag with the survival % whenever it is non-zero.
-        if risk.mutation_survival > 0.0 {
-            let pct = (risk.mutation_survival * 100.0).round() as u64;
-            if !signals_str.is_empty() {
-                signals_str.push(' ');
-            }
-            signals_str.push_str(&format!("mut {pct}%"));
-        }
+        let signals_str = file_signal_tags(risk);
         let path_display = &risk.path;
         // Pad path to 34 chars for alignment
         let padded_path = if path_display.len() < 34 {
@@ -153,8 +187,16 @@ pub(crate) fn format_risk_report(risks: &[FileRisk], show_all: bool) -> String {
         } else {
             "    -".to_string()
         };
+        // Only wrap the tag list in color codes when it's non-empty — an empty
+        // signals_str must leave the row as pure whitespace after the path so
+        // no-signal rows are truly tag-free.
+        let colored_signals = if signals_str.is_empty() {
+            String::new()
+        } else {
+            format!("{CYAN}{signals_str}{RESET}")
+        };
         out.push_str(&format!(
-            "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+            "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{colored_signals}\n",
             risk.score
         ));
     }
@@ -206,6 +248,8 @@ mod tests {
 
     #[test]
     fn test_format_risk_report_shows_signals() {
+        // A file with churn + size signals and no mutation data renders compact
+        // comma-separated tags, and the non-tag columns (score, path) are intact.
         let risks = vec![FileRisk {
             path: "src/foo.rs".to_string(),
             score: 0.75,
@@ -216,7 +260,49 @@ mod tests {
         let result = format_risk_report(&risks, false);
         assert!(result.contains("0.75"));
         assert!(result.contains("src/foo.rs"));
-        assert!(result.contains("▲churn"));
+        assert!(result.contains("[churn, size]"));
+    }
+
+    #[test]
+    fn test_file_signal_tags_with_mutation_churn() {
+        // churn + non-zero mutation survival → tags contain both `churn` and `mut`.
+        let risks = vec![FileRisk {
+            path: "src/fragile.rs".to_string(),
+            score: 0.85,
+            signals: vec!["▲churn", "▲mut-surv"],
+            test_density: 0.3,
+            mutation_survival: 0.5,
+        }];
+        let result = format_risk_report(&risks, false);
+        assert!(
+            result.contains("[churn, mut 50%]"),
+            "expected churn + mut tag, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_file_signal_tags_no_signals_no_tags() {
+        // A file with no fired signals renders no tag list — proves the additive
+        // display doesn't hallucinate tags. The row still shows score/path.
+        let risks = vec![FileRisk {
+            path: "src/quiet.rs".to_string(),
+            score: 0.10,
+            signals: vec![],
+            test_density: 2.0,
+            mutation_survival: 0.0,
+        }];
+        let result = format_risk_report(&risks, false);
+        assert!(result.contains("src/quiet.rs"));
+        let row = result
+            .lines()
+            .find(|l| l.contains("src/quiet.rs"))
+            .expect("row present");
+        // After the path, only padding whitespace — no tag list.
+        let after = row.split("src/quiet.rs").nth(1).unwrap_or("");
+        assert!(
+            after.trim().is_empty(),
+            "no tag list expected, got row: {row}"
+        );
     }
 
     #[test]
