@@ -1,0 +1,793 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to:
+
+1. Extend `format_risk_report` in `src/commands_risk_report.rs` so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed (e.g., `[churn, accel, mut]`).
+2. Reuse existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value.
+3. Keep existing non-tag columns unchanged.
+4. If `FileRisk` doesn't already expose per-file which-signals-fired, add the minimal field/accessor in `commands_risk.rs`.
+5. Add a unit test asserting tags.
+6. Update docs.
+
+Let me first look at the relevant files to understand the current structure.
+  ▶ read src/commands_risk_report.rs  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status… ✓ (6ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 598ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the full report file and the FileRisk struct to understand the current structure. Let me read the middle part of the report file (lines 95-465).
+────────────────────────────────────────────────────────────────────────────────
+Let me read the rest of the report file and the File
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_report.rs:95..325  ▶ search 'struct FileRisk|mutation_survival|SIGNAL_NAMES|fn load_mutat…' in src/commands_risk.rs ✓ (3ms)
+ ✓ (3ms)
+  2 tools completed in 726ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — the search didn't find `struct FileRisk` in commands_risk.rs. Let me check where FileRisk is defined. Also Task 1 (the previous commit) apparently already folded mutation-survival into format_risk_report (I can see lines 135-143 already add a `mut {pct}%` tag). So the task is asking to extend per-file signal tags to be compact, comma-separated tags like `[churn, accel, mut]`.
+
+Wait, the current code already has:
+- signals joined with spaces (raw signal labels like `▲churn ▲size`)
+- a `mut {pct}%` tag appended
+
+The task says: "Extend `format_risk_report` (or the per-file row renderer) so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`. Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value."
+
+So the goal is to make the tags compact and descriptive. Let me find where FileRisk is defined and what SIGNAL_NAMES looks like.
+────────────────────────────────────────────────────────────────────────────────
+Task 1 already added a mut tag in `format_risk_report`. Let me find where FileRisk and `SIGNAL_NAMES` are defined:
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'SIGNAL_NAMES|struct FileRisk' in src ✓ (11ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — no matches? But the file clearly uses `FileRisk`. Maybe grep is limited. Let me try a plain bash grep.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "SIGNAL_NAMES\|struct Fil… ✓ (13ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:30..110  ▶ read src/commands_risk_accuracy.rs:1..41 ✓ (2ms)
+ ✓ (2ms)
+  2 tools completed in 873ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the state. Task 1 (the commit just before this one) already:
+1. Added `mutation_survival` field to `FileRisk`
+2. Added a `mut N%` tag to `format_risk_report` when `mutation_survival > 0.0`
+3. Added a test `test_format_risk_report_shows_signals` (though it only tests `▲churn`, not `mut`)
+
+So the task is somewhat already done in the current code. The task says:
+1. Extend `format_risk_report` so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`. Reuse existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value.
+2. Keep existing non-tag columns unchanged so parsing and existing tests don't break. Tags are additive display.
+3. If `FileRisk` doesn't expose per-file which-signals-fired, add minimal field/accessor.
+
+Current state:
+- `signals` are stored as `["▲churn", "▲size"]` (with ▲ prefix) and shown joined with spaces.
+- `mut N%` is appended when mutation_survival > 0.
+- The task asks for compact comma-separated tags e.g. `[churn, accel, mut]` — but the current display is `▲churn ▲size mut 50%`.
+
+Hmm. The current code already shows `▲churn ▲size` and appends `mut N%`. So the display is basically there. But the task asks specifically for compact comma-separated tags like `[churn, accel, mut]`. The instruction "What" says:
+
+"Extend `format_risk_report` (or the per-file row renderer) so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`."
+
+The existing signals use `▲churn` style labels. The task wants a compact, comma-separated tag list. The current code joins with spaces and preserves the `▲` prefix.
+
+Additionally the task says "Add/extend a unit test in the report module asserting that a file with churn + a non-zero mutation value renders tags containing `churn` and `mut`, and that a file with no signals renders no tag list (or the existing fallback text), so the additive display is proven not to hallucinate tags."
+
+So the main deliverable:
+1. Add a unit test proving `churn` + `mut` render together, and no-signals renders no tag list.
+2. Possibly restructure the tag rendering to be compact comma-separated.
+
+Let me decide what's the minimal, correct, valuable change here. The current code already:
+- Renders signals joined by space (`▲churn ▲size`)
+- Appends `mut 50%` when non-zero
+
+The task wants compact comma-separated tags `[churn, accel, mut]`. I think the cleanest interpretation that satisfies both the task and not breaking existing tests: create a helper that builds a compact tag list — the existing `signals` (which use `▲` prefixes) plus `mut` — joined by commas, and render it in `format_risk_report`. But the existing test `test_format_risk_report_shows_signals` asserts `result.contains("▲churn")` — so I must keep `▲churn` appearing. If I switch to comma-separated `▲churn, ▲size` that still contains `▲churn`. But then would `mut` appear as `mut` alone (without %) or `mut 50%`?
+
+Task says "add a `mut` tag when a file carries a non-zero mutation-survival value". The current code appends `mut 50%`. The percent is still informative. The task example shows `[churn, accel, mut]` — just the tag names. I think keeping the `mut N%` is fine and arguably better (it's current Task 1 behavior), but for machine-parseability and the "compact" requirement, maybe `mut` alone is cleaner. Hmm, but Task 1's eval-fix 2 explicitly chose "mut N%" format. Let me check the test that Task 1 added — there might be a test asserting `mut 50%`.
+
+Let me look at the tests in commands_risk_report.rs around `mut`.
+
+Actually, from what I've read, `test_format_risk_report_shows_signals` doesn't test mut at all (it sets mutation_survival: 0.0). Let me search the codebase for "mut " tests.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "mut " src/commands_risk_… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The task says:
+
+1. Extend `format_risk_report` so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`. Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value.
+
+Wait — but Task 1 (the previous task, which was just committed) already added a `mut N%` tag to the report. Let me look at what the current state is. The signal labels in `FileRisk.signals` are things like `"▲churn"`, `"▲size"` etc. The task wants compact, comma-separated tags like `[churn, accel, mut]`.
+
+Currently the report joins signals with spaces: `risk.signals.join(" ")` producing `▲churn ▲size` and then adds `mut 50%`. The task wants comma-separated compact tags like `[churn, accel, mut]`.
+
+Hmm, let me re-read the task:
+
+"1. Extend `format_risk_report` (or the per-file row renderer) so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`. Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value (from Task 1's loader in `commands_risk.rs`)."
+
+So the current code has `signals_str = risk.signals.join(" ")` — that's space-separated raw signal labels like `▲churn ▲size`. The task wants a compact comma-separated tag list, e.g. `[churn, accel, mut]`.
+
+Wait, `accel` — is there an acceleration signal? The task title mentions "incl. new mutation sensor" and example tags `[churn, accel, mut]`. Hmm, but the signal names are churn, recency, size, complexity, test_density, coupling, revert_history. There's no "acceler" signal in the 7. Let me check if there's something named "acceler" in the codebase.
+
+Actually the example tag list is just illustrative ("e.g."). The point is to map each fired signal label to a compact tag and join with commas.
+
+So my plan:
+1. In `format_risk_report`, map the raw signal labels (`▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`) to compact tags (`churn`, `recent`, `size`, `reverts`, `low-test`, `coupled`)... Actually `SIGNAL_NAMES` gives: churn, recency, size, complexity, test_density, coupling, revert_history. Hmm those are the "signal names" but the actual labels in `FileRisk.signals` are `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`. And `label_to_index` maps them.
+
+Let me check what labels are actually pushed into `signals` during scoring. Let me search for where signals is populated in commands_risk.rs.
+
+Also, I should add a mapping from label to compact tag. E.g.:
+- `▲churn` → `churn`
+- `▲recent` → `recent`
+- `▲size` → `size`
+- `▲reverts` → `revert`
+- `▲low-test` → `low-test`
+- `▲coupled` → `coupled`
+- `mut` tag when mutation_survival > 0
+
+Then join with ", " and wrap in brackets `[churn, mut]`.
+
+The task says "Keep the existing non-tag columns (score %, line counts, tests/100) unchanged so parsing and existing tests don't break." Hmm, "line counts"? Current columns are score, T/100 (test density), file path, signals. OK.
+
+"The tags are additive display on the human-facing report only."
+
+Also the task says "3. If `FileRisk` doesn't already expose per-file which-signals-fired, add the minimal field/accessor in `commands_risk.rs`" — FileRisk already has `signals: Vec<&'static str>` so that's covered. And `mutation_survival` is already a field.
+
+"Verify: Add/extend a unit test in the report module asserting that a file with churn + a non-zero mutation value renders tags containing `churn` and `mut`, and that a file with no signals renders no tag list (or the existing fallback text), so the additive display is proven not to hallucinate tags."
+
+So I need to:
+1. Modify `format_risk_report` to emit compact comma-separated bracketed tags like `[churn, mut]`.
+2. Add a unit test.
+
+Now let me check the existing test `test_format_risk_report_shows_signals` — it asserts `result.contains("▲churn")`. If I change the rendering to compact tags, that test will break. I need to update it to check for `churn` tag. The task says keep existing tests from breaking... "Keep the existing non-tag columns (score %, line counts, tests/100) unchanged so parsing and existing tests don't break." Hmm. But the task explicitly asks to change to comma-separated tag list, so the existing test asserting `▲churn` will need updating to assert `churn`. Actually let me think — should I keep `▲churn` in the output? The task says "compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`". So the display should change to compact tags. The existing test will need updating. That's acceptable since the task says "Add/extend a unit test".
+
+Also the header row says `Signals`. I'll keep that.
+
+Let me check where the signals are populated to make sure I map all possible labels.
+────────────────────────────────────────────────────────────────────────────────
+Let me see what signal labels are actually used and check `load_mutation_survival` from
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "push(\"▲\|push_str(\"▲\|… ✓ (6ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:920..1010 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the state. Task 1 (previous task, already committed) added:
+1. `FileRisk.mutation_survival` field
+2. A `▲mut-surv` signal pushed when `ms > 0.0`
+3. In `format_risk_report`, the `mut N%` tag when `mutation_survival > 0.0`
+
+So Task 2 asks to:
+1. Show per-file signal tags as a comma-separated list e.g. `[churn, accel, mut]` — reusing existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`, adding `mut` when non-zero mutation survival.
+2. Keep existing non-tag columns unchanged.
+3. If `FileRisk` doesn't expose which signals fired per-file, add minimal accessor.
+
+Currently, the report shows `signals_str` = `risk.signals.join(" ")` which produces e.g. `▲churn ▲size` already with the `mut N%` appended. Task 2 wants a compact comma-separated tag list naming signals that contributed: e.g. `[churn, accel, mut]`.
+
+Wait — the current code, after Task 1, already shows `▲churn ▲size mut 50%`. The task wants a compact per-file signal tag list in the report. The signals already expose which fired (`risk.signals`), and mutation via `mutation_survival`.
+
+There's a discrepancy: `SIGNAL_NAMES` in `commands_risk_accuracy.rs` has the 7 canonical names (churn, recency, size, complexity, test_density, coupling, revert_history) but the actual signal labels used in `FileRisk.signals` are the display labels `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`, `▲mut-surv`.
+
+The task says: "Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value."
+
+So the desired output seems to be something like `[churn, accel, mut]`. Let me re-read:
+
+"1. Extend `format_risk_report` (or the per-file row renderer) so each high-risk file line includes a compact, comma-separated tag list naming the signals that contributed: e.g. `[churn, accel, mut]`. Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`; add a `mut` tag when a file carries a non-zero mutation-survival value (from Task 1's loader in `commands_risk.rs`)."
+
+Hmm. Interesting — the example `[churn, accel, mut]` uses short tag names. The existing signal labels are `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`, `▲mut-surv`. There isn't an "accel" label in the current code (acceleration was maybe merged into recency). Let me check whether there's an acceleration signal.
+
+Actually wait — there's `norm_accel[i]` in the scoring, mapped to `weights[1]` which is "recency". There's no separate accel signal label. The example in the task is "e.g." so not binding.
+
+The key asks:
+1. Compact comma-separated tag list naming contributing signals per row, e.g. `[churn, accel, mut]`.
+2. Add `mut` tag when non-zero mutation survival.
+3. Keep existing non-tag columns (score %, T/100, file) unchanged.
+4. Add a unit test: file with churn + non-zero mutation renders tags containing `churn` and `mut`; file with no signals renders no tag list (or existing fallback).
+
+Currently the report already:
+- joins signals with spaces (`▲churn ▲size`)
+- adds `mut N%` when survival non-zero.
+
+But the task wants a compact bracket-wrapped comma-separated list like `[churn, size, mut 50%]`.
+
+Hmm, but wait. Where do signals map to short names? The current display uses `▲churn` style. The task example says `[churn, accel, mut]` — dropping the `▲`. "Reuse any existing signal-name constants from `FileRisk.signals` / `SIGNAL_NAMES`" — `SIGNAL_NAMES` gives "churn", "recency", etc.
+
+The existing signal labels `▲churn` etc. are what `FileRisk.signals` carries. The task says add a `mut` tag when non-zero survival — currently it's rendered as `mut N%`.
+
+I think the cleanest approach consistent with the task and tests:
+- Add a helper `signal_tags(risk: &FileRisk) -> String` that produces a compact bracket list: e.g. `[churn, size, mut 50%]`.
+- The tags come from mapping `risk.signals` labels to short names (strip the `▲` prefix, or map via a small match) plus `mut N%` if `mutation_survival > 0.0`.
+- Render it in place of (or alongside) the current raw signals string.
+
+But the requirement says "Keep the existing non-tag columns (score %, line counts, tests/100) unchanged so parsing and existing tests don't break." Existing tests check `result.contains("▲churn")` in `test_format_risk_report_shows_signals`. If I change the rendering from `▲churn ▲size` to `[churn, size]`, that test would break — I'd need to update it. The task says "Add/extend a unit test..." so updating the existing test is expected.
+
+Let me look at what makes the most sense. The task's example format is `[churn, accel, mut]`. I'll produce a comma-separated tag list in brackets.
+
+Mapping from the existing `▲` labels to short tag names — there is an existing mapping in `signal_labels_to_description`. I could write a similar match:
+- `▲churn` → `churn`
+- `▲recent` → `recent` (or `accel`? The example says accel but there's no accel signal; the acceleration signal maps to recency here. I'll keep close to the actual signal set — honest tags. Using "recent" matches SIGNAL_NAMES[1]="recency"... hmm.)
+
+Actually, let me be careful and reuse the actual canonical names from SIGNAL_NAMES where they map:
+- `▲churn` → `churn` (SIGNAL_NAMES[0])
+- `▲recent` → `recent` (recency, SIGNAL_NAMES[1])
+- `▲size` → `size` (SIGNAL_NAMES[2])
+- `▲reverts` → `revert` (revert_history, SIGNAL_NAMES[6])
+- `▲low-test` → `low-test` (test_density, SIGNAL_NAMES[4])
+- `▲coupled` → `coupled` (coupling, SIGNAL_NAMES[5])
+- `▲mut-surv` → handled via mutation_survival field → `mut`
+
+Wait, but is exposing "which-signals-fired" enough? Yes — `FileRisk.signals` already contains the fired signals, and `mutation_survival` field exists. So no new field is needed. Point 3 of the task says "If FileRisk doesn't already expose per-file which-signals-fired, add the minimal field" — it does already (signals), and mutation is threaded through already. 
+
+So the actual work:
+1. In `format_risk_report`, replace the raw `risk.signals.join(" ")` (plus mut append) with a compact bracket tag list: `[churn, size, mut 50%]`.
+2. Add helper `file_signal_tags(risk: &FileRisk) -> String`.
+3. Update the existing test and add a new test asserting:
+   - file with churn + non-zero mutation → contains `churn` and `mut`
+   - file with no signals → no tag list (empty or fallback)
+
+Wait, "a file with no signals renders no tag list (or the existing fallback text)". Currently a no-signals file would render an empty `signals_str` → path then `CYAN` empty. So the row is `0.20    2.0  src/low.rs                      `. The heading "Signals" column would be empty. With my bracket approach, no-signals → no `[...]` (render nothing, or fallback "-"). I'll render nothing to keep it clean.
+
+Hmm, but should the mut tag be `mut` or `mut 50%`? The task says "add a `mut` tag when a file carries a non-zero mutation-survival value". Task 1's code already renders `mut N%`. The example shows `[churn, accel, mut]` — bare `mut`. But Task 1's commit shows `mut N%` and its doc comment says "shown as a `mut N%` tag in the report". I think keeping `mut N%` is fine and more informative — the task example is "e.g.". The test should assert the tags contain `churn` and `mut`. `mut 50%` contains "mut" so a `contains("mut")` assertion works.
+
+Let me now write the code. I'll restructure the per-file row rendering:
+
+```rust
+let tags = file_signal_tags(risk);
+...
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{tags}{RESET}\n",
+    risk.score
+));
+```
+
+And the helper:
+
+```rust
+/// Compact per-file signal tag list, e.g. `[churn, size, mut 50%]`.
+///
+/// Tags name the signals that actually drove this file's score (from
+/// `FileRisk.signals`) plus a `mut` tag when the mutation-survival sensor
+/// fired (`mutation_survival > 0`). Empty when no signals fired.
+fn file_signal_tags(risk: &FileRisk) -> String {
+    let mut tags: Vec<String> = risk
+        .signals
+        .iter()
+        .filter_map(|s| match *s {
+            "▲churn" => Some("churn"),
+            "▲recent" => Some("recent"),
+            "▲size" => Some("size"),
+            "▲reverts" => Some("revert"),
+            "▲low-test" => Some("low-test"),
+            "▲coupled" => Some("coupled"),
+            "▲mut-surv" => None, // surfaced via the mut tag below
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect();
+    if risk.mutation_survival > 0.0 {
+        let pct = (risk.mutation_survival * 100.0).round() as u64;
+        tags.push(format!("mut {pct}%"));
+    }
+    if tags.is_empty() {
+        String::new()
+    } else {
+        format!("[{tags}]")
+    }
+}
+```
+
+Note `format!("[{tags}]")` — tags is Vec<String> and Display joins with commas automatically via the format args. Yes, in Rust 2021, `{}` on a `Vec<String>` prints `[a, b, c]` using the slice's Debug-like Display. Actually `Vec<T>: Display` prints items joined by ", " enclosed in brackets. So `format!("[{tags}]")` would give `[[churn, size]]` — double brackets! Careful.
+
+`format!("{}", vec!["a","b"])` → `[a, b]`. So I should NOT add my own brackets. Just `format!("{tags}")` gives `[churn, size]` already. Let me verify: `Vec<String>` implements `Display` via `impl<T: Display> Display for [T]` and for `Vec<T>` there's `impl Display` in alloc? Actually there's `impl<T: fmt::Display> fmt::Display for Vec<T>` in std (via slice). Yes — `println!("{}", vec![1,2,3])` prints `[1, 2, 3]`. Good. So `tags.to_string()` works directly.
+
+So:
+
+```rust
+fn file_signal_tags(risk: &FileRisk) -> String {
+    let mut tags: Vec<String> = ...collect();
+    if risk.mutation_survival > 0.0 { tags.push(...); }
+    tags.to_string() // "[churn, size, mut 50%]" or "[]"
+}
+```
+
+Wait — empty vec `.to_string()` gives `[]`. Task says "a file with no signals renders no tag list". So for empty, return `String::new()` to avoid a dangling `[]`.
+
+Hmm, but actually bare `[]` might be useful as a placeholder. The task allows "no tag list (or the existing fallback text)". I'll emit nothing for empty.
+
+Now — the existing test `test_format_risk_report_shows_signals` asserts `result.contains("▲churn")`. With my change the row shows `[churn, size]` — no `▲churn`. I'll update that test to assert `[churn, size]` and keep the other assertions. And add the new test.
+
+Now let me also consider: is there anywhere else that formats risk rows similarly? `format_risk_context` uses `signal_labels_to_description` (readable descriptions) — that's the context prompt, not the report; leave it.
+
+Let me double check the header row: `"  {DIM}Risk   T/100  File{:width$}Signals{RESET}\n"` — header stays.
+
+Also consider `path_display.len() < 34` padding — path padding assumes signals follow at col ~34. The tag list is variable width, same as before. Fine.
+
+One more consideration: the task says "e.g. `[churn, accel, mut]`". There's no "accel" signal — the acceleration proxy is part of recency scoring (`norm_accel` → weights[1] "recency"). Since there's no `▲accel` label produced anywhere, I can't honestly render an accel tag from the data. I'll use the canonical names that exist. That's honest per my rules (don't hallucinate tags — the test proves it).
+
+Let me now write the edit. I'll replace lines 133-159 in commands_risk_report.rs and add the helper above `format_risk_report`.
+
+Also I need the mut tag dedup: if `▲mut-surv` is in signals AND mutation_survival > 0, the `▲mut-surv` maps to None and we add exactly one `mut N%` tag. Good — no duplicate.
+
+Let me also update the doc comment on the FileRisk field? No, it says "shown as a `mut N%` tag in the report" — still accurate.
+
+Now the tests:
+
+Update `test_format_risk_report_shows_signals`:
+```rust
+#[test]
+fn test_format_risk_report_shows_signals() {
+    let risks = vec![FileRisk {
+        path: "src/foo.rs".to_string(),
+        score: 0.75,
+        signals: vec!["▲churn", "▲size"],
+        test_density: 1.5,
+        mutation_survival: 0.0,
+    }];
+    let result = format_risk_report(&risks, false);
+    assert!(result.contains("0.75"));
+    assert!(result.contains("src/foo.rs"));
+    assert!(result.contains("[churn, size]"));
+}
+```
+
+New test:
+```rust
+#[test]
+fn test_format_risk_report_signal_tags_include_mut() {
+    let risks = vec![FileRisk {
+        path: "src/fragile.rs".to_string(),
+        score: 0.82,
+        signals: vec!["▲churn"],
+        test_density: 0.4,
+        mutation_survival: 0.6,
+    }];
+    let result = format_risk_report(&risks, false);
+    assert!(result.contains("[churn, mut 60%]"));
+    assert!(!result.contains("▲churn")); // compact tags replace raw labels
+}
+
+#[test]
+fn test_format_risk_report_no_signals_no_tags() {
+    let risks = vec![FileRisk {
+        path: "src/calm.rs".to_string(),
+        score: 0.10,
+        signals: vec![],
+        test_density: 2.0,
+        mutation_survival: 0.0,
+    }];
+    let result = format_risk_report(&risks, false);
+    assert!(result.contains("src/calm.rs"));
+    // no tag list rendered for a file with no fired signals
+    assert!(!result.contains("[]"));
+}
+```
+
+Wait, careful with `!result.contains("[]")` — the header has `{:width$}` etc, no `[]`. Should be fine.
+
+Hmm — but wait: for the no-signal case, score 0.10 — does format_risk_report restrict to high-risk files? Looking at the code, no filter — it shows top 15 (or all). So all rows render. Good.
+
+Also — one existing test `file_risk_summary_from_returns_some_for_top_quartile` constructs FileRisk — unaffected.
+
+Now check `commands_risk.rs` — is there a `▲accel` anywhere? Let me check quickly. Also verify no other renderer of `risk.signals.join(" ")` exists in commands_risk.rs (there's a risk bar chart around line 1523 which uses SIGNAL_NAMES). Let me look at line 1523 context to make sure I don't break anything — that's a different display (per-signal bars). Leave it.
+
+Let me make the edit now.
+────────────────────────────────────────────────────────────────────────────────
+Task 1 already gave `FileRisk a signals` vec (fired signals incl. `▲mut-surv) plus a mutation_survival` field, and `format_risk_report` currently joins raw `▲churn`-style labels with spaces plus `mut N%`. The task wants a compact, comma-separated bracket tag list (`[churn, size, mut 50%]`) so a reader can tell *which* signals drove a score at a glance. Let me verify there's no separate "accel" label anywhere, then make the change.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "▲accel\|accel" src/comma… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. Let me look at what the current `format_risk_report` does and what the task wants:
+
+Current (from Task 1):
+- Signals joined with spaces: `▲churn ▲size` 
+- Plus `mut N%` if mutation_survival > 0
+
+Task wants:
+- Compact comma-separated tag list: `[churn, size, mut]` — reusing signal-name constants from `SIGNAL_NAMES` / mapping
+- Keep non-tag columns unchanged
+- Add a `mut` tag when file carries non-zero mutation-survival
+- Add unit test asserting churn + non-zero mutation renders `churn` and `mut` tags; no signals → no tag list (or fallback)
+
+The signals in `FileRisk.signals` are `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`, `▲mut-surv`. There's a mapping in `signal_labels_to_description`. The `SIGNAL_NAMES` in accuracy module are index-aligned.
+
+I'll write a helper `signal_tags(signals, mutation_survival) -> String` that produces `[churn, size, mut]`-style compact bracket tags. It should:
+- map `▲churn` → `churn`, `▲recent` → `accel`? or `recent`? Task says "e.g. `[churn, accel, mut]`". Hmm, the task's example uses `accel`. But the actual signals use `▲recent` (recency = recent changes). The label_to_index maps `▲recent` to index 1 (recency).
+
+The task text is an example, not gospel. The key point: compact, comma-separated tag list naming the signals that contributed. I'll map to short tags:
+- `▲churn` → `churn`
+- `▲recent` → `recent`
+- `▲size` → `size`
+- `▲reverts` → `reverts`
+- `▲low-test` → `low-test`
+- `▲coupled` → `coupled`
+- `▲mut-surv` → `mut` (only when mutation_survival > 0, but ▲mut-surv is only pushed when ms > 0 anyway)
+
+And `mut` tag: task says "add a `mut` tag when a file carries a non-zero mutation-survival value". Since `▲mut-surv` is pushed when ms > 0, and mutation_survival field is the authoritative source, I should base the `mut` tag on `mutation_survival > 0.0` (as Task 1's code already does) rather than the signal.
+
+Also, should the tag include the percentage? The current Task 1 display shows `mut N%`. The task example shows `mut` without percentage. I think keeping the `mut N%` is more informative and already validated by Task 1 tests. Actually let me check what Task 1's tests assert. Let me search for tests asserting "mut" in the codebase.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"mut\|mut %\|mut \"" sr… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+No tests currently assert the mut display. Now I'll implement the change: build a compact tag list `[churn, size, mut 50%]` from `risk.signals` (which are `▲churn` etc.) + the mutation value. Let me define a mapping from signal label to short tag:
+
+- `▲churn` → `churn`
+- `▲recent` → `recent` (task example says "accel" — but the actual signal is `▲recent` for acceleration; the RISK_WEIGHTS comment calls index 1 "recency/acceleration". The task example says `[churn, accel, mut]`. I'll map `▲recent` → `accel`? Hmm. Let me think.
+
+The task says: "e.g. `[churn, accel, mut]`" — it's an example, "compact, comma-separated tag list naming the signals that contributed". The signals in the code are: `▲churn`, `▲recent` (acceleration/recency), `▲size`, `▲reverts`, `▲low-test`, `▲coupled`, `▲mut-surv`. Compact tags could be:
+
+- `churn`
+- `accel` (for ▲recent acceleration) — the example uses "accel"
+- `size`
+- `reverts`
+- `low-test`
+- `coupled`
+- `mut` (with %)
+
+The task example explicitly names `churn`, `accel`, `mut`. So map `▲recent` to `accel`. And `mut` for mutation survival — currently displayed as `mut N%`. The task says "add a `mut` tag when a file carries a non-zero mutation-survival value". I'll keep the % as part of the mut tag: `mut 50%`. And note there's also the `▲mut-surv` signal pushed to signals — I should handle that too so it doesn't render raw. Actually if I derive tags from `risk.signals`, the `▲mut-surv` entry would come through. I could map `▲mut-surv` → `mut` too (but dedupe with the %-carrying version). Simpler: derive tags from signals with a mapping, and for `▲mut-surv` fold into the `mut N%` tag only when mutation_survival > 0. Actually the `▲mut-surv` signal is only pushed when ms > 0, so the non-zero mutation value path is guaranteed. I'll map `▲mut-surv` to `mut` and then, if mutation_survival > 0.0, render it as `mut N%` (replacing the bare `mut`).
+
+Let me write a helper `file_signal_tags(risk) -> String` that returns `"[churn, accel, mut 50%]"` or `""` if no signals.
+
+Wait — the current fallback for no signals: `signals_str` is empty → nothing shown in the CYAN column. The task's verify says "a file with no signals renders no tag list (or the existing fallback text)". I'll return empty for none.
+
+Sorting: keep it deterministic — iterate over the fixed label order matching the score weights (churn, recency/accel, size, complexity?, low-test, coupled, reverts, mut). Note `▲coupled` is > 0.7 and there's no complexity signal label (complexity not surfaced as signal). Let me keep a deterministic ordered mapping.
+
+Now let me implement:
+
+1. Add a helper function `file_signal_tags(risk: &FileRisk) -> String`.
+2. Modify `format_risk_report` row rendering to use it.
+3. Update the header "Signals" column stays.
+4. Add tests.
+5. Update docs.
+
+Mapping order (matching the sensor order): churn, accel (▲recent), size, low-test, coupled, reverts, mut.
+
+Let me write the code.
+────────────────────────────────────────────────────────────────────────────────
+Now I understand the current state: Task 1 added the `▲mut-surv signal and mutation_survival` field, and the report joins raw labels with spaces. I'll make the tags compact, comma-separated, and bracketed — with `accel` for `▲recent, mut N%` for the sensor, in
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (2 → 43 lines)
+  + /// Compact per-file signal tags for the risk report (e.g. `[churn, accel, mut 50%]`).
+  + ///
+  + /// Maps the raw `▲`-prefixed signal labels to short comma-separated names so a
+  + /// reader can tell at a glance *which* signals drove a file's score. Ordered
+  + /// deterministically (score-signal order, mutation sensor last). Returns an
+  + /// empty string when no signal fired — never hallucinates tags.
+  + fn file_signal_tags(risk: &FileRisk) -> String {
+  +     // Raw signal label → compact tag (ordered to match the sensor layout).
+  +     let mut tags: Vec<&str> = Vec::new();
+  +     for signal in &risk.signals {
+  +         match *signal {
+  +             "▲churn" => push_tag(&mut tags, "churn"),
+  +             "▲recent" => push_tag(&mut tags, "accel"), // recent-acceleration sensor
+  +             "▲size" => push_tag(&mut tags, "size"),
+  +             "▲low-test" => push_tag(&mut tags, "low-test"),
+  +             "▲coupled" => push_tag(&mut tags, "coupled"),
+  +             "▲reverts" => push_tag(&mut tags, "reverts"),
+  +             "▲mut-surv" => push_tag(&mut tags, "mut"),
+  +             _ => {}
+  +         }
+  ... (23 more lines)
+ ✓ (422ms)
+  + /// Compact per-file signal tags for the risk report (e.g. `[churn, accel, mut 50%]`).
+  + ///
+  + /// Maps the raw `▲`-prefixed signal labels to short comma-separated names so a
+  + /// reader can tell at a glance *which* signals drove a file's score. Ordered
+  + /// deterministically (score-signal order, mutation sensor last). Returns an
+  + /// empty string when no signal fired — never hallucinates tags.
+  + fn file_signal_tags(risk: &FileRisk) -> String {
+  +     // Raw signal label → compact tag (ordered to match the sensor layout).
+  ... (13 more lines)
+
+Now update the row renderer to use the tags
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (13 → 4 lines)
+    let limit = if show_all { risks.len() } else { 15 };
+        for risk in risks.iter().take(limit) {
+  -         let mut signals_str = risk.signals.join(" ");
+  -         // Surface the mutation-survival sensor (behavioral signal) as a `mut`
+  -         // tag with the survival % whenever it is non-zero.
+  -         if risk.mutation_survival > 0.0 {
+  -             let pct = (risk.mutation_survival * 100.0).round() as u64;
+  -             if !signals_str.is_empty() {
+  -                 signals_str.push(' ');
+  -             }
+  -             signals_str.push_str(&format!("mut {pct}%"));
+  -         }
+  +         let signals_str = file_signal_tags(risk);
+            let path_display = &risk.path;
+ ✓ (421ms)
+    let limit = if show_all { risks.len() } else { 15 };
+        for risk in risks.iter().take(limit) {
+  -         let mut signals_str = risk.signals.join(" ");
+  -         // Surface the mutation-survival sensor (behavioral signal) as a `mut`
+  -         // tag with the survival % whenever it is non-zero.
+  -         if risk.mutation_survival > 0.0 {
+  -             let pct = (risk.mutation_survival * 100.0).round() as u64;
+  -             if !signals_str.is_empty() {
+  ... (6 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait, I need to be careful about the dedup: `▲mut-surv` produces tag "mut", and then `mutation_survival > 0.0` adds "mut {pct}%". These are different strings so no dedup. Fine — that's intended: file gets both `mut` (signal fired) and `mut 50%` (value). Hmm, but that's a bit redundant. Let me think about what the task says: "add a `mut` tag when a file carries a non-zero mutation-survival value". So the `mut` tag from the survival value is what matters. The `▲mut-surv` signal already implies `mut` too.
+
+Actually cleaner: don't add bare "mut" from `▲mut-surv` at all — just let the survival value add "mut N%". But the task says "Reuse any existing signal-name constants from FileRisk.signals / SIGNAL_NAMES". The `▲mut-surv` signal exists. If mutation_survival > 0 both map to mut. Let me simplify: map `▲mut-surv` → no bare tag in the loop (handle only via the value), OR map it to "mut" and skip adding the % version... but task explicitly wants the % surfaced (Task 1 comment said "mut {pct}%").
+
+Actually the Task 1 code already had the % display. Task 2 wants compact tags incl "mut". Both forms: "mut" bare + "mut 50%" is redundant. Let me make it so if mutation_survival > 0, we add "mut N%"; the `▲mut-surv` signal maps to nothing extra (the value tag covers it). Otherwise `▲mut-surv` alone (survival == 0, odd) maps to bare "mut".
+
+Actually simpler and honest: `▲mut-surv` in signals means the mutation sensor fired. The value tag "mut N%" gives the number. When survival > 0, showing both "mut" and "mut 50%" is redundant. Let me adjust file_signal_tags so it maps `▲mut-surv` → "mut" only, and then the value-based addition is skipped if "mut" already present... no wait — the value IS the informative part. Task: "add a `mut` tag when a file carries a non-zero mutation-survival value". So the value-based "mut N%" satisfies that. The bare "mut" from the signal is redundant then.
+
+Cleanest: drop "▲mut-surv" → "mut" mapping entirely, rely on the value tag for zero/fired both. But then if a file has mutation_survival data but the artifact... it's always > 0 when the signal fires. Fine. But what if mutation_survival > 0 but signals doesn't contain ▲mut-surv? Can't happen — scoring pushes ▲mut-surv exactly when ms > 0.
+
+So: keep the "▲mut-surv" mapping for robustness (dedup protects), and the value tag adds "mut N%". Both appear: `[churn, mut, mut 50%]`. Ugly. Better: make the value tag replace/absorb. Let me just not map ▲mut-surv to a bare tag; the value tag is the display for the sensor. If survival is 0 but signal fired (theoretically impossible), bare "mut" via value won't show... but that case can't happen. However, to be safe for the test "file with churn + non-zero mutation value renders tags containing churn and mut", mut comes from "mut 50%".
+
+Hmm, but the verify section says: "asserting that a file with churn + a non-zero mutation value renders tags containing `churn` and `mut`". `contains("mut")` matches "mut 50%" too. Good.
+
+Let me simplify: remove the `▲mut-surv` → "mut" mapping, keep value-based tag only.
+────────────────────────────────────────────────────────────────────────────────
+Let me refine: the `▲mut-surv` signal and the non-zero value both produce mut-flavored tags, which would render `[churn, mut, mut 50%]`. The value tag is the informative one; make the signal map skip a redundant bare `
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (14 → 16 lines)
+                "▲low-test" => push_tag(&mut tags, "low-test"),
+                "▲coupled" => push_tag(&mut tags, "coupled"),
+                "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             "▲mut-surv" => push_tag(&mut tags, "mut"),
+  +             // The mutation sensor is displayed via the `mut N%` value tag below;
+  +             // the raw signal label would only duplicate it.
+  +             "▲mut-surv" => {}
+                _ => {}
+            }
+        }
+ ✓ (423ms)
+                "▲low-test" => push_tag(&mut tags, "low-test"),
+                "▲coupled" => push_tag(&mut tags, "coupled"),
+                "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             "▲mut-surv" => push_tag(&mut tags, "mut"),
+  +             // The mutation sensor is displayed via the `mut N%` value tag below;
+  +             // the raw signal label would only duplicate it.
+  +             "▲mut-surv" => {}
+                _ => {}
+            }
+        }
+
+Wait — the task explicitly says "add a mut tag when a file carries a non-zero mutation-survival value". So the `mut 50%` value tag IS the `mut` tag. But for a file with `▲mut-surv` signal and non-zero value, both fire. Let me simplify: since `▲mut-surv` is only pushed when `ms > 0.0` (line 964-966 in commands_risk.rs), the signal and the value are equivalent. So the value tag alone is correct. But the task's verify says a file with churn + non-zero mutation renders tags containing churn and mut — the `mut 50%` form contains "mut". Good. But wait — what if a file has `▲mut-surv` signal but the field is 0.0 (shouldn't happen)? Let me keep it simple and correct per the task: bare mut from the signal, value tag only when non-zero, dedupe handles both. Actually the current code is fine — the value tag is added when `mutation_survival > 0.0` which is the same condition that pushes ▲mut-surv. Let me re-add the bare mut mapping for robustness and rely
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (5 → 3 lines)
+    "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             // The mutation sensor is displayed via the `mut N%` value tag below;
+  -             // the raw signal label would only duplicate it.
+  -             "▲mut-surv" => {}
+  +             "▲mut-surv" => push_tag(&mut tags, "mut"),
+                _ => {}
+ ✓ (428ms)
+    "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             // The mutation sensor is displayed via the `mut N%` value tag below;
+  -             // the raw signal label would only duplicate it.
+  -             "▲mut-surv" => {}
+  +             "▲mut-surv" => push_tag(&mut tags, "mut"),
+                _ => {}
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now the `push_tag` with `&format!(...)` — there's a lifetime issue. `push_tag<'a>(tags: &mut Vec<&'a str>, tag: &'a str)` — when I call `push_tag(&mut tags, &format!("mut {pct}%"))`, the `&str` borrows from a temporary which doesn't live long enough. I need to restructure — make the value tag a String owned separately, or change push_tag to take a String. Let me look at the code and fix. The tags Vec is `Vec<&str>` — mixing static strs and a temporary format! won't compile.
+
+Better approach: build `Vec<String>` or just handle the mut value inline. Let me rewrite `file_signal_tags` cleanly.
+────────────────────────────────────────────────────────────────────────────────
+Now there's a lifetime issue: `push_tag(&mut tags, &format!(...))` borrows a temporary. Let me rewrite cleanly with a `Vec<String
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (40 → 40 lines)
+    /// empty string when no signal fired — never hallucinates tags.
+    fn file_signal_tags(risk: &FileRisk) -> String {
+        // Raw signal label → compact tag (ordered to match the sensor layout).
+  -     let mut tags: Vec<&str> = Vec::new();
+  +     let mut tags: Vec<String> = Vec::new();
+        for signal in &risk.signals {
+            match *signal {
+                "▲churn" => push_tag(&mut tags, "churn"),
+  ···
+    
+    /// Append `tag` to `tags` unless an identical one is already present (dedupes
+    /// the bare `mut` signal tag against the `mut N%` value tag).
+  - fn push_tag<'a>(tags: &mut Vec<&'a str>, tag: &'a str) {
+  -     if !tags.iter().any(|t| *t == tag) {
+  -         tags.push(tag);
+  + fn push_tag(tags: &mut Vec<String>, tag: &str) {
+  +     if !tags.iter().any(|t| t == tag) {
+  +         tags.push(tag.to_string());
+        }
+    }
+ ✓ (423ms)
+    /// empty string when no signal fired — never hallucinates tags.
+    fn file_signal_tags(risk: &FileRisk) -> String {
+        // Raw signal label → compact tag (ordered to match the sensor layout).
+  -     let mut tags: Vec<&str> = Vec::new();
+  +     let mut tags: Vec<String> = Vec::new();
+        for signal in &risk.signals {
+            match *signal {
+                "▲churn" => push_tag(&mut tags, "churn"),
+  ... (12 more lines)
+
+Now let me check the header — the column is still labeled "Signals" which is fine, but let me verify the header row still says "Signals" and add the required unit tests. First let me see the current state of the file
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_report.rs:117..197 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — there's an issue. The task says "add a `mut` tag when a file carries a non-zero mutation-survival value". With my current code, if a file has signal `▲mut-surv` and value 0.5, tags will be `["mut", "mut 50%"]` which dedupes to... no wait, "mut" != "mut 50%" so both will be in the list → `[mut, mut 50%]`. That's redundant. 
+
+Actually since `▲mut-surv` is only pushed when `ms > 0.0` (which is when `mutation_survival` value is non-zero), the value tag alone is exactly the "mut" tag the task wants. The bare `mut` from the signal would duplicate. Let me handle it: when the value tag is added, don't add the bare `mut` tag. Better: skip bare `mut` from signal when we'll add `mut N%`. Simplest correct approach: keep the `▲mut-surv` mapping but make the dedupe smarter — check if a tag starting with "mut " exists before adding bare "mut".
+
+Actually cleaner: don't map `▲mut-surv` at all in the signal loop; the `mut N%` value tag covers it. But then a file with signal but 0.0 value (impossible per current code — both are gated on ms > 0.0) wouldn't show. The task statement: "add a `mut` tag when a file carries a non-zero mutation-survival value (from Task 1's loader)". So the requirement is literally: non-zero mutation value → `mut` tag. The `mut 50%` form satisfies it (contains "mut"). 
+
+To avoid the duplicate `[mut, mut 50%]`, I'll make the dedupe treat "mut" and "mut N%" as the same: when adding bare "mut", skip if any tag starts with "mut ". That's slightly hacky but correct. Alternative: remove the bare mut from the loop, rely on the value check. Since ms > 0.0 ⟺ ▲mut-surv pushed, the value check is strictly more informative (includes the %). I'll just delete the `▲mut-surv` branch and keep the value tag.
+
+But wait — the task verify says "a file with churn + a non-zero mutation value renders tags containing `churn` and `mut`". The `mut 50%` tag contains "mut". Good. And "a file with no signals renders no tag list (or the existing fallback text)". With no signals and 0 mutation → empty string → renders as nothing (empty cyan text). Good — no tags.
+
+Let me remove the bare-mut duplication.
+────────────────────────────────────────────────────────────────────────────────
+The `▲mut-surv` signal and the non-zero value are gated on the same condition (`ms > 0.0`), so mapping both produces a redundant `[mut, mut 50%]`. The value tag is the informative one — drop the bare mut mapping
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (3 → 5 lines)
+    "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             "▲mut-surv" => push_tag(&mut tags, "mut"),
+  +             // The mutation sensor is shown via the `mut N%` value tag below
+  +             // (same condition: `▲mut-surv` is pushed iff mutation_survival > 0.0),
+  +             // so the raw label is not mapped here to avoid duplicating it.
+                _ => {}
+ ✓ (428ms)
+    "▲reverts" => push_tag(&mut tags, "reverts"),
+  -             "▲mut-surv" => push_tag(&mut tags, "mut"),
+  +             // The mutation sensor is shown via the `mut N%` value tag below
+  +             // (same condition: `▲mut-surv` is pushed iff mutation_survival > 0.0),
+  +             // so the raw label is not mapped here to avoid duplicating it.
+                _ => {}
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — but the task explicitly says "add a `mut` tag when a file carries a non-zero mutation-survival value". The `mut 50%` value tag IS the `mut` tag per the "explicit authorization". And the verify test: "a file with churn + a non-zero mutation value renders tags containing `churn` and `mut`". `[churn, mut 50%]` contains both "churn" and "mut". 
+
+But hold on — there's an edge: what if `▲mut-surv` is in signals but mutation_survival is 0.0? That can't happen from compute_file_risk_scores (both gated on `ms > 0.0`), but defensive: with my current code the signal would render nothing (falls to `_ => {}`). That's acceptable — but to be safe against hallucination the tag only shows when the value is actually non-zero, which matches the task's "add a `mut` tag when a file carries a non-zero mutation-survival value."
+
+Now update the existing test `test_format_risk_report_shows_signals` which asserts `result.contains("▲churn")` — that will now fail since the report no longer shows raw `▲churn`. I need to update it to assert `[churn, ...]`. Let me also add the required new test.
+────────────────────────────────────────────────────────────────────────────────
+Now update the existing test (it asserts `▲churn` which no longer appears) and add the required new tests
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (14 → 49 lines)
+    #[test]
+        fn test_format_risk_report_shows_signals() {
+  +         // A file with churn + size signals and no mutation data renders compact
+  +         // comma-separated tags, and the non-tag columns (score, path) are intact.
+            let risks = vec![FileRisk {
+                path: "src/foo.rs".to_string(),
+                score: 0.75,
+  ···
+            let result = format_risk_report(&risks, false);
+            assert!(result.contains("0.75"));
+            assert!(result.contains("src/foo.rs"));
+  -         assert!(result.contains("▲churn"));
+  +         assert!(result.contains("[churn, size]"));
+  +     }
+  + 
+  +     #[test]
+  +     fn test_file_signal_tags_with_mutation_churn() {
+  +         // churn + non-zero mutation survival → tags contain both `churn` and `mut`.
+  +         let risks = vec![FileRisk {
+  +             path: "src/fragile.rs".to_string(),
+  ... (27 more lines)
+ ✓ (422ms)
+    #[test]
+        fn test_format_risk_report_shows_signals() {
+  +         // A file with churn + size signals and no mutation data renders compact
+  +         // comma-separated tags, and the non-tag columns (score, path) are intact.
+            let risks = vec![FileRisk {
+                path: "src/foo.rs".to_string(),
+                score: 0.75,
+  ···
+  ... (13 more lines)
+
+Now build
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -5 ✓ (8.5s)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --lib commands_risk 2>&… ✓ (112ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_risk 2>&1 | ta… ✓ (22.3s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test fails because the report header contains `[` — no wait, the header is "Signals" and the horizontal line `─`. Let me look — the failure says "no tag list expected, got: ..." containing `[`. Where's the `[`? Oh, the header `File{:width$}Signals` — no. Hmm, the output shown:
+
+```
+  Risk   T/100  File                          Signals
+  0.10     2.0  src/quiet.rs                      
+```
+
+There's no `[`. But the panic message prints the result with... wait the message itself contains the result. `assert!(!result.contains('['), "no tag list expected, got: {result}")`. The result string contains no `[` visible. Let me recheck... Actually the assert failed, meaning result DOES contain `[`. Where?
+
+Ah — the format string: `"  {DIM}Risk   T/100  File{:width$}Signals{RESET}\n"`. No `[`. Hmm... unless the ANSI color codes... no.
+
+Wait, look at the output again. There might be an invisible character. Actually! The emoji `📊`? No. Let me check: the header line has `{DIM}` ... `{RESET}`. `RESET` constant is likely `\x1b[0m`. No `[`... well `\x1b[0m` has no `[`. Wait yes it does! ANSI escape `\x1b[0m` — that's ESC + `[` + `0` + `m`. The `[` is part of the escape sequence!
+
+So `result.contains('[')` matches the ANSI color codes. I should assert against the row content instead — e.g., check that the line doesn't contain `[` after the path, or simply check `!result.contains("[]")` / check the row for quiet.rs doesn't have a bracket in the signals position. Simpler: assert `!result.contains("src/quiet.rs [")` or check that no tag list appears right after the padded path. Actually the cleanest: assert the row doesn't contain `[]` or `[quiet` — let me just check the substring after the path. The padded path is 34 chars, so after "src/quiet.rs" there are spaces then nothing (empty signals_str). So `!result.contains("rust [")`? Hmm.
+
+Simplest robust assertion: `assert!(!result.contains("[]"), ...)` for the no-tags case — empty tag list renders as empty string, so no `[]` appears. And for the with-tags case, `[churn, mut 50%]` contains `[` but that's fine. But to prove "no hallucination", checking that after the path there's no bracket. Let me use `assert!(!result.contains("src/quiet.rs ["))` — no wait, padding means `src/quiet.rs` + spaces. Let me just trim: find line for quiet.rs and check the trailing content after score/path is empty.
+
+Actually simplest and still meaningful: since ANSI codes use `[`, I can't use `contains('[')`. Instead assert that the row line, after `src/quiet.rs`, has only whitespace before `{RESET}`. Let me do:
+
+```rust
+let line = result.lines().find(|l| l.contains("src/quiet.rs")).unwrap();
+let after = line.split("src/quiet.rs").nth(1).unwrap_or("");
+assert!(after.trim().is_empty(), "no tag list expected, got line: {line}");
+```
+
+That's clean. Let me update.
+────────────────────────────────────────────────────────────────────────────────
+The failure is the ANSI `\x1b[` color codes containing [. I'll assert on the row content
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_report.rs (15 → 24 lines)
+            }];
+            let result = format_risk_report(&risks, false);
+            assert!(result.contains("src/quiet.rs"));
+  -         assert!(!result.contains('['), "no tag list expected, got: {result}");
+  +         let row = result
+  +             .lines()
+  +             .find(|l| l.contains("src/quiet.rs"))
+  +             .expect("row present");
+  +         // After the path, only padding whitespace — no tag list.
+  +         let after = row.split("src/quiet.rs").nth(1).unwrap_or("");
+  +         assert!(
+  +             after.trim().is_empty(),
+  +             "no tag list expected, got row: {row}"
+  +         );
+        }
+ ✓ (422ms)
+            }];
+            let result = format_risk_report(&risks, false);
+            assert!(result.contains("src/quiet.rs"));
+  -         assert!(!result.contains('['), "no tag list expected, got: {result}");
+  +         let row = result
+  +             .lines()
+  +             .find(|l| l.contains("src/quiet.rs"))
+  +             .expect("row present");
+  ... (7 more lines)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_risk 2>&1 | ta… ✓ (23.5s)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test commands_risk_report::t… ✓ (151ms)
+
+

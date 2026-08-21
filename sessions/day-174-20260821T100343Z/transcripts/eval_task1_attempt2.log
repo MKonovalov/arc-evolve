@@ -1,0 +1,534 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me analyze this task. The task is to fold the mutation-survival sensor into the risk scoring. Let me verify the diff against the task description:
+
+1. `load_mutation_survival(path) -> HashMap<String, f64>` — implemented, reads `.arc/mutants_per_file.json`, fail-soft on missing/unparseable/empty, guards malformed JSON.
+2. In `compute_file_risk_scores`, add mutation-survival signal with weight 0.10, normalized 0..1, files without entry get 0. Note: the task says "files with no entry get 0 (no signal)" and "rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged". The diff adds an additive term rather than rebalancing weights — the task said "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0...) OR the additive approach?" Let me re-read.
+
+Task says: "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+The implementation adds an additive term `score += MUTATION_WEIGHT * ms` where `ms > 0` only. With the sensor absent, ms = 0 for all, score unchanged. This satisfies "behavior for files without the sensor file is unchanged" without needing to rebalance weights. The additive approach with 0.10 weight means when the sensor IS present, the total can slightly exceed the prior max (score up to ~1.0 + 0.10). That's a reasonable interpretation — "rebalance other weights so the sum stays ~1.0" is one option, but the additive approach is arguably simpler and keeps behavior unchanged when sensor absent. The key requirement "behavior for files without the sensor file is unchanged" is satisfied. I'd accept this.
+
+3. Surface the new signal in the file-risk display: `mut {pct}%` tag appended when non-zero. Done in format_risk_report. The task says "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only". They kept it display-only. Good.
+
+Verify:
+- Tests added for load_mutation_survival: well-formed, malformed, empty, missing. Good.
+- Signal "▲mut-surv" pushed to signals. Good.
+
+One thing to check: does the signal get added to the accuracy/signals list? The task said keep display-only unless accuracy code iterates named signals. Adding "▲mut-surv" to the signals vec is fine for display.
+
+Potential concern: `risk.signal` addition changes predict_top_reason? The signals vec includes "▲mut-surv" — predict_top_reason probably checks for specific signals. Adding a new unknown signal would just not match any known reason, so it falls through to "elevated risk score". Fine.
+
+Let me verify the actual current state of the files — the diff shown is the claimed change. Let me check that the code actually compiles and matches the diff. Actually the harness already ran build and tests and they pass. But I should do a quick verification of key details.
+
+Let me quickly check:
+1. That load_mutation_survival exists as described.
+2. That format_risk_report uses it.
+3. Check the report display — does the mut tag show?
+
+Also check whether run_mutants.sh actually writes `.arc/mutants_per_file.json` with that schema — the task says it does. Let me verify quickly.
+
+Let me look at the actual files to confirm the diff is in place. I'll do focused searches.
+
+Also check whether there might be an issue: weight sum. Default weights sum: 0.30 churn + ? Let me check the weights in compute_file_risk_scores. The task said rebalance so sum stays ~1.0. The implementation didn't rebalance; instead additive. The task allowed "modest weight (e.g. 0.10)" — the additive approach is acceptable ("fold it into the final composite score"). Since files without the artifact are unchanged (fail-soft requirement), this is fine.
+
+One more check: MUTATION_WEIGHT registered in the accuracy code? Task says the signal should be added to per-signal breakdown only if accuracy code iterates named signals. Keep display-only otherwise. Fine.
+
+Let me verify the code quickly and check run_mutants.sh schema.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "load_mutation_survival" s…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutants_per_file" scripts… ✓ (4ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 565ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check the schema of what run_mutants.sh writes, to confirm the loader matches it.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '15,40p' scripts/run_mutant… ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Critical discovery! The actual schema written by `scripts/run_mutants.sh` is NOT `{file_path: survival_fraction}`. It's:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": {...},
+  "summary": {...}
+}
+```
+
+It's a wrapped artifact with `files` as a nested object. The task description claimed the schema is "keys are file paths, values are per-file survival fractions in [0,1]". But the actual emitter wraps it in an envelope with `files` key.
+
+Let me check the exact structure of `files` — what do entries look like?
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "files\[" scripts/run_muta… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '19,60p' scripts/run_mutant… ✓ (3ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '60,120p' scripts/run_mutan… ✓ (5ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '20,35p' scripts/run_mutant… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So the schema written by run_mutants.sh is:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": ..., "mutants": N, "killed": K, "survived": S},
+    ...
+  ],
+  "summary": {...}
+}
+```
+
+That is NOT the schema the task described! The task description said:
+
+> reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1])
+
+But the ACTUAL schema written by run_mutants.sh is an object with a "files" array of objects with path/killed/survived. The loader `load_mutation_survival` reads the file as `serde_json::Value`, calls `as_object()`, and then iterates `(file, v)` — expecting direct string->float mapping.
+
+So the loader would read the actual artifact and iterate over the top-level object keys: "tool", "git_head", "generated_at", "files" (an array → `as_f64()` returns None → skipped), "summary" (object → skipped). So the loader would return an EMPTY map for the real artifact!
+
+This is a genuine mismatch. The task description said "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions". But the actual schema is different. Let me double check the actual script to be sure — whether there's something else. Let me look at the full python emitter and the schema comments.
+
+Actually wait — the task description claims the schema is "keys are file paths, values are per-file survival fractions in [0,1]". The implementation follows the task description. But the *actual* run_mutants.sh writes a different schema. Let me verify more carefully — maybe there's a subset section. Let me see the whole schema comment block and the whole python.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '120,205p' scripts/run_muta… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I need to check the actual schema written. The `files` list contains objects with `path`, `mutants`, `killed`, `survived` — NOT a map of path → survival fraction! Let me check.
+
+The task says: "reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]...)". 
+
+But the actual schema written is:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": ...,
+  "generated_at": ...,
+  "files": [ {"path": ..., "mutants": N, "killed": K, "survived": S}, ... ],
+  "summary": {...}
+}
+```
+
+The loader `load_mutation_survival` expects a top-level JSON object whose keys are file paths and values are numbers. But the actual file's top-level keys are "tool", "git_head", "generated_at", "files", "summary" — none of which are file paths with numeric values. So the loader would parse "tool" → "cargo-mutants" (not f64, skipped), "git_head" (string, skipped), "generated_at" (string, skipped), "files" (array, as_f64() returns None, skipped), "summary" (object, skipped). So it returns an empty map!
+
+Wait — that means the loader does NOT actually consume the artifact produced by run_mutants.sh. The task's premise says the schema is "keys are file paths, values are per-file survival fractions" — but the actual schema is a nested structure with "files" array. This is a mismatch between the task's assumption and reality.
+
+Let me verify the actual top-level structure written by run_mutants.sh. From the code:
+
+```python
+artifact = {
+    "tool": "cargo-mutants",
+    "git_head": git_head,
+    "generated_at": ...,
+    "files": files,
+    "summary": summary,
+}
+json.dump(artifact, fh, indent=2, sort_keys=True)
+```
+
+So the top-level is {tool, git_head, generated_at, files:[...], summary:{...}}. The loader as implemented iterates the top-level map: tool → string (skipped), git_head → string (skipped), generated_at → string (skipped), files → array → as_f64 None (skipped), summary → object (skipped). Result: empty map.
+
+So the loader ALWAYS returns an empty map with the actual artifact schema. The mutation-survival sensor never actually fires. The feature doesn't work.
+
+Hmm, but wait — the task description says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]". The task author believed the schema was flat path→fraction. But the actual script writes a nested schema. The task premise was wrong, and the implementation followed the (wrong) premise. Either way, the code does NOT consume the real artifact.
+
+Let me double check by looking at the actual script's artifact more carefully. files entries: `{"path": path, "mutants": len(mlist), "killed": kills, "survived": surv}`. Top-level: tool/git_head/generated_at/files/summary.
+
+Yes — the loader iterates the TOP-LEVEL object, whose keys are "tool", "git_head", "generated_at", "files", "summary". None parse as f64. So map is empty. The sensor is dead plumbing.
+
+Also `fraction` would be a survival fraction per file — the script doesn't even store survival fraction per path at top level; it stores count summaries.
+
+So: the feature does not work with the real artifact. This is exactly "Tests pass but the feature clearly doesn't work" — the unit tests use a fabricated schema (flat path→fraction) that run_mutants.sh never writes. That's an obvious bug the tests don't catch.
+
+Wait — should I double-check whether maybe there's an older/newer version of run_mutants.sh? The grep for header schema comment said "Schema of `.arc/mutants_per_file.json`:" — let me see the full header comment to confirm what schema the script itself claims to write.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '10,45p' scripts/run_mutant… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '145,175p' scripts/run_muta… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I need to see the actual top-of-file schema comment for run_mutants.sh. Let me read the header.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,35p' scripts/run_mutants… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The file seems to have duplicated sections? Let me look at the header comments more carefully.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,20p' scripts/run_mutants… ✓ (3ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=1 && NR<=40' scripts/run_… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The comment says "wiring it in as a prediction signal is a FUTURE step, not done here." So the sensor emits a specific schema. Let me see the full schema comment. The lines are being compressed by something. Let me use nl to view line numbers and read exact content.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && nl -ba scripts/run_mutants.sh | se… ✓ (32ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+This is very interesting. The actual schema written by `run_mutants.sh` is NOT what the task claimed. The task description says:
+
+> reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1])
+
+But the actual schema written by run_mutants.sh (lines 19-33) is:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {
+      "path": "src/format/mod.rs",
+      "mutants": 12,
+      "killed": 10,
+      "survived": 2
+    }
+  ],
+  "summary": {...}
+}
+```
+
+The `load_mutation_survival` implementation reads the top-level object as `{file_path: fraction}`. It calls `val.as_object()` and iterates over key-value pairs. But the actual JSON written by run_mutants.sh has keys like `"tool"`, `"git_head"`, `"generated_at"`, `"files"` (a list), `"summary"`. The values:
+- `"tool"`: string → `v.as_f64()` → None → skipped
+- `"git_head"`: string → skipped
+- `"generated_at"`: string → skipped
+- `"files"`: array → `as_f64()` → None → skipped
+- `"summary"`: object → skipped
+
+So `load_mutation_survival` would ALWAYS return an empty map for the actual artifact schema! The sensor would never produce any signal in practice.
+
+Wait — but the header comment in run_mutants.sh says the schema is:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [ { "path": ..., "mutants": N, "killed": N, "survived": N } ],
+  "summary": {...}
+}
+```
+
+The task description claims the schema is "keys are file paths, values are per-file survival fractions in [0,1]" — but that's not what the actual script writes. The task description was written based on a misunderstanding of the schema, or it describes a different schema than what the script writes.
+
+Wait, let me re-read. The task says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]". But the ACTUAL script writes `files` as an array of objects with `path`, `mutants`, `killed`, `survived` fields.
+
+So the implementation reads `{file_path: fraction}` but the artifact actually contains `{tool, git_head, generated_at, files: [...], summary}`. The loader would:
+- `val.as_object()` → Some (it's an object)
+- iterate over keys: "tool" → string → skip; "git_head" → skip; "generated_at" → skip; "files" → array → skip; "summary" → object → skip
+- Result: empty map
+
+So the sensor NEVER fires with the real artifact. This is a feature that doesn't actually work against the real data format.
+
+Hmm, but wait. Let me double check. Maybe the .arc/mutants_per_file.json exists in the repo? .arc is gitignored (mentioned in the artifact docstring: ".arc/mutants_per_file.json (a gitignored location)"). Let me check if there's an actual artifact file to see the real shape.
+
+Actually, let me check whether there's a real example artifact somewhere, e.g. in a recent run or in any test fixture.
+
+Also, the diff — let me verify the actual diff in the repo (maybe the diff in the task description has been modified since). Let me look at the actual current code.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '619,680p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/ 2>/dev/null | head; e… ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 535ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The task is interesting. The task says the schema is "keys are file paths, values are per-file survival fractions in [0,1]" — that's the schema the task description claims. But the actual `run_mutants.sh` script writes a DIFFERENT schema: an artifact object with `tool`, `git_head`, `generated_at`, `files` (array of objects with path, mutants, killed, survived), and `summary`.
+
+Wait, let me re-read. The task says:
+
+"Add a loader `load_mutation_survival(path) -> HashMap<String, f64>` that reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]; ..."
+
+But the ACTUAL schema written by run_mutants.sh is NOT keys→values. It's:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [{"path": ..., "mutants": N, "killed": K, "survived": S}, ...],
+  "summary": {...}
+}
+```
+
+So the task description's claim about the schema is WRONG. The header comment in run_mutants.sh even says "wiring it in as a prediction signal is a FUTURE step, not done here."
+
+The implemented loader expects a flat `{path: fraction}` map. But the actual artifact is `{tool, git_head, generated_at, files: [...], summary}`. The loader would parse it as an object, iterate over "tool" (string → skip), "git_head" (string → skip), "generated_at" (string → skip), "files" (array → not f64 → skip), "summary" (object → skip). So it returns an EMPTY map. So the sensor NEVER fires with the real artifact!
+
+This is a real bug: the implementation doesn't work with the actual schema written by run_mutants.sh. The loader needs to parse the `files` array and compute survival fraction = survived / (killed + survived) per file.
+
+Let me verify what the actual artifact looks like. Also check gitignore for .arc/mutants_per_file.json.
+
+Also, there's no actual .arc/mutants_per_file.json in the repo right now. Let me check the gitignore and whether the file might exist.
+
+So the key question for my verdict: does the loader work against the real schema? The task claims the schema is keys→values, but run_mutants.sh writes the nested files-array schema. Since the task says "the exact schema written by run_mutants.sh", the implementation should match the REAL schema. The implementation doesn't — it would silently produce an empty map when parsed against the real artifact, meaning the sensor is dead plumbing.
+
+That's a genuine functional failure: "wiring it in as a prediction signal is a FUTURE step, not done here" — the run_mutants.sh header even acknowledges the wiring is future work. The implementation's loader parses the wrong schema.
+
+Let me confirm by actually simulating: take the artifact shape and run it through the loader logic. The loader:
+1. reads content
+2. parses JSON → object (has keys tool, git_head, generated_at, files, summary)
+3. iterates each (file, v): "tool" → string, as_f64() → None → skip; "files" → array → skip; "summary" → object → skip.
+4. Returns empty map.
+
+Yes. Empty map. So with the actual artifact, no file gets a mutation signal — the feature does nothing in practice.
+
+Additionally, the report display: mutation_survival is on FileRisk and is 0.0 always in practice → "mut X%" never shows.
+
+So this is FAIL — feature doesn't work against the real sensor data. The unit tests pass because they test the loader against the wrong-schema input (flat map), which isn't the actual production artifact.
+
+Wait — but to be fair, let me double check that the artifact the task describes vs. what run_mutants.sh writes. The task's "What" section explicitly says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions". Maybe run_mutants.sh was updated in this commit to write the new schema? Let me check git diff for run_mutants.sh — the diff only shows commands_risk.rs, commands_risk_report.rs, commands_risk_emerging.rs, commands_risk_snapshots.rs. run_mutants.sh wasn't modified. And the header of run_mutants.sh still documents the files-array schema and says wiring is future work.
+
+Let me quickly check git log for run_mutants.sh to see when the sensor file was added (Day 173). And check .gitignore for mutants_per_file.json.
+
+So the loader is written against a schema that run_mutants.sh doesn't produce. This is a genuine mismatch — the implementation as committed cannot consume the actual artifact. Even though tests pass, the feature "clearly doesn't work" against real data. This is a FAIL per the criteria: "Tests pass but the feature clearly doesn't work."
+
+Let me also double check: is there another writer of .arc/mutants_per_file.json with the flat schema? Search the repo.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "mutants_per_file" --incl…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 -- scripts/ru… ✓ (7ms)
+ ✓ (45ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Found it. Day 173 (Task 3, commit 1ac258f) wrote the artifact. So the schema at that time was the nested one. But the task description says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]" — that is NOT the actual schema.
+
+Let me verify the actual schema fully. Let me check the full current schema including the summary, and the `files` entries. Also check whether `mutants_per_file.json` was altered in this commit (the current commit c8d6143) — the diff stat showed only 4 files: commands_risk.rs, commands_risk_emerging.rs, commands_risk_report.rs, commands_risk_snapshots.rs. So run_mutants.sh was NOT changed in this commit.
+
+Also verify whether .arc/mutants_per_file.json currently exists — gitignored; the .arc listing showed no mutants_per_file.json (sensor absent → fail-soft path exercised).
+
+Now, the key question: does the loader's expectation match what the writer produces?
+
+Writer produces:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [ {"path": "src/format/mod.rs", "mutants": 12, "killed": 10, "survived": 2}, ... ],
+  "summary": { "files": N, "mutants": M, "killed": K, "survived": S }
+}
+```
+
+Loader expects: top-level object with keys = file paths, values = survival fractions in [0,1].
+
+The top-level object has keys: "tool", "git_head", "generated_at", "files", "summary". None of these values are f64 (tool is string, git_head string, generated_at string, files is array, summary is object). So `v.as_f64()` returns None for all of them → loader returns an empty map. Fail-soft, but the sensor is dead: even with the artifact present, no signal is ever read.
+
+This is a genuine bug: the loader never reads the actual schema. The task explicitly says "reads .arc/mutants_per_file.json (the exact schema written by run_mutants.sh...)". The implementation does the opposite — it reads a schema that run_mutants.sh does NOT write. The feature "works" only in the fail-soft sense; with the artifact present, compute_file_risk_scores adds 0 mutation signal for every file, and the report never shows "mut N%" because mutation_survival is always 0.
+
+Wait — unless compute_file_risk_scores maps file paths differently. Let me re-check: `mutation_survival_map.get(path.as_str())` — the map is empty (because no f64 values at top level). So ms = 0.0 always. And `▲mut-surv` never appears. The `mut N%` tag never appears in the report.
+
+So this task's core feature (folding the sensor into file scoring) is broken: the loader parses the wrong schema. The unit tests pass because they test a synthetic schema that matches the loader's assumption, not the actual writer output. This is exactly the kind of thing tests don't catch — the task says "the exact schema written by run_mutants.sh" and the tests use a made-up schema.
+
+Actually wait — let me double check the survival fraction isn't computed somewhere as a derived top-level map. Let me check the summary section and see if there's a per-file map anywhere in the artifact. Let me look at the full writer python once more.
+
+From the earlier reads:
+- `files.append({"path": path, "mutants": len(mlist), "killed": kills, "survived": surv})`
+- `files.sort(key=lambda f: (f["survived"], f["path"]), reverse=True)`
+- `summary = {"files": len(files), "mutants": sum(f["mutants"] for f in files), "killed": ..., "survived": ...}`
+- `artifact = {"tool": "cargo-mutants", "git_head": git_head, "generated_at": ..., "files": files, "summary": summary}`
+
+So confirmed: top-level keys are tool/git_head/generated_at/files/summary. No per-file survival fraction map at top level. The "survival fraction" per file would have to be computed as survived/(killed+survived) from the files list.
+
+So loader as written returns empty map whenever given the real artifact. The mutation signal is never applied. This is a substantive bug: the feature doesn't work with real data.
+
+Hmm, but wait. Let me be careful. Is it possible the task description intended the loader to be tolerant of both — or that the writer schema was changed in this commit? No, the diff for this commit doesn't touch run_mutants.sh, and run_mutants.sh was added in Day 173 with the nested schema.
+
+So the verdict: the implementation misses the actual schema. The task says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]". The task author believed the schema was flat path→fraction, but the actual script writes nested. Either way — the implementation was supposed to consume the actual artifact produced by the script of record. It doesn't. The sensor signal will always be zero even when `.arc/mutants_per_file.json` exists, and the report tag `mut N%` will never display.
+
+This is a genuine functional failure of the feature. Tests pass because they test an invented schema. Per the rubric: "Tests pass but the feature clearly doesn't work" → FAIL.
+
+Let me do one focused verification: write the real artifact shape and run a quick standalone check of the loader behavior. Actually I can't easily run the Rust function, but I can simulate: loader does `val.as_object()`, iterates top-level keys, `v.as_f64()` — "tool" is a string → None → skip; "files" is array → None → skip; "summary" object → None → skip; git_head/generated_at strings → None. So empty map. Confirmed by inspection of the exact code.
+
+Let me also double check there isn't some other handling — e.g., does compute_file_risk_scores do any additional parsing? From the diff: `let mutation_survival_map = load_mutation_survival(Path::new(".arc/mutants_per_file.json"));` and later `let ms = *mutation_survival_map.get(path.as_str()).unwrap_or(&0.0);`. No other parsing.
+
+Also, one more consideration: the script writes survival as raw counts, not fractions. If the loader had parsed the "files" list it would need to compute survived/(killed+survived). The loader doesn't.
+
+Additionally, "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)" — the implementation adds an additive term 0..0.10 on top of the weighted sum rather than rebalancing. That's a minor deviation: the sum of weights stays 1.0, and mutation adds up to 0.10 extra. The task said "rebalance other weights so the sum stays ~1.0" — the impl chose additive instead of rebalancing. That's a design deviation but arguably fine ("modest weight so it complements rather than dominates"; behavior unchanged when absent). The bigger issue is the schema mismatch.
+
+Also verify the report display: only shows `mut N%` when mutation_survival > 0.0 — which is never with the real artifact. So the display feature is also dead.
+
+Verdict: FAIL. The core consumer expects a schema the producer doesn't write; with the real artifact present the signal is always empty; tests cover an invented schema.
+
+Let me write the verdict file. Also mention cleanup feedback: the diff docs comment says "6 signals" string tweaks are fine.
+
+Actually wait — let me reconsider whether I should be this strict. The task description explicitly stated the schema as "keys are file paths, values are per-file survival fractions in [0,1]" — which contradicts the actual script. The evaluator could argue: the task spec said to read that schema; the impl does exactly that. But the intent is "the exact schema written by run_mutants.sh" — the implementation fails the intent because the real artifact is different. The task's stated purpose is to fold the sensor in; with real data it produces nothing. The correctness question is whether the feature works end-to-end. It doesn't. This is precisely the "Tests pass but the feature clearly doesn't work" case. FAIL is right.
+
+Let me verify the actual schema one more time by checking the Day 173 commit's script version to be safe there's no dual format.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 1ac258f:scripts/run_mutan…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show 1ac258f --stat | head -20… ✓ (6ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 580ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have clear evidence of a significant mismatch. The actual schema of `.arc/mutants_per_file.json` (the exact file written by run_mutants.sh):
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "src/format/mod.rs", "mutants": 12, "killed": 10, "survived": 2}
+  ],
+  "summary": {...}
+}
+```
+
+The task description claimed:
+> reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1])
+
+But that's NOT the actual schema. The actual schema is a top-level object with a `files` list, each entry having `path`, `mutants`, `killed`, `survived`. There is NO per-file survival fraction as a value in [0,1] keyed by file path.
+
+The implemented `load_mutation_survival` reads the top-level object and expects `file -> fraction` mapping. When run against the real artifact:
+- `val.as_object()` succeeds (top-level object)
+- It iterates keys `tool` (string → skipped), `git_head` (string → skipped), `generated_at` (string → skipped), `files` (array → `v.as_f64()` is None → skipped), `summary` (object → skipped)
+- Result: empty map
+
+So the loader returns an empty map when fed the real artifact. The mutation sensor would NEVER fire in practice. The feature is effectively a no-op — dead code that silently does nothing with the real data. The task's premise ("the exact schema written by run_mutants.sh") is factually wrong in the task description, but the task also says "Guard against malformed JSON / missing keys" and the whole point is to fold the sensor in.
+
+Wait — the task description explicitly says "the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1]". This is what the task asked for. The implementation follows the task's stated schema. But the task's stated schema is wrong — the real writer (Day 173) produces `files: [{path, mutants, killed, survived}]` structure.
+
+So who's at fault? The evaluator's job: "verify that a task was implemented correctly". The task says the schema is `keys are file paths, values are survival fractions`. The implementation matches the task description's (incorrect) schema. If the task description was wrong about the schema, then implementing it as described means the feature doesn't actually work with the real artifact — "Tests pass but the feature clearly doesn't work" is a FAIL criterion.
+
+Let me double check: does the actual writer ever produce a flat `{path: fraction}` map? No — from the Day 173 commit, `files.append({"path":..., "mutants":..., "killed":..., "survived":...})` and `json.dump(artifact)` where artifact = `{"tool", "git_head", "generated_at", "files", "summary"}`. There's no fraction field anywhere, not even per-file. The survival fraction would need to be computed as survived/(killed+survived).
+
+So the loader as implemented:
+1. Reads top-level JSON object — OK.
+2. Iterates top-level keys: `tool`, `git_head`, `generated_at`, `files`, `summary`. None of these are `f64`. `files` is an array — `as_f64()` → None → skipped. So map is empty.
+
+Consequence: `compute_file_risk_scores` calls `load_mutation_survival(".arc/mutants_per_file.json")`, gets an empty map always (even when the file exists and is well-formed with real data), so `ms` is always 0.0, the `MUTATION_WEIGHT` term never contributes, and the `mut` tag never displays. The feature is dead — the sensor never folds into risk scoring.
+
+This is exactly "Tests pass but the feature clearly doesn't work." The unit tests pass because they test against the task's imagined schema (a flat map), not the real artifact's schema.
+
+Also the extension: `ms` lookup uses `path.as_str()` — the risk paths — which would only match if keys were file paths. But the real file's `files` array uses `path` keys within objects.
+
+So verdict: FAIL. The implementation doesn't work with the real artifact produced by run_mutants.sh. The task's schema description was wrong, but per the task, "reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh...)". An implementation that consumes the actual schema would read the `files` array and compute survived/(killed+survived) per path. The implementation instead consumes a schema that the writer never produces. The feature is a silent no-op in production.
+
+Also note fail-soft requirement is met (absent/malformed → empty map), and the rebalancing: the diff adds an additive term 0..0.10 without rebalancing other weights (it says "keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)"). Looking at the diff, the weighted sum of 7 signals is preserved (they didn't rebalance, they added additive term). The task said "rebalance other weights so the sum stays ~1.0" — but the implementation instead made it additive 0..0.10 on top. Hmm, task said "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)... Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)". The comment in code says "plus an additive mutation-survival term (0..MUTATION_WEIGHT, 0 when the sensor is absent)". That's a design choice deviation but achieves fail-soft. The primary fatal issue is the schema mismatch making the sensor a no-op.
+
+Let me verify the top-level keys once more and confirm `files` is at top level, and confirm there's no other flat fraction file. Also verify the gitignore line added in Day 173 (`.arc/mutants_per_file.json`).
+
+Actually let me just verify the exact artifact by constructing what the writer produces. Confirmed above:
+- `artifact = {"tool": ..., "git_head": ..., "generated_at": ..., "files": [...], "summary": {...}}`
+- `json.dump(artifact, fh, ...)`.
+
+Yes. So loader gets: iterates keys tool/git_head/generated_at/files/summary → all fail as_f64 → empty. Definitely a no-op.
+
+I should double-check the extension (`*` path) — risk file paths are like "src/commands_risk.rs" (relative to repo root). Real artifact `files[].path` also "src/format/mod.rs" relative. Even if the loader parsed the array, path keys would match. But it doesn't parse the array at all.
+
+Conclusion: FAIL. Reason: loader parses a flat `{path: fraction}` schema that run_mutants.sh never writes — the real artifact is `{tool, git_head, generated_at, files:[{path,mutants,killed,survived}], summary}` — so `load_mutation_survival` always returns an empty map against real data and the mutation signal never affects scores or the report (dead sensor). Tests pass only because they exercise the imagined schema.
+
+Should I do one quick sanity run to demonstrate? E.g., create a real-schema file and run a small test? I can't easily run the binary without building, but I could write a quick check using the actual artifact structure by writing a test... but I shouldn't modify code. I could replicate the loader's logic quickly in python to show it returns empty against the real schema — that's evidence but the code read is already conclusive. Let me do a quick python reproduction of the exact loader semantics against the real schema to be airtight.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (25 lines) ✓ (26ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+This confirms it. But wait — let me be really careful here. Maybe the payload changed after Day 173? The task says "reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh: keys are file paths, values are per-file survival fractions in [0,1])". The task description claims the schema is `{file: fraction}`. But the actual script — both in the current working tree and in the Day 173 commit — writes `{"tool", "git_head", "generated_at", "files": [{path, mutants, killed, survived}], "summary": {...}}`. 
+
+Let me double-check the actual serialized file bytes are not changed. Also verify the schema comment at the top of run_mutants.sh (which the grep showed the tail of):
+
+From the earlier sed output:
+```
+# Schema of `.arc/mutants_per_file.json`:
+# {
+#   "tool": "cargo-mutants",
+#   "git_head": "abcd123...",             // current commit (short hash)
+#   "generated_at": "2026-08-20T16:40:00Z",
+#   "files": [
+#     {
+#       "path": "src/format/mod.rs",      // file path (cargo-mutants' own key)
+#       "mutants": 12,                    // total mutants generated in this file
+#       "killed": 10,                     // caught by a failing test
+#       "survived": 2                     // not caught by any test (incl. timeout)
+#     }
+#   ],
+#   "summary": {
+```
+
+Yes — the schema is definitively `files: [{path, mutants, killed, survived}]`, not `{path: fraction}`.
+
+So `load_mutation_survival` parses only top-level numeric values — against the real artifact, every value is a string or a list/dict, so `as_f64()` returns None for everything, and the map is empty. The sensor is dead on arrival: `compute_file_risk_scores` will always see an empty map, `ms` will always be 0.0, and the `mut {pct}%` tag will never appear in the report.
+
+This is an "obvious bug that tests don't catch" — the tests construct the *wrong schema* (top-level file→fraction), which will never be produced. The tests pass but the feature doesn't work with the real artifact.
+
+The task said "the exact schema written by run_mutants.sh" — the implementation got the schema wrong. That's a FAIL.
+
+Let me also verify compute_file_risk_scores' use — `mutation_survival_map.get(path.as_str())` where path is like "src/commands_risk.rs". Even if the real schema were used, the script's paths come from mutants.json keys (cargo-mutants' own keys, likely e.g. "src/format/mod.rs"), so path matching could be plausible. But the critical failure is the schema mismatch.
+
+Also check: does compute_file_risk_scores read `.arc/mutants_per_file.json` relative to cwd? Yes: `std::path::Path::new(".arc/mutants_per_file.json")` — runs from repo root in the agent, fine. And gitignored. Fine.
+
+One more sanity: is it possible that `serde_json::Value.as_f64()` on a string returns Some? Let me double check: as_f64 returns Some only for Number (not bool). Strings return None. Yes.
+
+Actually wait — let me also test with a *real* full artifact file to be 100% certain. Let me construct it exactly as the script writes and run the loader logic in Python (which I did — empty). Also let me actually write the artifact and run the binary? Building/compiling and running `cargo run -- risk` would take too long (3 min budget). The build already passed per the harness. The python replication is exact for the JSON semantics.
+
+Let me also confirm the tests in the diff use the wrong schema — yes: `r#"{"src/foo.rs": 0.4, ...}"#` — a top-level map. That schema never appears in run_mutants.sh's output.
+
+So verdict: FAIL. The loader parses a schema that run_mutants.sh never writes; against the real artifact (top-level metadata keys + a `files` array of per-file objects with `path`/`survived`/`killed`), `load_mutation_survival` returns an empty map, so the mutation signal is always exactly 0 and the `mut N%` display tag can never appear. Tests pass only because they feed the loader the wrong schema.
+
+Reason: Loader expects `{path: fraction}` but run_mutants.sh writes `{tool, git_head, generated_at, files:[{path, mutants, killed, survived}], summary}`. Real artifact → empty map → signal always 0 → feature inert. Tests use the wrong schema so they pass without exercising the real artifact.
+
+I should keep it concise. Write the verdict file.
+────────────────────────────────────────────────────────────────────────────────
+The loader's schema check against the real artifact is clear now. Let me write
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/eval_task_1.md (2 lines) ✓ (0ms)
+
+Verdict written. Summary: **FAIL** — the implementation is internally coherent (build/tests pass, struct field added everywhere, weight folded in fail-soft) but the loader reads a schema that `run_mutants.sh` never writes. Against the real `.arc/mutants_per_file.json` shape (`files[]` array with `killed/survived` per file), `load_mutation_survival` returns an empty map, so the entire sensor is dead code in practice. The passing tests only validate against the invented `{path: fraction}` format, not the actual artifact schema.
+
+

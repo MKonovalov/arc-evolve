@@ -1,0 +1,1381 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the build error. There's a missing field `mutation_survival` in the initializer of `FileRisk` at src/commands_risk.rs:906. Let me read the relevant sections of the code.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutation_survival" src/co…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:860..940 ✓ (1ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.4s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `mutation_survival` field exists in the struct but isn't being set in the initializer. Let me look at the field definition and the `load_mutation_survival` function to understand the full picture.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:40..80  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:600..660 ✓ (1ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.1s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `mutation_survival` field is declared in `FileRisk` and `load_mutation_survival` exists. The build error is that `FileRisk` initialization at line 906 doesn't include `mutation_survival`. Let me look at `compute_file_risk_scores` to see the full context — where does it load mutation survival, and how should the weight be folded in?
+
+Let me look at the compute_file_risk_scores function start, and how scores are computed. Also check RISK_WEIGHTS (7 signals summing to 1.0) and how it's used with load_learned_weights. I need to add the mutation weight (0.10) while rebalancing other weights so sum stays ~1.0.
+
+Let me read more of the function.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:790..865  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "RISK_WEIGHTS\|load_learne… ✓ (2ms)
+ ✓ (4ms)
+  2 tools completed in 702ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The struct `FileRisk` has a `mutation_survival` field already added. The `load_mutation_survival` function exists. But `compute_file_risk_scores` doesn't compute the mutation-survival signal and doesn't populate the field in the `FileRisk` initializer.
+
+Let me look at the full `compute_file_risk_scores` function to understand the flow, then make the fix. I need to:
+1. Load mutation survival map at the top of `compute_file_risk_scores`
+2. Compute a norm_mutation signal
+3. Fold it into score with weight 0.10, rebalancing the other weights
+
+Wait — the task says weight 0.10 for mutation. But existing weights are 7 signals summing to 1.0: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] = 1.0. Adding an 8th weight of 0.10 would make sum 1.10. The task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Hmm, "behavior for files without the sensor file is unchanged" — with no sensor file, norm_mutation would be all zeros, so adding 0.10 * 0.0 = 0.0, so scores unchanged regardless of weight rebalancing. Good.
+
+But also the learned weights path: `load_learned_weights` returns [f64; 7]. If I add an 8th signal, I need an 8-element array. Let me check how learned weights file looks and RISK_WEIGHTS usage.
+
+Let me look at lines 79-160 more closely, and the learn_weights functions, plus where RISK_WEIGHTS is used in accuracy (line 1606) and test (3151).
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:72..172  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:660..745 ✓ (1ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 927ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the plan of what's needed:
+
+1. `FileRisk` struct has a `mutation_survival` field but it's not being set in `compute_file_risk_scores` at line 906. I need to add it.
+
+2. The task says: load mutation survival (already implemented as `load_mutation_survival`), fold into composite score with weight 0.10, rebalance other weights.
+
+Wait — but the current implementation only has `load_mutation_survival` helper and the `FileRisk.mutation_survival` field is there "Used for display only". The task says to fold it into the composite score with a modest weight (e.g. 0.10) and rebalance other weights so the sum stays ~1.0.
+
+But the design here seems to deviate: the comment says "Used for display only". Hmm, but the task says to fold into the composite. Let me check what's already done vs what's missing.
+
+Let me carefully re-read the task:
+
+1. Add a loader `load_mutation_survival(path) -> HashMap<String, f64>` — DONE (line 631).
+2. In `compute_file_risk_scores`, add a mutation-survival signal: for each file, look up its survival fraction; files with no entry get 0 (no signal). Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)... Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged).
+
+In `src/commands_risk_report.rs`:
+3. Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %).
+
+So the current state:
+- `load_mutation_survival` exists
+- `FileRisk.mutation_survival` exists — but "Used for display only" comment, which deviates from the task spec (task says fold into composite with weight 0.10)
+- `compute_file_risk_scores` doesn't set `mutation_survival` — compile error.
+
+So I need to:
+1. Load mutation survival in `compute_file_risk_scores` and fold it into the score with a modest weight. I need to rebalance weights.
+
+The weight rebalancing: currently 7 weights sum to 1.0: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]. I need to add an 8th signal for mutation survival with weight 0.10, and rebalance so sum stays ~1.0. 
+
+Hmm, but wait — should I add an 8th weight to RISK_WEIGHTS? That would change the learned weights system (7 weights validated to sum to ~1.0, tolerances, SIGNAL_NAMES with 7 entries, label_to_index, accuracy code iterates named signals). The task says "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds."
+
+The safest approach that satisfies both the task and keeps things stable:
+
+The task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Approach: Keep the 7-signal learned-weight machinery as-is (RISK_WEIGHTS unchanged, sums to 1.0). Then add the mutation-survival as an 8th signal folded in with a modest weight of 0.10, but scale the existing 7-signal composite by (1.0 - 0.10) = 0.90 so the total stays ~1.0.
+
+That satisfies:
+- "behavior for files without the sensor file is unchanged" — hmm, wait. If we scale the 7-signal part by 0.90, then the composite without sensor changes! That's a problem.
+
+Let me re-read: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+So files without the sensor file should have unchanged behavior. If we do `score = 0.90 * base + 0.10 * survival`, then for files with no sensor entry (survival = 0), the score becomes 0.90 * base, which is different from base. That changes behavior for all files when the sensor file exists... but wait — when the sensor file is absent entirely, `load_mutation_survival` returns an empty map, so all files get 0. Then scores = 0.90 * base. That's a regression — all scores change when the artifact is absent. The task says "With the sensor file absent (normal state), risk scores and the report must be unchanged from before (fail-soft; no regression for users without the artifact)."
+
+So the cleanest approach: only apply the mutation signal (and rebalancing) when the sensor file has entries. Since these files only exist when run_mutants.sh ran, we can conditionally weight.
+
+Approach: 
+- Load `mutation_survival` map.
+- `let has_mutation_signal = !mutation_survival.is_empty();`
+- If has_mutation_signal: composite = 0.90 * base_seven + 0.10 * survival_normalized — but only when the mutation weights are used. Actually to keep sum at 1.0, use weights that sum to 1.0: rebalance the 7 base weights by 0.90 and add mutation weight 0.10. When the sensor file is absent, use original weights (sum 1.0), no scaling — behavior unchanged.
+- When the sensor file IS present but a specific file has no entry: survival = 0, but the base part gets scaled by 0.90. Is that acceptable? "files with no entry get 0 (no signal)" — yes, per the task. And "behavior for files without the sensor file is unchanged" refers to the sensor file absent case (the normal state). So this conditional approach works: when the map is empty (sensor file absent), use the original weights, unchanged.
+
+Actually simpler and cleaner: keep the 7 weights summing to 1.0, and in the loop compute:
+```rust
+let mut score = base (7-weight sum);
+if mutation_active {
+    // rebalance: fold survival with modest weight
+    score = score * (1.0 - MUTATION_WEIGHT) + norm_mutation[i] * MUTATION_WEIGHT;
+}
+```
+
+When mutation_active is false (sensor file absent or empty map), the scores are exactly the old composite. 
+
+When mutation_active is true, total weight distribution: base signals scaled 0.90, mutation 0.10 → sum 1.0. This is "sane".
+
+Now for normalization: "Normalize into the same 0..1 space". The survival fraction is already in [0,1] (clamped by the loader). Should I min-max normalize the survival values across files? The loader clamps to [0,1]. Files with no entry get 0. If I min-max normalize across all files including zeros, the values would be spread. But the task says "files with no entry get 0 (no signal)". Hmm, normalization: "Normalize into the same 0..1 space and fold it into the final composite score". Since survival is already in [0,1] space, I could just use it directly. But maybe min-max normalization would be better to make the signal relative. However, if the mutation map includes files not in all_files, normalization across the map values would be relative to that set... Let me keep it simple: use the raw survival fraction (already in [0,1]) — a survival fraction of 0.8 means 80% of mutants survived → high risk. Actually wait — higher survival = higher risk (undertested/fragile behavior). So the raw fraction can be used directly as the risk signal in [0,1]. 
+
+I'll collect `raw_mutation` per file (survival fraction or 0.0), then normalize_scores() over it for consistency with other signals... but careful: normalization of values where most are 0 and a few are e.g. 0.8 will map 0 to 0 and 0.8 to 1.0. That keeps relative ordering. But the loader already clamps to [0,1]. Either way works. normalize_scores would be consistent with other signals and the task explicitly says "Normalize into the same 0..1 space". I'll do min-max normalize like others.
+
+Hmm, but wait: there's a subtlety with weight learning. `learn_weights_from_history` uses RISK_WEIGHTS (7 entries) and SIGNAL_NAMES (7 entries). The accuracy code (`commands_risk_accuracy.rs`) iterates SIGNAL_NAMES. If I add an 8th signaled dimension to the composite but not to weights/learning, the learning system stays consistent (it only learns 7 weights), and the mutation weight is a fixed 0.10 added on top when active. That's fine and matches "keep it display-only to avoid touching accuracy thresholds" — the accuracy code only knows signals from label_to_index which has 7 labels.
+
+Now for the signal tag: I should add a "▲mut" signal when norm_mutation[i] > 0.5 (consistent with other thresholds)? Or just always tag when non-zero? The task says in the report: "when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". That's a display concern in commands_risk_report.rs. Let me check what the report does with signals/tags.
+
+Let me read commands_risk_report.rs to see the file-risk display.
+
+Also there might already be tests for load_mutation_survival. Let me check.
+
+Let me look at the report file and check for existing tests.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutation\|mut" src/comman…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "load_mutation_survival\|t… ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 656ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So the state: struct FileRisk has the new `mutation_survival` field, `load_mutation_survival` exists, `MUTATION_WEIGHT` const exists. But:
+1. `compute_file_risk_scores` doesn't load mutation survival data or fold it in, and doesn't set the field in the FileRisk initializer (line 906 error).
+2. `commands_risk_report.rs` doesn't surface anything.
+3. No unit test for `load_mutation_survival`.
+
+Let me look at the full `compute_file_risk_scores` and understand the weight system so I can rebalance. The current weights: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] sum = 1.0. Adding MUTATION_WEIGHT = 0.10 would require rebalancing. The task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Wait — "behavior for files without the sensor file is unchanged" — if we rebalance the weights so that the 7-sum = 0.90 and then add 0.10 mutation weight when the sensor exists... but for files without a sensor entry (mutation_survival = 0), the score must be unchanged. Hmm, but if we always add `MUTATION_WEIGHT * survival` where survival is 0 for files without entries, then scores are exactly the same as before for those files ONLY IF the other weights sum to 1.0. So the cleanest approach: keep the 7 existing weights summing to 1.0, and add mutation weight as a separate additive term that's 0 when there's no signal. But then files WITH a mutation signal get score up to 1.0 + 0.10 = 1.10. That could exceed 1.0 but FileRisk score isn't necessarily bounded to 1.0 anyway (there's a penalty bump of `max(0, (5-td)*2)/100`). Let me check the score range in the report formatting.
+
+Actually, let me think about what makes "behavior for files without the sensor file unchanged" and "total weight distribution sane (sum stays ~1.0)". Option A: rebalance the 7 weights to sum to 0.90 (multiply by 0.9), and add `MUTATION_WEIGHT * survival`. Then for files with survival=0, the score = 0.9 * old_score — changed behavior! Not acceptable per the requirement "behavior for files without the sensor file is unchanged."
+
+Hmm, but maybe "unchanged" means when the sensor FILE is entirely absent (`.arc/mutants_per_file.json` missing), the whole behavior is unchanged. If the file is absent → empty map → all survival = 0 → score = 0.9 * old... still changed.
+
+Option B: keep the 7 weights summing to 1.0, add `MUTATION_WEIGHT * normalized_survival` as an additive bonus on top (score can exceed 1.0 slightly). Then behavior for files without the sensor is literally identical (adds 0.0). This satisfies "behavior for files without the sensor file is unchanged" perfectly.
+
+The task says: "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Hmm — "rebalance other weights so the sum stays ~1.0" suggests scaling down existing 7 weights... but that conflicts with "behavior for files without the sensor file is unchanged." Unless... the intent: when the sensor has NO signal for a file (survival = 0), mutation contributes nothing — but if we scale existing weights to 0.90, then behavior changes for all files. Unless we compensate: `score = 0.90 * base + ...`? That changes for everyone.
+
+Wait, actually maybe re-read: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)." Perhaps the intended reading: MUTATION_WEIGHT replaces something, OR the mutation term is folded such that when survival=0 the term is 0 and the OTHER 7 weights remain at their existing values summing 1.0, so "total weight distribution" (8 signals) sums to 1.10 but the "sum stays ~1.0" is satisfied if we pick MUTATION_WEIGHT small... no.
+
+Actually the cleanest interpretation that satisfies BOTH constraints literally: since `load_learned_weights` validates exactly 7 weights summing to ~1.0, we can't easily extend to 8. I think the pragmatic approach is:
+
+- Keep the 7 existing weights untouched (files without sensor signal get identical scores).
+- Add `score += MUTATION_WEIGHT * norm_mutation[i]` where norm_mutation is the survival fraction possibly normalized... The comment says survival is already in [0,1], so we could just use the raw survival fraction directly (it's already in 0..1 space). Or normalize across files. The task says "Normalize into the same 0..1 space" — survival fraction is already [0,1]. But min-max normalization across files would make the top survivor 1.0. Hmm. Since the fraction is already in [0,1], using it directly is fine and simpler; but the "0..1 space" requirement is inherently satisfied.
+
+Actually, for the weight sum ~1.0 issue: the mutation term only fires for files WITH a signal, adding up to +0.10. The comment in the weights const says "These seven weights must sum to 1.0." The task says "rebalance other weights so the sum stays ~1.0". Given the learned-weights machinery expects exactly 7 weights summing to 1.0, and the fail-soft requirement that behavior is unchanged without the sensor, the best engineering choice is Option B: keep 7 weights as-is (sum 1.0), add mutation as an independent additive term. That way:
+- No sensor file → survival all 0 → score identical. ✓ unchanged behavior.
+- With sensor → affected files get up to +0.10. ✓ modest weight.
+
+The "rebalance" phrasing conflicts with "unchanged"; I'll honor the constraint that matters most (explicitly stated: "behavior for files without the sensor file is unchanged"). Adding an additive term of MUTATION_WEIGHT*survival with the default weight distribution intact is the safest, and I could add a comment explaining.
+
+Hmm, but should I worry about `learn_weights_from_history` which computes raw_weights[i] = hit_rate + RISK_WEIGHTS[i]*(1+surprise)? That's a separate learning system for the 7 signals; leave it alone.
+
+Now let me read the rest of compute_file_risk_scores (lines 852-912 already seen). I need to:
+1. Load mutation survival map at the top (fail-soft: `load_mutation_survival(Path::new(".arc/mutants_per_file.json"))`).
+2. Look up per file.
+3. Add norm_mutation vector (or just use the survival fraction directly).
+4. Add to score.
+5. Add "▲mut" signal when survival > some threshold (e.g., > 0.5, meaning more than half of mutants survive → undertested). And add a `mut` tag display in the report.
+
+Wait, but signal labels: signal list is Vec<&'static str>. I need a &'static str for "▲mut" or "▲mut-survive". Fine.
+
+Also need to set `mutation_survival: survival` in FileRisk initializer.
+
+Then in commands_risk_report.rs, surface it. Let me read the report formatting functions.
+
+Also the task requires a unit test in commands_risk.rs for load_mutation_survival (well-formed, malformed, missing). Let me check the test module at the end of the file.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '745,790p' src/commands_ris…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:3840..3960 ✓ (2ms)
+ ✓ (4ms)
+  2 tools completed in 590ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the current state. The `FileRisk` struct has `mutation_survival` field (added), `load_mutation_survival` exists, `MUTATION_WEIGHT` exists. But the `compute_file_risk_scores` function doesn't:
+1. Actually call `load_mutation_survival` and look up per-file values
+2. Fold the mutation signal into the score
+3. Set the `mutation_survival` field in the `FileRisk` initializer (line 906)
+
+Also, the weights are still 7 elements and don't include mutation. The task says: fold into composite with weight 0.10, rebalance other weights so sum stays ~1.0, and keep behavior unchanged when the sensor file is absent.
+
+Let me look at how the weights are used in `compute_file_risk_scores` more carefully. There are 7 signals: churn, recency, size, complexity, test_density, coupling, revert_history. Weights: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] = 1.0.
+
+Now I need to add mutation_survival (`norm_mut`) as an 8th signal with weight 0.10, and rebalance the others. But wait — the weights are also used for learning (load_learned_weights returns [f64; 7], RISK_WEIGHTS is [f64; 7], SIGNAL_NAMES is [&str; 7]). Changing to 8 weights would ripple into learn_weights_from_history, accuracy code, snapshots...
+
+The task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds."
+
+So the intent is to keep the accuracy/learning machinery at 7 weights and NOT change RISK_WEIGHTS or SIGNAL_NAMES. Instead, add the mutation signal with a fixed small weight (MUTATION_WEIGHT = 0.10) that is *separate* from the learned 7-weights, and rebalance the 7 weights so the total is 7-weight-sum + 0.10 = 1.0.
+
+Option: scale the 7 weights by 0.90 so 0.90 + 0.10 = 1.0. That rebalances "other weights so sum stays ~1.0" and keeps behavior for files without the sensor unchanged? Hmm — actually no, scaling by 0.90 changes the scores even when the sensor file is absent (all scores multiplied by 0.90). The task says "behavior for files without the sensor file is unchanged".
+
+Hmm, let me re-read: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+So if all files have mutation_survival = 0 (sensor absent), the composite score must equal the previous composite score. If we scale the 7 weights by 0.90, then the previous signals sum to 0.90 * old_score, not old_score. That changes behavior.
+
+So the correct approach: keep the 7 weights summing to 1.0 as-is, and add mutation contribution as an 8th term that's only added when there IS a signal... but then the max composite could exceed 1.0 when both are present (e.g., 0.95 from other signals + small mutation bump).
+
+Alternatively: fold mutation in by replacing a portion: use weights [0.27, 0.135, 0.135, 0.09, 0.09, 0.09, 0.09] + mutation 0.10 = 1.0, i.e., scale the 7 weights by 0.90. But then when mutation absent (all 0), score = 0.90 * old. That changes behavior.
+
+Hmm, wait — "behavior for files without the sensor file is unchanged" — maybe it means: for files that have no mutation entry (get 0), the *relative* ordering... no, it literally says unchanged.
+
+Let me think about a way to satisfy both:
+- Sum stays ~1.0.
+- Files without sensor unchanged.
+
+Approach: Add mutation term as `MUTATION_WEIGHT * mutation_survival` where mutation only displaces when present. Since files without sensor get 0, adding `0.10 * 0 = 0` gives no change. The 7 weights keep summing... to 1.0, so with mutation the total could be 1.0 + 0.10 = 1.10 at most. That violates "sum stays ~1.0" technically but the mutation weight is described as "modest weight (e.g. 0.10) so it complements rather than dominates."
+
+Hmm. Actually the most defensible interpretation given the constraints: the existing 7 weights sum to 1.0; the mutation signal is folded as an 8th weighted term with weight 0.10 aimed at the *normalized* mutation signal; to keep the sum sane we rebalance the others by scaling to 0.90 total. But then "files without sensor unchanged" fails.
+
+Wait, maybe another reading: "behavior for files without the sensor file is unchanged" — i.e., when the sensor file (`.arc/mutants_per_file.json`) is absent entirely, all files get 0 mutation and the scores are unchanged. That's only true if we don't scale the other weights.
+
+Hmm, but we can achieve BOTH: use weights that sum to 1.0 including mutation, but only *include* the mutation term in the denominator... no.
+
+Alternative: use max-1.0 clamping: score = min(1.0, 7-signal-weighted-sum + 0.10 * norm_mut). When mutation absent, score = 7-signal sum unchanged. When present, bump up to +0.10. Sum of weights isn't a strict constraint then but the composite is bounded. Hmm.
+
+Actually, let me look at how the score is used and whether there's a normalization of the composite. Let me look at the full compute function and any tests that assert specific weights / sums.
+
+Look at line 3151: `let sum: f64 = RISK_WEIGHTS.iter().sum();` — probably a test. And line 1454/1606 use learned weights.
+
+Let me search for tests around compute_file_risk_scores and mutation to understand what's expected. Also check git status/diff to see what was already implemented (uncommitted changes) — maybe the previous agent left partial work (e.g., added field + loader but didn't wire it into compute_file_risk_scores).
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git diff --stat  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn test_" src/commands_ri… ✓ (4ms)
+ ✓ (11ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 540ms (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff src/commands_risk.rs ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the plan:
+
+1. `FileRisk` struct has `mutation_survival: f64` added (done).
+2. `load_mutation_survival` function exists (done).
+3. `MUTATION_WEIGHT` const exists (done).
+4. But `compute_file_risk_scores` doesn't:
+   - Load mutation survival
+   - Add it as a signal
+   - Set `mutation_survival` in the `FileRisk` initializer (this is the build error!)
+
+The task says:
+- Add a mutation-survival signal in `compute_file_risk_scores`: for each file, look up survival fraction; files with no entry get 0 (no signal). Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates. Rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged.
+
+Wait, "behavior for files without the sensor file is unchanged" — this means the normalization must be such that when the sensor file is absent, there's no change. Since survival fraction is already in [0,1], we can use it directly (no min-max normalization needed — it's already in 0..1 space). Files with no entry get 0.
+
+But "mutation_survival" as survival fraction — higher survival = more mutants survive = undertested = higher risk. So higher survival fraction → higher risk signal. That's what the task implies: "do mutants survive in a file? → that file's behavior is undertested/fragile". So the signal is directly the survival fraction.
+
+The rebalancing: currently 7 weights sum to 1.0: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]. Adding an 8th signal with weight 0.10 would push the sum to 1.10. Need to rebalance. The task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Hmm, but there's a subtlety: `load_learned_weights()` returns 7 weights from `.arc/risk_weights.json`. If we add an 8th signal, we break that. Let me think about how to do this without breaking the learned-weights path.
+
+Options:
+A. Keep the 7 base weights as-is (they still sum to 1.0), and add mutation as an ADDITIVE bonus with weight 0.10, then... but then total would exceed 1.0. Actually maybe that's fine — it's a score, not a probability. But the doc comments say sum = 1.0. Let me re-read the task:
+
+"Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+So the requirement: sum of weights stays ~1.0, and behavior for files without sensor file unchanged. If we rebalance the 7 weights to sum to 0.90, then add 0.10 for mutation, the sum = 1.0. But then files without the sensor file WOULD have changed behavior (their base scores would be 0.90 of before). Hmm, that contradicts "behavior for files without the sensor file is unchanged."
+
+Wait — unless the rebalancing only applies when the sensor file exists. That is: when there's no mutation data at all, use the original 7 weights (sum 1.0) and skip the mutation term. When the sensor file exists, use rebalanced weights and add mutation term.
+
+Actually let me reconsider: the requirement is "behavior ... is unchanged" for files without the sensor file. If the sensor file is absent (normal state), the whole file's data is empty → the mutation signal is all 0 → the mutation term contributes 0 regardless of weight. So "unchanged" could mean: with an empty mutation map, the final scores equal what they'd be with the pure 7-weight scheme. If we rebalance the 7 weights to sum to 0.90 and add 0.10 * survival_norm, where survival_norm = 0 for all files, then the score for each file = 0.90 * original. NOT unchanged. So we can't naively rebalance.
+
+Alternative: keep the 7 weights summing to 1.0, and add mutation as an extra term beyond 1.0? Then the doc "sum = 1.0" is wrong, and learned weights validation (which requires sum ≈ 1.0 within 0.05) would treat the mutated weights fine, but the mutation term is added on top. That changes behavior for files without the sensor only by... well if mutation map is empty, the term is 0, so scores are unchanged. That satisfies "behavior for files without the sensor file is unchanged" literally.
+
+But the task explicitly says "rebalance other weights so the sum stays ~1.0". Hmm.
+
+Cleanest approach that satisfies both constraints:
+- The mutation signal is added with weight MUTATION_WEIGHT = 0.10.
+- When the mutation map is empty (no sensor file), we skip the mutation term entirely and use the original weights → exactly unchanged.
+- When the mutation map is non-empty, we scale the 7 base weights by (1 - 0.10) = 0.90 so the total (base + mutation) stays ≤ ~1.0.
+
+Actually, a common pattern: `score = (1 - MUTATION_WEIGHT) * base_score + MUTATION_WEIGHT * mutation_signal`. When mutation map empty → mutation_signal = 0 for all → score = (1-0.10) * base = 0.90 * base. That changes behavior.
+
+To keep unchanged when sensor absent: conditional — if the map is non-empty, blend; else pure base.
+
+Hmm, but the task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)." 
+
+I think the intended reading: when the sensor file exists, the weights are rebalanced (7 base weights scaled by 0.90, mutation gets 0.10, sum = 1.0). When it doesn't exist (all zeros), behavior is unchanged... but as computed, scaling always applies.
+
+Let me think about what "unchanged" means more carefully. Maybe: files that have no entry in the mutation map (which is all files when the file is absent) get mutation 0, and — with rebalanced weights — their scores would be 0.90×base. That's a change, technically. But maybe the intent is that rebalancing happens such that even with mutation=0, the weight distribution still sums to 1.0 overall and the equilibrium isn't drastically different.
+
+Actually, wait. Let me re-read once more: "files with no entry get 0 (no signal). Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)". 
+
+Since mutation survival is already in [0,1], "normalize into the same 0..1 space" is trivially satisfied (value is already there).
+
+For the rebalancing, I'll take the pragmatic approach:
+- Compute base score = sum of 7 normalized signals × learned/default weights (as today).
+- When the mutation map is non-empty: score = base_score * (1 - MUTATION_WEIGHT) + MUTATION_WEIGHT * survival. This keeps total contribution at ~1.0 scale when all signals normalized.
+- When the mutation map is empty: score = base_score (exactly unchanged).
+
+Actually hold on, but what about the learned weights path? `load_learned_weights()` returns 7 weights validated to sum ≈ 1.0. If I scale by (1-MUTATION_WEIGHT) and add mutation, the composite is (1-0.10)*base + 0.10*mut ≤ 0.90 + 0.10 = 1.0 when base and mut are both ≤ 1. Fine.
+
+But "behavior for files without the sensor file is unchanged" — with the conditional approach, when map empty, base score is used directly. When map non-empty but a particular file has no entry → survival = 0 → score = 0.90 * base. That IS a change for those files. Hmm, but the task says "files with no entry get 0 (no signal)" — so they accept that their score changes slightly (they get 0 contribution plus rebalanced base).
+
+I think the cleanest interpretation that satisfies both explicit constraints:
+1. Sum of weights stays ~1.0.
+2. Behavior for files without the sensor file (i.e., everyone when `.arc/mutants_per_file.json` is absent) is unchanged.
+
+Approach: scale the base weights by (1 - 0.10) = 0.90 ONLY when the mutation map is non-empty. When the mutation map is empty, use pure base (weights unchanged). This satisfies both: with the sensor absent, unchanged; with the sensor present, base signals get 90% weight and mutation gets 10%, total 1.0.
+
+Hmm, but is the discontinuity weird? If run_mutants ran and produced a file with only one file listed, then all OTHER files would have their scores scaled by 0.90 + 0 = 0.90×base. That's a behavior change for them, but the task explicitly says "files with no entry get 0 (no signal)" — that's about the mutation contribution being 0, and the rebalancing note says "behavior for files without the sensor file is unchanged" which I read as "files without the sensor FILE" (i.e., the whole artifact absent), not "files without an entry in it". The phrase "for users without the artifact" in the Verify section confirms: "With the sensor file absent (normal state), risk scores and the report must be unchanged from before (fail-soft; no regression for users without the artifact)."
+
+So the conditional-on-nonempty-map approach satisfies the verification requirement precisely.
+
+Now, implementing:
+
+```rust
+// Load mutation-survival data (fail-soft: empty map when artifact absent)
+let mutation_survival = load_mutation_survival(std::path::Path::new(MUTATION_SURVIVAL_PATH));
+let has_mutation_data = !mutation_survival.is_empty();
+```
+
+Then per file:
+```rust
+let survival = *mutation_survival.get(path.as_str()).unwrap_or(&0.0);
+```
+
+Score:
+```rust
+let mut score = base weighted sum...;
+// fold in mutation signal
+if has_mutation_data {
+    score = score * (1.0 - MUTATION_WEIGHT) + MUTATION_WEIGHT * survival;
+}
+```
+
+Wait, but that's not exactly "rebalance other weights". Alternatively, scale each of the 7 weights by (1 - MUTATION_WEIGHT) within the loop. Same result. Actually simpler: apply the blend after computing base:
+
+`score = base * (1.0 - MUTATION_WEIGHT) + MUTATION_WEIGHT * survival` when has_mutation_data.
+
+Hmm, but there's a subtlety — should the mutation term be included in the "penalty" too? The penalty for <5 tests per 100 lines is added to base. I'll apply mutation blend after the penalty (to the total).
+
+Then set `mutation_survival: survival` in the FileRisk initializer.
+
+Now the display: the task says in `src/commands_risk_report.rs`, surface the signal in the file-risk display. Let me look at commands_risk_report.rs to see the display format. But wait — the task said "Files: src/commands_risk.rs, src/commands_risk_report.rs" and the build error is only about the missing field. Let me check if commands_risk_report.rs has any mutation display already. From the grep, no mutation references in commands_risk_report.rs. Let me read it.
+
+Also, I need to add a unit test for `load_mutation_survival`. Let me first fix the build error and add the scoring logic, then look at the report file.
+
+Also check: where does `compute_file_risk_scores` get called from, and how does the report format file-risk display? Let me read commands_risk_report.rs.
+────────────────────────────────────────────────────────────────────────────────
+The partial implementation added `FileRisk.mutation_survival, MUTATION_WEIGHT, and load_mutation_survival`, but never wired them into `compute_file_risk_scores` (the build error) nor the report display. Let me look at the report file and the risk display
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me see the middle portion of commands_risk_report.rs, especially the report format function, and check for other places that construct `FileRisk` (there might be other test constructors that need the new field). Let me search for all `FileRisk {` occurrences.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "FileRisk {" src/ | grep …  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs:100..220 ✓ (1ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 654ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. The partial implementation:
+1. Added `mutation_survival` field to `FileRisk` (with doc comment saying "Used for display only")
+2. Added `MUTATION_WEIGHT` const (0.10)
+3. Added `load_mutation_survival` loader
+4. But did NOT:
+   - Wire the mutation signal into `compute_file_risk_scores` (hence the build error E0063 at line 906 — the `FileRisk {` initializer is missing the new field)
+   - Update the report display
+   - Update other `FileRisk` initializers in tests (commands_risk_snapshots.rs, commands_risk_emerging.rs, commands_risk_report.rs tests, commands_risk.rs tests)
+
+Wait — but the error says only 1 error, at line 906. But there are other `FileRisk {` initializers in tests. Those are in `#[cfg(test)]` modules, so `cargo build` (non-test) only fails at line 906. `cargo test` would fail on the others too. Let me check all the initializers.
+
+Since `mutation_survival` is a non-`Option` field, every initializer needs it. The tests in commands_risk_snapshots.rs, commands_risk_emerging.rs, commands_risk_report.rs tests, and commands_risk.rs line 4407 will also fail during `cargo test`.
+
+Wait, but the task says "behavior for files without the sensor file is unchanged" and the field doc says "Used for display only". The task spec says:
+
+2. In `compute_file_risk_scores`, add a mutation-survival signal: for each file, look up its survival fraction; files with no entry get 0 (no signal). Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged).
+
+Hmm — "behavior for files without the sensor file is unchanged". If I add a mutation signal with weight 0.10 and rebalance others, then when the sensor file is absent all mutation values are 0, so the 0.10 weight contributes 0 and the rebalanced weights sum to 0.90... but that changes the total score magnitude! Original weights sum to 1.0; rebalanced weights would sum to 0.90, so scores would be slightly lower even without the sensor.
+
+Let me think about how to keep behavior unchanged when the sensor file is absent. Two options:
+
+Option A: Keep weights summing to 1.0 and only apply the mutation fold when the sensor exists (i.e., conditional). E.g., `if !mutation_map.is_empty() { score = score * 0.9 + mutation * 0.1 }`. When the map is empty, score unchanged. This satisfies "behavior for files without the sensor file is unchanged" cleanly.
+
+Option B: Scale mutation_weight by presence — messy.
+
+Option A is cleaner and matches the task's intent: "files with no entry get 0 (no signal)" and "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)". 
+
+Hmm, re-reading: "rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged". So they want the weights rebalanced among the 7 signals (sum to 0.90) plus mutation at 0.10 = 1.0 total. But then "behavior for files without the sensor file is unchanged" would be violated because total is now 0.90 * something.
+
+Actually wait — maybe not. "Behavior unchanged" could be interpreted loosely as "no crash / no distortion" — but strictly, if the sensor file is absent, the score with rebalanced weights would be 90% of the old score. That's a behavioral change.
+
+The cleanest way to satisfy BOTH: only apply the mutation fold when the sensor file exists (non-empty map). That is:
+
+```rust
+let mutation_survival = load_mutation_survival(Path::new(MUTANTS_PER_FILE_PATH));
+...
+score = norm_churn[i]*weights[0] + ... + norm_revert[i]*weights[6];
+// fold mutation
+if !mutation_survival.is_empty() {
+    let mut = mutation_survival.get(path.as_str()).copied().unwrap_or(0.0);
+    score = score * (1.0 - MUTATION_WEIGHT) + mut * MUTATION_WEIGHT;
+}
+```
+
+With 7 original weights summing to 1.0, `score * 0.9 + mut * 0.1` keeps the composite in a sane range. When the map is empty → score unchanged exactly. When the mutation value is 0 for a given file → score scaled by 0.9... hmm, that's still a change for that file when the sensor exists but the file isn't in it.
+
+Alternative that preserves per-file behavior when its own entry is missing: only fold when the file has a mutation entry:
+
+```rust
+let mut = mutation_survival.get(path.as_str()).copied(); // Option<f64>
+let mut score = base_score;
+if let Some(m) = mut {
+    score = score * (1.0 - MUTATION_WEIGHT) + m * MUTATION_WEIGHT;
+}
+```
+
+This is exactly "files with no entry get no signal" and "behavior for files without the sensor file is unchanged" — both at the file level and at the whole-repo level (empty map → nothing folds for any file). And I don't need to rebalance the 7 weights at all — the fold is multiplicative, keeping the sum-of-weights sanity. The task says "rebalance other weights so the sum stays ~1.0" — with this approach the weights array stays at sum 1.0, and the mutation fold re-normalizes. Actually that's even saner: composite = 0.9 * base + 0.1 * mutation, both in [0,1] ⇒ composite in [0,1] and base weights unchanged.
+
+Hmm, but the task explicitly said "rebalance other weights". But then says "behavior for files without the sensor file is unchanged". These two are in mild tension; the precedence should be "behavior unchanged when sensor absent, fail-soft". I'll go with the conditional fold which satisfies the hard requirement precisely. I'll keep RISK_WEIGHTS summed to 1.0 (it's validated by test_risk_weights_sum_to_one and load_learned_weights requires sum≈1.0 with 7 weights).
+
+Actually, let me reconsider. The learned weights mechanism (load_learned_weights) validates that weights sum ≈ 1.0 with exactly 7 entries. Changing RISK_WEIGHTS to 8 entries would break that machinery broadly (snapshots store weights as arrays, label_to_index, etc.). The task says "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." The accuracy code iterates SIGNAL_NAMES (7 entries) and label_to_index maps 6 labels. So mutation survival should be display-only in accuracy terms. Good — conditional fold + `mutation_survival` field for display is exactly right.
+
+So my plan:
+1. In `compute_file_risk_scores`:
+   - Load `load_mutation_survival(Path::new(".arc/mutants_per_file.json"))` — need the file path. Add const `MUTANTS_FILE_PATH: &str = ".arc/mutants_per_file.json";` near LEARNED_WEIGHTS_PATH.
+   - Track `mutation_survival` per file in a Vec.
+   - Fold: `if let Some(m) = mutation_opt { score = score * (1.0 - MUTATION_WEIGHT) + m * MUTATION_WEIGHT; }`
+   - Populate the new field on FileRisk.
+
+Wait — but should the score bump reflect "high survival = risky" or "low survival = risky"? The task says "do mutants survive in a file? → that file's behavior is undertested/fragile". So HIGH survival fraction = the file's tests fail to kill mutants = undertested/fragile = HIGHER risk. So mutation_survival (0..1) directly adds to risk. `score * 0.9 + m * 0.1` — higher m → higher score. Correct.
+
+2. Report display: when `risk.mutation_survival > 0.0`, show e.g. `mut 63%` tag. The task says "e.g. a `mut` tag with the %". I'll add it to the signals line or as a separate column. Simplest: append to signals_str: `risk.signals.join(" ")` plus `mut NN%`. Let me add it to the signals display:
+
+```rust
+let mut signals_str = risk.signals.join(" ");
+if risk.mutation_survival > 0.0 {
+    if !signals_str.is_empty() { signals_str.push(' '); }
+    signals_str.push_str(&format!("mut {:.0}%", risk.mutation_survival * 100.0));
+}
+```
+
+But the test/module doc said `mutation_survival` is "Used for display only" — good, matches.
+
+3. Fix all other `FileRisk {` initializers to include `mutation_survival: 0.0` (or appropriate test value): commands_risk_snapshots.rs (2), commands_risk_emerging.rs (2), commands_risk_report.rs tests (2), commands_risk.rs:4407.
+
+4. Add unit test for `load_mutation_survival`: well-formed, malformed, missing.
+
+Let me check line 1606 area — `let learned_weights = load_learned_weights();` and SIGNAL_NAMES usage in commands_risk_accuracy.rs. Let me also check the format of risk report test — need mutation_survival: 0.0 in initializers.
+
+Let me look at each initializer site.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the other `FileRisk` initializers (tests) and the risk-accuracy signal iteration
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '560,575p;662,675p' src/com…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES" src/command… ✓ (4ms)
+ ✓ (7ms)
+  2 tools completed in 954ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There are several `FileRisk` struct initializers in test files that now need the `mutation_survival` field. The struct field was added, so ALL initializers in tests (commands_risk_snapshots.rs, commands_risk_emerging.rs, commands_risk_report.rs, commands_risk.rs) need the new field... but wait, only the build error for commands_risk.rs:906 was shown. That's because the other files (commands_risk_snapshots.rs, commands_risk_emerging.rs) are test modules under `#[cfg(test)]` — but `cargo build` compiles only the binary, not test code. `cargo test` compiles tests too, so those will fail on `cargo test`. Actually wait, `cargo build` compiles the bin, which includes `#[cfg(test)]` modules? No — `cargo build` doesn't compile test code. But the error shown was in commands_risk.rs:906 in a non-test fn. So I need to fix that, and also the test initializers will break during `cargo test`.
+
+Let me plan:
+
+1. **compute_file_risk_scores** — wire in the mutation survival signal:
+   - Load `load_mutation_survival(Path::new(".arc/mutants_per_file.json"))`
+   - For each file, look up survival fraction (0 if absent)
+   - Normalize the survival values (they're already in [0,1], so normalize across files)
+   - Fold into the composite score with weight 0.10, rebalancing other weights so the sum stays ~1.0
+
+   The task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+   Since the sensor is absent in normal state (fail-soft → empty map), the mutation signal is 0 for all files. To keep behavior unchanged for files without the sensor, the fold must be:
+   `score = base_signal_sum + MUTATION_WEIGHT * mutation_signal` where `mutation_signal` is 0 when no entry. Then the base weights should be scaled by (1 - MUTATION_WEIGHT) to keep the total ~1.0. With MUTATION_WEIGHT = 0.10, base sum would be 0.90.
+
+   Current weights: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] = 1.00.
+   
+   Rebalance: multiply each by 0.90 → [0.27, 0.135, 0.135, 0.09, 0.09, 0.09, 0.09] = 0.90. Then + 0.10 mutation = 1.00 when mutation signal is 1.0.
+
+   But wait: `load_learned_weights()` returns 7 weights from a file that must sum to ~1.0. If I scale those by 0.9, that works too. Also the learned weights file validation requires sum ≈ 1.0 (within 0.05). The stored learned weights sum to 1.0, so scaling by 0.9 gives 0.9 which is fine.
+
+   But there are tests that check `test_risk_weights_sum_to_one` (RISK_WEIGHTS sum == 1.0) — those check the constant RISK_WEIGHTS itself which I should NOT change. The rebalancing happens at computation time. Let me check what test_risk_weights_sum_to_one does — line 3149. Let me also check the accuracy code (compute_per_signal_hits uses SIGNAL_NAMES). The task says keep accuracy untouched — don't add mutation to SIGNAL_NAMES in accuracy.
+
+   Approach for compute:
+   ```rust
+   let mut survival_map = load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
+   let mut raw_mutation: Vec<f64> = all_files.iter().map(|p| *survival_map.get(p.as_str()).unwrap_or(&0.0)).collect();
+   // survival fractions are already in [0,1] — no normalize needed, but normalize for consistency
+   let norm_mutation = normalize_scores(&raw_mutation);
+   ```
+   Hmm, actually since values are already in [0,1], normalize_scores could distort (survival of 0.5 and 1.0 → 0 and 1). Survival fraction in [0,1] high = bad (mutants survive = undertested = fragile). The signal should be higher risk when survival is higher. So raw survival is already the risk signal directly in [0,1]. I'll use `raw_mutation` directly as the normalized signal, or better, still normalize? The task says "Normalize into the same 0..1 space". Survival is already in [0,1]. I could just use it directly. But normalize_scores would change semantics: if all files have survival 0.2..0.3, normalized gives 0..1 amplification. Hmm. The task says "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)".
+
+   Simplest robust choice: use the raw survival value (already [0,1]) directly. But "normalize into the same 0..1 space" — raw is already in that space. I'll use raw directly but maybe clamp. Since load_mutation_survival clamps to [0,1], raw is fine. Let me keep it simple: `norm_mutation = raw_mutation` — actually let me normalize via normalize_scores for consistency with the other signals? That changes semantics in an odd way for a signal that's already bounded. I think the cleanest is to treat the survival fraction as the normalized signal directly. But then the folding:
+
+   ```rust
+   let base_weight_scale = 1.0 - MUTATION_WEIGHT; // 0.90
+   let mut score = (norm_churn[i] * weights[0] + ... + norm_revert[i] * weights[6]) * base_weight_scale
+       + norm_mutation[i] * MUTATION_WEIGHT;
+   ```
+
+   Wait, but weights come from load_learned_weights() which sums to 1.0, then scaled * 0.9, plus mutation * 0.1 = total ~1.0 when all signals at max. Good.
+
+   For files without sensor → norm_mutation = 0 → score = base * 0.9. That changes scores for files without the sensor vs the old code (old: score = base * 1.0). The task says "behavior for files without the sensor file is unchanged". Hmm — that says behavior should be unchanged. But if the sensor file doesn't exist at all (empty map), mutation signal = 0 for all files. To keep behavior EXACTLY unchanged in that case, the base weights should remain summing to 1.0 and mutation adds on top only when present... but then with mutation present, total could exceed 1.0.
+
+   Alternative interpretation: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)." 
+   
+   Two readings:
+   a) When the sensor file is absent → all keyed metas occur in scoring: score unchanged (weights unchanged).
+   b) When the sensor file exists but a particular file has no entry → that file gets 0 for mutation.
+
+   Option (a) requires the rebalance to be conditional: if the mutation map is empty, use original weights and skip mutation. If non-empty, scale base weights by 0.9 and add mutation * 0.1.
+
+   Actually the cleaner approach that satisfies both: scale base weights by (1 - MUTATION_WEIGHT) always, and add mutation term. When map is empty, mutation = 0, so score = base * 0.9 — scores all scaled down by 10%, which changes risk scores (and thresholds/percentiles). The report's top-15 and p75 percentile are relative, so relative ordering is preserved (uniform scale), but the absolute score values change, and `risk_context_for_files` uses absolute `> 0.5` threshold! That would change behavior (fewer files flagged). So (a) conditional approach is safer for "unchanged when absent".
+
+   Let me implement: if mutation map is non-empty, scale base by 0.9 and add mutation*0.1; if empty, use weights as-is (score = base, mutation term 0). Actually even simpler and same result: 
+   ```rust
+   let has_mutation = !survival_map.is_empty();
+   let scale = if has_mutation { 1.0 - MUTATION_WEIGHT } else { 1.0 };
+   let mut score = (base) * scale + norm_mutation[i] * if has_mutation { MUTATION_WEIGHT } else { 0.0 };
+   ```
+   When empty: score = base * 1.0 + 0 = base → unchanged. 
+
+   That satisfies "files without the sensor file" unchanged (the whole map is empty → unchanged), and when sensor exists files without entries get 0 mutation contribution but base is scaled by 0.9 — hmm, that means for files without entries in a present sensor map, scores differ from old behavior slightly (scaled by 0.9). Is that "unchanged"? The task: "behavior for files without the sensor file is unchanged" — the sensor file absent (normal state) is the emphasized case: "With the sensor file absent (normal state), risk scores and the report must be unchanged from before". So the empty-map case must be identical. The per-file-no-entry-in-present-map case can be slightly scaled.
+
+   OK let me go with the conditional approach. Actually, simpler: keep MUTATION_WEIGHT = 0.10, and when the map is non-empty only:
+
+   ```rust
+   let mutation_map = load_mutation_survival(Path::new(".arc/mutants_per_file.json"));
+   let mutation_present = !mutation_map.is_empty();
+   let scale = if mutation_present { 1.0 - MUTATION_WEIGHT } else { 1.0 };
+   ```
+
+   Then per-file survival lookup: `mutation_map.get(path.as_str()).copied().unwrap_or(0.0)`.
+
+   For norm: values already [0,1]. I'll use them directly as `norm_mutation`. Hmm, but should I normalize? Other signals are min-max normalized. Survival is already a fraction. I'll push raw survival and use as-is (documented as already in [0,1]). Actually let me just do normalize_scores on it for uniformity — no, that distorts absolute meaning. Direct use is better since it's already [0,1]. I'll name it `mutation_signal[i]`.
+
+   Then FileRisk gets `mutation_survival: raw value`.
+
+   Also add signal tag: when mutation_survival > 0.5, push "▲mut" tag? The report requirement says show `mut` tag with % when non-zero. Let me add to signals "▲mut" when survival > 0.5 (consistent with other signal thresholds), and in the report display add a `mut 85%` column or tag. The task: "when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". So in `format_risk_report`, append to signals_str a `mut NN%` marker when > 0.
+
+   Since format_risk_report has access to the whole FileRisk, I can format:
+   ```rust
+   let mut signals_str = risk.signals.join(" ");
+   if risk.mutation_survival > 0.0 {
+       let pct = (risk.mutation_survival * 100.0).round();
+       if !signals_str.is_empty() { signals_str.push(' '); }
+       signals_str.push_str(&format!("mut {pct:.0}%"));
+   }
+   ```
+   That's display-only. Good, no accuracy changes (SIGNAL_NAMES in accuracy stays 7).
+
+   Also add "▲mut" to the risk signals vec in compute when survival > 0.5 — but wait, snapshot code serializes signals; adding a new signal label is fine (label_to_index doesn't map it → None, ignored in weight learning). And SIGNAL_NAMES stays 7. That's fine. But to keep it simple and only do the report display (task item 3) — the task says surface in the file-risk display. Adding "▲mut" to signals would also surface it via risk_context and snapshot. Hmm, minimal: just display in format_risk_report. But the "signals" list is what other consumers show. The task's item 3 explicitly says "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". So report display only. I'll do the report display and also add "▲mut" to signals? Adding to signals vec would change snapshot JSON (new signal name in top_10), which the accuracy code parses — it maps known labels only, so safe. But it also changes `risk_context_for_files` descriptions via signal_labels_to_description (unknown → skipped, falls to "elevated risk score"). Minimal and safe: only display in format_risk_report. I'll keep signals unchanged.
+
+   Actually wait — there might be a test `test_compute_file_risk_scores_has_coupling_signal` etc. Let me check tests that assert on signals to ensure I don't break them. I'll keep signals unchanged. Good.
+
+2. Fix the build error at commands_risk.rs:906 — add `mutation_survival` field to the FileRisk initializer.
+
+3. Fix test initializers in commands_risk_snapshots.rs, commands_risk_emerging.rs, commands_risk_report.rs, commands_risk.rs (line 4407 area) — add the field. These are needed for `cargo test` to compile.
+
+4. Add unit tests for `load_mutation_survival` (temp dir with well-formed, malformed, missing).
+
+Let me check exact test initializers to fix. From grep:
+- src/commands_risk_snapshots.rs:566, 668
+- src/commands_risk_emerging.rs:202, 360
+- src/commands_risk_report.rs:200, 467
+- src/commands_risk.rs:4407
+
+Let me view each and fix. The field has a default comment... Rust struct has no default; need explicit field. Let me write fixes.
+
+First, wire compute_file_risk_scores. Let me modify:
+- After `let coupling_map = co_change_coupling();` or before, load mutation map.
+- Add `raw_mutation` vec.
+- Rename norm and add mutation to scoring.
+
+Let me also update the weights comment. Let me now make the edits.
+────────────────────────────────────────────────────────────────────────────────
+The task's partial implementation added the field, weight constant, and loader but never wired them in. I need to: (1) wire the signal into `compute_file_risk_scores`, (2) set the field in the initializer at line 906, (3) add the display in `format_risk_report`, (4) fix test initializers in 4 files (they'll fail cargo test), (5) add unit tests for the loader. Let me start with
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:725..755 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Key consideration: the task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Wait — "behavior for files without the sensor file is unchanged". Interesting. If I add a 0.10 weight for mutation to a weighted sum, behavior changes vs before unless I rebalance by scaling the other weights down by 0.9. Let me think:
+
+Original: score = sum(weights[i] * norm[i]) with weights summing to 1.0.
+
+With mutation signal added at weight 0.10, if I keep the same weights for the others (sum 1.0) plus 0.10 mutation, the total would be 1.10. But for files without the sensor (mutation_survival=0), score = original + 0.10 * 0 = original. So behavior IS unchanged for the no-signal case if mutation contributes 0. Actually the task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0" — this suggests: scale the 7 weights so the 8 weights sum to 1.0. If sum must stay ~1.0, then mutation gets 0.10 and the other 7 get scaled by 0.90: 0.30→0.27, 0.15→0.135, etc. But wait, that changes behavior for files without the sensor file (all, in normal state) — scores would be scaled by 0.9.
+
+Hmm, "rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged" — these two statements are in tension with simple rebalancing. The cleanest way to satisfy both: 
+
+score = 0.90 * existing_weighted_sum + 0.10 * norm_mutation
+
+where existing_weighted_sum uses the original (already summing to 1.0) weights. So the total effective weights: original table × 0.90 (sums to 0.90) + MUTATION_WEIGHT 0.10 = 1.0. And when mutation signal is absent (norm_mutation = 0), score = 0.90 × original. Hmm, that changes behavior (scaling by 0.90) though...
+
+Alternatively: score = existing_weighted_sum + 0 means the normalized mutation value is folded in as an additive bonus but not as part of the weighted sum... Actually let me re-read:
+
+"Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+I think the intent: keep 7 existing weights summing to 1.0 as-is (don't touch RISK_WEIGHTS), and add mutation as an 8th signal with weight 0.10 that's additive OUTSIDE the normalized table — i.e., fold: score += MUTATION_WEIGHT * norm_mutation. That way:
+- Sum of weights: the 7-table still sums to 1.0. The mutation contribution is an additional weight. Total "distribution" - well it's 1.0 + 0.10 worst case, but since mutation is bounded [0,1] and weight is small, it complements rather than dominates.
+- Behavior for files without sensor: norm_mutation = 0 → score unchanged. ✓
+
+Hmm but "rebalance other weights so the sum stays ~1.0" suggests making the combined 8 weights sum to 1.0. The approach:
+
+score = 0.90 * base_weighted_sum + 0.10 * norm_mutation
+
+This makes the total weight distribution sum to ~1.0 (0.90 from the 7 rebalanced... wait, no — the 7 weights aren't rebalanced; base_weighted_sum uses weights that sum to 1.0, multiplied by 0.90 gives effective 0.90).
+
+Actually, if I do `score = base * (1.0 - MUTATION_WEIGHT) + MUTATION_WEIGHT * norm_mutation`, then:
+- For files without sensor: score = 0.90 * base. This changes the score value (all scores scaled by 0.90), which changes behavior — although proportionally the ranking stays the same, and thresholds (0.5, top quartile, etc.) are applied to scores after... ranking by score stays identical since it's a linear scaling. Thresholds would shift though: `risk.score > 0.5` — a file with base 0.6 would drop to 0.54, still > 0.5. A file at base 0.56 drops to 0.504, still above. A file at 0.5 becomes 0.45 — crosses the threshold. So ranking unchanged but absolute thresholds in risk_context_for_files (>0.5) and top-quartile would change. That's arguably a behavior change for users without the sensor.
+
+The cleanest interpretation satisfying "behavior for files without the sensor file is unchanged" literally: additive fold.
+
+score = base_weighted_sum + MUTATION_WEIGHT * norm_mutation
+
+where base_weighted_sum uses the existing 7 weights. For no-sensor files, mutation term = 0 → score identical. ✓ "complements rather than dominates" ✓ (max +0.10 addition). The "sum stays ~1.0" phrasing about rebalancing — with additive, weights effectively sum to 1.10 max. Hmm.
+
+Let me look at what would be most sensible given the existing code structure and tests. There's a test `test_risk_weights_sum_to_one` at line 3149. Let me check the actual decision. The task statement says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+I think the safest engineering choice that satisfies BOTH constraints: 
+- Restore-normalize: norm_mutation is in [0,1] (0 for no signal).
+- score = MUTATION_WEIGHT * norm_mutation + (1.0 - MUTATION_WEIGHT) * base_weighted_sum.
+
+This is the standard way to add a signal with a given weight while keeping all weights summing to 1.0. The "behavior for files without the sensor file unchanged" — under this, it changes by a uniform scale factor 0.9. The task's parenthetical is a bit internally inconsistent; but ranking is preserved under uniform scaling, and the primary use of scores is ranking + threshold. Hmm.
+
+Actually let me reconsider: which is more likely to pass review/evaluator? The evaluator likely checks: weights sum ~1.0, mutation weight 0.10, files without signal unchanged. Let me look at whether there are existing tests asserting exact scores. Let me check test_compute_file_risk_scores tests and the SIGNAL_NAMES usage for accuracy — the task says keep accuracy display-only if the accuracy code iterates named signals; SIGNAL_NAMES is [&str; 7] in accuracy.rs too, with compute_per_signal_hits. So I should NOT add mutation to SIGNAL_NAMES (would break the 7-weight parallel arrays and validation snapshot parsing). Keep display-only in the report.
+
+For the composite fold, I'll go with the normalized blend:
+
+score = (1.0 - MUTATION_WEIGHT) * base + MUTATION_WEIGHT * norm_mutation
+
+Wait, but then "behavior for files without the sensor file is unchanged" fails literally. Hmm.
+
+Let me think about which is truly "unchanged": For files without the sensor file (all files in normal state), with additive: score identical. With scaled blend: score × 0.90. Tests like `risk_context_for_files` (score > 0.5) and file_risk_summary top-quartile threshold are relative — thresholds adapt. The `> 0.5` threshold in risk_context_for_files is absolute though.
+
+The task explicitly says: "With the sensor file absent (normal state), risk scores and the report must be unchanged from before (fail-soft; no regression for users without the artifact)." — This is under "Verify". So the additive approach is REQUIRED: score must be bit-identical when the sensor is absent.
+
+So: score = base_score + MUTATION_WEIGHT * norm_mutation, where base_score is the existing weighted sum, and norm_mutation = mutation_survival normalized... Actually the survival fraction is already in [0,1] (clamped by loader). "Normalize into the same 0..1 space" — the survival fraction is already 0..1, but I should normalize across files: a file with 0.8 survival where most files have 0.1 would... Hmm. "Normalize into the same 0..1 space" — since the loader already clamps to [0,1], normalize_scores over the raw survival values gives min-max normalization. But files with no entry get 0. If most files have no entry (all 0), and one file has 0.8: min=0, max=0.8, so that file → 1.0. That amplifies. But if ALL files have no entry, normalize returns all zeros (range==0). Good.
+
+But wait — with min-max normalization across files, a single file with any nonzero survival gets norm 1.0 potentially, giving it +0.10 — "complements rather than dominates" ok.
+
+But there's a subtlety with the fail-soft claim: "behavior for files without the sensor file is unchanged". With raw survival values, files without entries are 0. After min-max normalization, if at least one file has a nonzero value, the zeros stay 0 (v-min)/(range) = 0 since min=0. Files with entries get normalized to (v-0)/max. So no-signal files get exactly 0 contribution. ✓ Identical scores for them.
+
+Hmm, but is min always 0? normalize_scores uses global min which is 0 (since files without entries are 0). So yes, no-signal → 0.0. 
+
+Now the weight distribution: base weights sum to 1.0, plus mutation weight 0.10 additive → total up to 1.10. The "rebalance" constraint... the task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)". These conflict unless we do it the additive way with the justification that the mutation term is a bounded bonus, and "rebalance" is impossible without changing no-sensor behavior. Given the Verify section explicitly demands unchanged risk scores when the artifact is absent, additive wins. I'll document in comments that the 7 base weights still sum to 1.0 and mutation is an additive bounded bonus of at most MUTATION_WEIGHT.
+
+Actually — maybe a cleaner reading: "rebalance other weights so the sum stays ~1.0" could refer to... hmm, alternatively, change RISK_WEIGHTS to 8 entries? No — loads of code (snapshots, learning) iterate 7. Don't touch.
+
+Decision: additive fold. score = base + MUTATION_WEIGHT * norm_mutation. Simple, satisfies the hard Verify requirement, and the display-only reporting.
+
+Now for the report display (#3): "when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". I'll add to format_risk_report a mut tag in the signal area or a separate column. The header shows "Risk   T/100  File...Signals". I'll append to signals_str: if mutation_survival > 0, add format!("{CYAN}mut {:.0}%{RESET}") or maybe "◆mut 60%". Let me keep it simple: append `mut NN%` to the signals display. Also update header maybe not needed since it goes in the signals column.
+
+Wait — task says accuracy code: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." SIGNAL_NAMES is 7 in accuracy.rs and it iterates per-signal hits. So keep display-only. Good.
+
+Now let's implement. First wire into compute_file_risk_scores:
+
+After loading mutation map (fail-soft path: `.arc/mutants_per_file.json` — but for testability and computing, I need a path. Let me check the task: "a loader `load_mutation_survival(path) -> HashMap<String, f64>`". Compute should call it with a default path `.arc/mutants_per_file.json`. Let me add a const MUTATION_SURVIVAL_PATH = ".arc/mutants_per_file.json".
+
+In compute_file_risk_scores, add:
+```rust
+// 7. Mutation survival — weight MUTATION_WEIGHT (additive bonus)
+let mutation_survival = load_mutation_survival(std::path::Path::new(MUTATION_SURVIVAL_PATH));
+```
+And a raw_mutation vector pushed per file in the loop: `raw_mutation.push(*mutation_survival.get(path.as_str()).unwrap_or(&0.0));`
+
+Then after normalization section:
+```rust
+let norm_mutation = normalize_scores(&raw_mutation);
+```
+
+In the score loop:
+```rust
+let mut score = ... (same 7 signals);
+// Mutation-survival bonus: files whose mutants survive are undertested/fragile.
+// Additive (not part of the 7-weight table) so files with no sensor entry get
+// exactly 0 contribution — scores are unchanged when the artifact is absent.
+score += MUTATION_WEIGHT * norm_mutation[i];
+```
+
+And add signal tag:
+```rust
+if norm_mutation[i] > 0.5 {
+    signals.push("▲mut-survive");
+}
+```
+
+Hmm, wait — signal labels map to snapshot parsing via label_to_index. Snapshot records signals list. If a NEW signal label "▲mut-survive" appears in snapshots, label_to_index returns None for it — parse_detailed_events builds per-file signal indices... let me check how unknown labels are handled. Line 385 uses SIGNAL_NAMES.to_vec(). Let me check label_to_index usages and whether an unknown label breaks anything. Also compute_per_signal_hits maps labels → indices via label_to_index presumably.
+
+Let me check. Actually the risk is: snapshots would record "▲mut-survive" and accuracy code iterates SIGNAL_NAMES (7) and label_to_index returns None → what happens? If it does `signals.iter().filter_map(label_to_index)` it's filtered out safely. Need to verify. But actually the task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." This is about the report's per-signal breakdown, not about tags. But adding a new tag that flows into snapshots could affect accuracy computation. Safer: DON'T add a new ▲tag to signals. Instead show mutation inline in the report (e.g. "mut 60%") and NOT in the signals vec. That avoids snapshot/accuracy interference entirely and keeps no-sensor behavior unchanged.
+
+Let me verify label_to_index handling of unknown labels to be sure — check parse_detailed_events around line 385 and accuracy code.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how signal labels flow into snapshots/accuracy, to decide whether adding a tag is
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '370,420p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '300,340p' src/commands_ris… ✓ (3ms)
+ ✓ (6ms)
+  2 tools completed in 782ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The signals in `FileRisk.signals` are labels like "▲churn", "▲size". `label_to_index` maps labels to weight indices for weight-learning. If I add a "mut" or "▲mutant-survival" tag to signals, `label_to_index` returns None for it — fine, it's just ignored in weight learning.
+
+But the task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." The accuracy code uses a fixed `[usize; 7]` array indexed by the 7 SIGNAL_NAMES — it doesn't iterate arbitrary named signals. So keep mutation display-only: show a `mut` tag in format_risk_report when mutation_survival > 0, but don't add to accuracy breakdown.
+
+Should I add mutation_survival to `signals` vector? The task suggests e.g. a `mut` tag with the % in the report display. The cleanest: in `format_risk_report`, display a `mut XX%` tag when `risk.mutation_survival > 0.0`. Also perhaps push "▲mut" onto signals — but that could affect the accuracy "per-signal" display and weight learning indirectly (label_to_index ignores unknown labels, so harmless), and snapshot serialization (top_10 signals get serialized — unknown label would just be there). But the task says keep it display-only to avoid touching accuracy thresholds. Safer: display-only in format_risk_report, not in signals vector.
+
+Wait — but should the mutation signal tag appear in the risk display? The task: "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". So yes, in format_risk_report show a mut tag. Display-only, computed from `risk.mutation_survival` field. Good — no changes to signals vector, accuracy untouched.
+
+Now, the scoring design:
+
+Current weights: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] (7 signals, sum 1.0).
+
+Task: add mutation-survival signal with modest weight (e.g. 0.10), and "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+Hmm — "behavior for files without the sensor file is unchanged". That's a key subtlety. The total must stay ~1.0. If we just add a new signal with weight 0.10 without rebalancing, total becomes 1.10. We need to rebalance. But also "files without the sensor file" — when mutant_survival map is empty, files get 0 mutation signal, so the mutation term contributes 0 * 0.10 = 0. That means the rest of the weights still sum to 1.0 (if we keep the other 7 at their current values and treat mutation as an extra floating bonus)...
+
+But then total would be 1.10 when a file does have a mutation signal. Hmm, the task says "rebalance other weights so the sum stays ~1.0". So the composite score should be a weighted sum that stays in roughly [0,1]. Two options:
+
+Option A: 8 weights sum to 1.0: rebalance existing 7 down a bit to make room for mutation weight 0.10. E.g. scale the 7 existing weights by 0.90: [0.27, 0.135, 0.135, 0.09, 0.09, 0.09, 0.09] sums to 0.90, plus 0.10 mutation = 1.0. But "behavior for files without the sensor file is unchanged" — that would NOT be unchanged, because all scores would be scaled by 0.90 when the sensor is absent. Unless... the normalization of the composite... Hmm.
+
+Actually the risky detail: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)." These two constraints conflict slightly. Let me think again.
+
+Interpretation: The mutation signal is multiplied by MUTATION_WEIGHT and added to the composite score. When no sensor file exists, survival = 0.0 for all files, so the term is 0 and total weight distribution is exactly the existing one — unchanged. When the sensor file exists, the term contributes up to MUTATION_WEIGHT extra (score could reach ~1.10)... that would make the total exceed 1.0.
+
+Alternative: keep 8 weights summing to 1.0 where mutation is weight 0.10 and the others get scaled by 0.90. Then "behavior for files without the sensor file" would change (scores scaled down by 0.90) — violates the constraint.
+
+Hmm, wait. Actually maybe "behavior unchanged" is about fail-soft regression: without the artifact, the report/scoring shouldn't regress. The relative ordering is preserved under uniform scaling... but absolute scores change, and thresholds like >0.5 in risk_context_for_files and the top-quartile threshold would shift. That could count as a regression.
+
+Let me re-read: "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+I think the cleanest reading: the mutation signal should be *normalized* into 0..1 and combined so that the total stays ~1.0. Rebalance = scale the seven existing weights so that (existing sum) + MUTATION_WEIGHT == 1.0. E.g. existing 7 weight each × (1 − 0.10) = × 0.90. When no sensor, mutation term = 0, total = 0.90 × old — behavior not literally unchanged.
+
+Hmm, but maybe "behavior unchanged" refers to: for files without the sensor file (i.e., files with no entry in the map — survival 0), their contribution is unchanged relative to files WITH survivors... hmm no.
+
+Actually, let me reconsider. Maybe a better design that satisfies both: treat mutation as a *bump* added on top (like the test-density penalty at line 880-884, which adds a raw bump not part of the weight sum). The current code already has `score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;` — a bonus term outside the weight sum. So adding `score += survival * MUTATION_WEIGHT` as a bump parallel to that keeps the 7-weight sum exactly 1.0 (unchanged distribution), and when sensor absent the term is 0.0 → behavior literally unchanged. That satisfies "sum stays ~1.0" (score can slightly exceed 1.0 with the bump, same as the existing test-density penalty does today) and "behavior for files without the sensor file is unchanged" (literally true).
+
+But the task says "rebalance other weights so the sum stays ~1.0" — this suggests they want the weighted-signal sum itself to remain ~1.0 by rebalancing, implying an 8th weight added to the weights array. Hmm. But then "behavior for files without the sensor file is unchanged" can't hold in absolute terms.
+
+Let me check how the weights array is used elsewhere: RISK_WEIGHTS [7] feeds load_learned_weights (7 weights, must sum ~1.0 within 0.05 tolerance), learn_weights_from_history_to writes 7 weights, accuracy per-signal uses SIGNAL_NAMES [7], label_to_index maps signal labels to 7 weight indices. Changing RISK_WEIGHTS to 8 entries is invasive: learn_weights (7), snapshot validation label_to_index (7), accuracy (7). That's "touching accuracy thresholds" territory which the task explicitly says to avoid ("otherwise keep it display-only to avoid touching accuracy thresholds").
+
+So the pragmatic, minimal design:
+- Keep 7 existing weights untouched (sum = 1.0).
+- Add mutation bump term: `score += norm_mutation[i] * MUTATION_WEIGHT` where norm_mutation[i] is the survival fraction (already in [0,1], clamped by loader) when an entry exists, else 0.
+- This is exactly analogous to the existing test-density penalty bump.
+- When sensor file absent → all 0 → behavior unchanged. ✓
+- MUTATION_WEIGHT = 0.10 modest. ✓ (max bump 0.10)
+
+I'll document in the comment that mutation folds as an additive bump (parallel to test-density penalty) so the 7-signal weight sum stays exactly 1.0 and absent-sensor behavior is bit-identical.
+
+Wait, but "rebalance other weights so the sum stays ~1.0" — with the bump approach the weighted sum IS 1.0 exactly (bump is outside). Hmm, "rebalance other weights" explicitly asks to rebalance. But rebalancing would break "behavior unchanged". The two constraints are contradictory unless we interpret "sum" as including the mutation term but only when present... 
+
+Actually, let me reconsider: maybe they intend normalization of mutation into 0..1 (not raw survival) and then fold. The mutation survival values for different files within one run could range 0..1; normalize_scores maps min→0, max→1. But if only a few files have entries, normalize changes relative magnitude. The task says "Normalize into the same 0..1 space" — survival is already in [0,1] by the loader clamp. Hmm, "normalize into the same 0..1 space" most simply = the fraction is already in [0,1], so use it directly as norm.
+
+I'll go with: raw survival fraction (clamped, already 0..1) as the normalized signal, additive bump with MUTATION_WEIGHT 0.10, and keep the 7-weight sum exactly 1.0. I need to make sure the doc comment on RISK_WEIGHTS stays accurate (still 7 weights summing to 1.0), and note the mutation bump in the compute function with a comment. This satisfies "complements rather than dominates", "fail-soft for files without the sensor", "sum stays ~1.0" (weighted sum is exactly the existing 1.0; bump bounded at 0.10), and no accuracy-threshold touching.
+
+Actually hold on — let me reconsider whether adding to signals vector. If I push "▲mut" tag into signals for files with survival > 0.5 or just > 0, then format_risk_report already joins signals and would show it. And label_to_index doesn't know it → weight learning unchanged. Snapshot serialization serializes signals — an extra label "▲mut" would appear in snapshots and then parse back; label_to_index ignores it. So it's safe... BUT it would show in ALL displays of signals (risk_context_for_files output, file_risk_summary descriptions — signal_labels_to_description returns "elevated risk score" fallback... no wait, it maps known labels, unknown ignored, so mut wouldn't render in description but would show raw in format_risk_report signals_str join). 
+
+The task says "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". A `mut` tag with the % — so they want the percentage shown, e.g. "mut 87%". That's cleaner as a dedicated column segment in format_risk_report rather than stuffing into signals. I'll do it in format_risk_report only (display-only, from the field), keeping `signals` untouched. This avoids any accuracy/snapshot interaction entirely.
+
+Now: should mutation_survival be stored per-file on FileRisk? Yes, field exists; populate from the loaded map. That also lets the report show it.
+
+Now let me write the changes:
+
+1. In compute_file_risk_scores:
+   - Load mutation map: `let mutation_survival = load_mutation_survival(std::path::Path::new(MUTATION_SURVIVAL_PATH));` — need a path const. Check if run_mutants.sh writes `.arc/mutants_per_file.json` — task says `.arc/mutants_per_file.json`. Add const `MUTATION_SURVIVAL_PATH: &str = ".arc/mutants_per_file.json";`
+   - In the per-file loop, add a `raw_mutation` push: `raw_mutation.push(mutation_survival.get(path.as_str()).copied().unwrap_or(0.0));` — but the loader already clamps and skips non-positive, so entries are in (0,1].
+   - Normalize: survival is already in [0,1]; normalize_scores would min-max across files which changes semantics (a single file with 0.5 would become 1.0). Better: use the value directly as normalized (already 0..1). But the task says "Normalize into the same 0..1 space" — using the value directly IS 0..1 space. However, for consistency with the other signals which are min-max normalized... the test-density one is `1.0 - effective_coverage` already 0..1 and still goes through normalize_scores. Hmm, normalize_scores on an already-0..1 set just rescales. For "files with no entry get 0" that means no signal — with min-max normalization, if many files have 0 and one has 0.8, min-max makes 0s stay 0 and 0.8 → 1.0. That amplifies. I think using the raw value directly (already in [0,1], failure = 0) is the most faithful to "files with no entry get 0 (no signal)" and "Normalize into the same 0..1 space". I'll use it directly without min-max, documenting why.
+
+   Actually wait — "Normalize into the same 0..1 space" — the survival fraction from run_mutants.sh is already a fraction in [0,1]. So it's already normalized. Good, use directly.
+
+   - Score: add `score += norm_mutation[i] * MUTATION_WEIGHT;` after the test-density penalty (a bump). Also store `mutation_survival: norm_mutation[i]` in FileRisk, and maybe add a signal tag? Keep signals untouched per above.
+   
+   Hmm wait, but should the bump multiply raw survival (max 0.10) — that means a file with 100% survival gets +0.10. Fine and modest.
+
+2. format_risk_report: display mut tag. The header currently: `Risk   T/100  File{:width$}Signals`. I'll add `mut` column after T/100 maybe as `M%`. Let me design minimally: after td_display, prepend a `mut XX%` tag into the signals area or its own small column. Given fixed-header alignment, simplest: if mutation_survival > 0, append `mut {:.0}%` to the signals_str (colored differently). Let me add: `let mut_tag = if risk.mutation_survival > 0.0 { format!("{RESET}{MAGENTA}mut {:.0}%{RESET} ", risk.mutation_survival * 100.0) } else { String::new() };` and include in the format line after signals: `{padded_path}{CYAN}{signals_str}{RESET}` → add ` {mut_tag}`. Hmm need to be careful with colors. Let me output as: `  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}  {mut_tag}`. Looks fine.
+
+Actually to keep the header honest, maybe update header to include `Mut%`. But alignment with per-row conditional... The mut tag in the signals area is simplest and legible. I'll append it to the signals portion.
+
+Actually, let me also add a "▲mut" style tag? No — task says 'a `mut` tag with the %'. I'll render exactly `mut 87%`.
+
+3. Fix all 5 FileRisk test initializers (missing mutation_survival field):
+   - src/commands_risk_snapshots.rs:566, 668
+   - src/commands_risk_emerging.rs:202, 360
+   - src/commands_risk_report.rs:200, 448 (two)
+   - src/commands_risk.rs:4407
+
+   Let me find all exact spots.
+
+4. Unit test for load_mutation_survival in src/commands_risk.rs tests module: temp dir with well-formed, malformed, missing.
+
+Let me also double check whether compute_file_risk_scores has other FileRisk initializers in main code (line 906) — the only production one. Good.
+
+Now check line 906 area again and the exact structure. Also confirm there are no other places instantiating FileRisk outside tests (grep showed commands_risk.rs:906, 4407(test); snapshots 566,668(test); emerging 202,360(test); report 200,467 test).
+
+Let me also check the tests around 3149 (test_risk_weights_sum_to_one) and 3171 to make sure my bump doesn't break them. test_risk_weights_sum_to_one sums RISK_WEIGHTS — unchanged. test_compute_file_risk_scores_has_coupling_signal — let me look at it; it runs compute_file_risk_scores on the live repo. Need to ensure mutation_survival field filled doesn't break it. Let me read it.
+
+Also there's test_compute_file_risk_scores_returns_all_files at 2514. It may assert signals etc. Let me read those tests.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the tests that use `compute_file_risk_scores` and the exact remaining initializer
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2460,2560p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '3145,3230p' src/commands_r… ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 863ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the codebase. Let me plan the changes:
+
+**1. `src/commands_risk.rs` — `compute_file_risk_scores`:**
+- Add `raw_mutation: Vec<f64>` and `mutation_survival` values
+- Load mutation survival map at the top: `let mutation_survival = load_mutation_survival(std::path::Path::new(MUTATION_SURVIVAL_PATH));`
+- Need a constant for the path: `.arc/mutants_per_file.json`
+- For each file, push its fraction (0 if absent)
+- Normalize: `norm_mutation = normalize_scores(&raw_mutation)` — but wait, the raw values are already in [0,1]. Hmm — the task says "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)". Since the values are already fractions in [0,1], normalize_scores could map the max to 1.0 and min to 0.0, but that would amplify differences. Actually since values are already in [0,1], I can use them directly as the normalized signal (they're already in the same 0..1 space). But "Normalize" per the task could just mean use as-is since it's already normalized. Let me think: normalize_scores with values like [0.1, 0, 0.8] would give [0.125, 0, 1.0]. That's min-max normalization which changes semantics. The task says "look up its survival fraction; files with no entry get 0 (no signal). Normalize into the same 0..1 space". Since the fraction is already in [0,1], using it directly satisfies "the same 0..1 space". I'll use raw fraction directly (already normalized) — that's simplest and most faithful. Actually, but the requirement says "Normalize into the same 0..1 space" — the fraction IS in 0..1 space. So `norm_mutation[i] = mutation_values[i]` directly. 
+
+- Rebalance weights: current 7 weights sum to 1.0: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]. Adding MUTATION_WEIGHT = 0.10, I need to rebalance so sum stays ~1.0. The task says "rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged". 
+
+Hmm, "behavior for files without the sensor file is unchanged" — that's tricky. If we rebalance the 7 weights down (multiply each by 0.9), then files without the sensor would get 0.9× their old 7-signal contribution, changing behavior. To keep behavior unchanged when sensor absent, the cleanest approach: give mutation a weight of 0.10 by scaling the ORIGINAL 7 weights by (1 - MUTATION_WEIGHT) = 0.90, and fold in mutation * MUTATION_WEIGHT as an ADDITIVE extra term. But that changes scoring when sensor absent (scores get scaled by 0.9).
+
+Alternative approach that keeps behavior unchanged when no sensor signal: Since files with no entry get 0 mutation signal, and the composite = Σ(w_i * norm_i) + mutation_weight * norm_mutation, if we set the 7 weights to their original values and add mutation as an additive 8th term... then the sum of weights = 1.10, not 1.0. The task explicitly says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0...)". 
+
+Hmm, "behavior for files without the sensor file is unchanged". Since `load_mutation_survival` returns an empty map when the file is absent, ALL files get 0 mutation signal. In that case, composite = Σ(w_i * norm_i) with rebalanced weights. If we rebalance by multiplying each of the 7 weights by 0.9, files without sensor get 0.9× old contribution. That IS a behavior change.
+
+The truly unchanged approach: incorporate the mutation term into the 7-vector by renormalizing. But we can't both keep sum=1.0 and keep old 7-weight contributions identical while adding an 8th term with weight 0.10.
+
+Wait — actually re-read: "Rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged." Perhaps "unchanged" means unchanged in *relative ordering/ranking* — scores scale by a constant factor 0.9, which preserves ranking and thresholds relative ordering. But threshold 0.5 checks in risk_context would change... scores would drop. Hmm.
+
+Let me think about what's the most sane and faithful implementation:
+
+Option A: 8 weights: [0.27, 0.135, 0.135, 0.09, 0.09, 0.09, 0.09, 0.10] (7 old × 0.9, plus mutation 0.10). Sum = 0.9×0.9... 0.3*0.9=0.27, 0.15*0.9=0.135 ×3 = 0.405, 0.10*0.9=0.09 ×3 = 0.27. Total 0.27+0.135+0.135+0.09+0.09+0.09+0.09 = 0.9. Plus 0.10 = 1.0. 
+
+When sensor file absent, all mutation = 0, so scores = 0.9 × old score. Ranking unchanged, but absolute values shift down 10%. Threshold checks (> 0.5) could flip some files. This contradicts "behavior unchanged".
+
+Option B: Since the survival fractions are only ever present for files actually covered by run_mutants.sh, and are 0-1 fractions, I apply normalized mutation directly but keep old 7-vector as-is... sum 1.10.
+
+Hmm. Actually, maybe the intended reading is simpler: the mutation weight replaces the need for rebalance by scaling, and "behavior unchanged" refers to the loader failing soft so no crash, and that when the artifact is absent the mutant contribution is literally zero. Given old weights are documented "must sum to 1.0" and there's a test `test_risk_weights_sum_to_one`, adding an 8th weight requires updating that test.
+
+Actually, wait. Let me reconsider. The cleanest design that satisfies ALL constraints:
+
+- Treat mutation as a bonus/penalty term added after the weighted sum, like the existing test-density penalty (line 880-884: `if path.ends_with(".rs") { score += ... / 100.0 }`). The penalty is additive, not part of the weight vector. Similarly, add `score += mutation_weight * norm_mutation[i]`.
+
+But the task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0". "total weight distribution" — that phrasing suggests the weights vector should still sum to ~1.0. If I add mutation as a separate additive term (like the penalty), then the weight vector stays at 7 entries summing to 1.0, and the mutation term is a modest additive bump of at most 0.10. That keeps "total weight distribution sane" (the 7-vector still sums to 1.0) and behavior is unchanged when mutation is absent (additive term = 0). This is the best interpretation! It mirrors the existing penalty pattern exactly.
+
+Hmm, but "fold it into the final composite score with a modest weight (e.g. 0.10)... rebalance other weights so the sum stays ~1.0" — this really reads like they want an 8th weight in the vector with rebalancing. But then "behavior for files without the sensor file is unchanged" is impossible with rebalancing...
+
+Unless! We make the mutation weight come out of... hmm no.
+
+Let me re-read once more: "for each file, look up its survival fraction; files with no entry get 0 (no signal). Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+OK here's an interpretation that works: The key insight — if we use min-max normalize on the mutation fractions, then when the sensor file is absent, `raw_mutation` is all zeros → `normalize_scores` returns all 0.0. So the mutation signal contributes 0 and we need the 7-vector unchanged → don't rebalance at all. Make the mutation additive like the penalty.
+
+Actually you know what, let me reconsider: maybe simplest faithful reading — 8-weight vector where mutation weight is 0.10, and the other 7 are rebalanced (scaled by 0.9). "Behavior for files without the sensor file is unchanged" could mean: *when the `.arc/mutants_per_file.json` doesn't exist*, the code path behaves the same way as before (i.e., fail-soft, no crash, nothing weird). The scores would scale by 0.9 but the *behavior* (no crash, sensible output) is unchanged. Hmm, but that's a stretch and it would silently change all scores.
+
+Given the constraint of the existing test `test_risk_weights_sum_to_one` (7 weights sum to 1.0), and the risk of silently changing all scores (breaking thresholds), I'll go with the additive approach that matches the existing penalty pattern:
+
+```rust
+// Mutation-survival signal: fold in as a modest additive term.
+// High survival → behavior may be undertested/fragile → higher risk.
+// Zero when no sensor artifact or no entry (fail-soft: behavior unchanged).
+score += MUTATION_WEIGHT * norm_mutation[i];
+```
+
+Wait, but hold on. Let me reconsider whether to put it in the weights array. Actually there's a subtlety: the task explicitly said "Normalize into the same 0..1 space and fold it into the final composite score". If I do additive mutation term, that satisfies "fold it into the final composite score with a modest weight (e.g. 0.10)". And rebalancing: "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0...)" — with an additive term, the weight distribution is unchanged, which is trivially "sane" and sum stays 1.0. The parenthetical "(rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)" — the tension between these two goals is unresolvable if strict rebalancing; the additive approach resolves it by keeping sum exactly 1.0 AND keeping absent-sensor behavior identical. I'll document this decision in a comment.
+
+Actually hmm, wait. Let me reconsider scaling factors once more. If I scale the 7 weights by 0.9 and add mutation*0.10:
+- Sensor absent: score = 0.9 * old_score. All scores shift down. `format_risk_report` shows lower scores. Threshold-based logic (score > 0.5 in risk_context_for_files) changes. That would be a regression for users without the artifact — exactly what the task says must NOT happen ("With the sensor file absent (normal state), risk scores and the report must be unchanged from before (fail-soft; no regression for users without the artifact)").
+
+That last Verify bullet is decisive: "With the sensor file absent (normal state), risk scores and the report must be unchanged from before". So NO rebalancing of the 7-vector; the mutation term must be additive. 
+
+So:
+1. Load `mutation_survival` map at top of compute_file_risk_scores.
+2. In the per-file loop, push `*map.get(path).unwrap_or(&0.0)` into `raw_mutation`.
+3. Normalize (already in [0,1], but normalize_scores for consistency — actually since they're fractions in [0,1] already, I could use them raw. But the task says "Normalize into the same 0..1 space" — they're already there. min-max normalization would CHANGE them, e.g. [0.2, 0.8] → [0, 1]. Should I min-max normalize or use raw? 
+
+The phrase "Normalize into the same 0..1 space" — since the values are already 0..1 fractions, using them raw IS "in the same 0..1 space". Min-max normalizing would amplify and would also make single-positive-file cases produce all-zeros (normalize_scores returns all 0 for single element). Given fail-soft and "complements rather than dominates", raw usage is more faithful. I'll use the raw fraction directly and note it. Actually, to keep code uniform with the other norm_* variables, I can still have `norm_mutation` but set it to the raw values:
+
+```rust
+// Mutation survival is already a fraction in [0,1]; use raw values so a
+// single nonzero entry doesn't get boosted to 1.0 by min-max normalization.
+let norm_mutation = &raw_mutation;
+```
+
+4. Add to score: `score += MUTATION_WEIGHT * norm_mutation[i];`
+5. Add signal tag `▲mut-surv` (or per task example: "a `mut` tag with the %") when > threshold, e.g. > 0.5.
+6. Set `mutation_survival: raw_mutation[i]` (or norm) in the FileRisk initializer.
+
+Wait, but the FileRisk doc comment says "Used for display only" — so the field is display-only and the score gets the additive bump. Good.
+
+But careful: `test_compute_file_risk_scores_has_coupling_signal` asserts all signals are in the valid set: `["▲churn", "▲recent", "▲size", "▲reverts", "▲low-test", "▲coupled"]`. If I add a `▲mut-surv` signal, I must add it to that test's valid list. The `.arc/mutants_per_file.json` likely doesn't exist in the repo (no mutations run), so the signal wouldn't fire in tests, but the test would still pass. Still, I should add the tag to the valid signals list for robustness.
+
+Also, `label_to_index` maps labels to weight indices. If I add a new signal label, `label_to_index` returns None for it, and snapshot parse handles unknown labels via `if let Some(idx)`. For snapshots, signals get serialized into snapshot JSON. Adding a new label is fine since consumers ignore unknown ones. The task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." The accuracy code iterates SIGNAL_NAMES [&str; 7] arrays (in both commands_risk.rs and commands_risk_accuracy.rs). Adding an 8th would require touching both arrays and the per_signal_hits [usize; 7] structure — I'll keep it display-only. 
+
+**Report display** (`format_risk_report` in commands_risk_report.rs):
+- When `risk.mutation_survival > 0.0`, show a `mut` tag with the %, e.g. `▲mut-surv` or `mut 80%`. The task says: "when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". I'll append to the signals string or add to the row. Let me add it to the signals display: if mutation_survival > 0, append `mut {:.0}%` tag, colored. But the header column is "Signals" — appending a `mut NN%` tag there is natural.
+
+Actually — wait, if I put the `▲mut-surv` label into `risk.signals` itself in compute_file_risk_scores, then the report display shows it automatically, AND risk_context_for_files / file_risk_summary inherit it. But the task wants a percentage shown ("a `mut` tag with the %"). A `▲mut-surv` label doesn't carry the %. Better: keep the label in signals (for LEGIBILITY in report and context), and ALSO the report appends the percentage. Or: put the percentage tag in the report only, and keep the signal list clean with `▲mut-surv`. 
+
+Hmm, the task says for step 3: "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". This is about the display in the report. The FileRisk has `mutation_survival` field "Used for display only". So:
+
+- compute_file_risk_scores: add signal tag `▲mut-surv` when mutation_survival > 0.5 (consistent with other thresholds), and add score bump.
+- format_risk_report: when `risk.mutation_survival > 0.0`, append a `mut NN%` tag to the display. I'll add it after the signals.
+
+Let me now write the code.
+
+Also need to add constants:
+- `MUTATION_SURVIVAL_PATH: &str = ".arc/mutants_per_file.json";` — actually load_mutation_survival takes a path, and I can call `load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"))`. Let me add the constant for clarity.
+
+Let me also check the signal tag name — maybe use `▲mut-surv`? Let me keep it short: `▲mut` hmm. Let me check existing style: `▲churn`, `▲recent`, `▲size`, `▲reverts`, `▲low-test`, `▲coupled`. I'll use `▲mut-surv`.
+
+Wait, but there's `label_to_index` and snapshot serialization. When a snapshot is built with a `▲mut-surv` signal, label_to_index returns None → the `if let Some(idx)` guards it. Fine.
+
+Now the test for `load_mutation_survival`. Let me look at the end of commands_risk.rs test module to see where to add it. Also check tempfile usage in tests — yes, used already.
+
+Let me check the doc comment on `compute_file_risk_scores` says "six weighted signals" — the partial diff shows it was planned to update, but `git diff` shows the comment got changed to "using weighted signals" already? Looking at the diff: 
+
+```
+-/// Compute risk scores for all `src/**/*.rs` files using six weighted signals.
++/// Compute risk scores for all `src/**/*.rs` files using weighted signals.
+```
+
+OK that's already updated.
+
+Now for `raw_mutation` — variable ordering. Let me add:
+- `let mut raw_mutation: Vec<f64> = Vec::with_capacity(all_files.len());` near other raw vectors.
+- Load `let mutation_survival = load_mutation_survival(std::path::Path::new(MUTATION_SURVIVAL_PATH));` — where? After `let coupling_map = ...` around line 728-729.
+- In the loop, push `let mut_frac = *mutation_survival.get(path.as_str()).unwrap_or(&0.0); raw_mutation.push(mut_frac);`
+- After loop: normalize. Since already 0..1, use raw: `let norm_mutation = &raw_mutation;` — hmm, but then in the score computation I use `norm_mutation[i]`. Type is &Vec<f64>, indexing works. Fine.
+
+Actually to keep style consistent, maybe I name it `mut_surv` or `norm_mutation`. Since it's literally the normalized (0..1) value, I'll write a comment and use it.
+
+Score computation:
+```rust
+// 7. Mutation-survival signal — additive, modest weight.
+// Survival fractions are already in [0,1]; files with no entry (or no
+// sensor artifact) contribute 0, so behavior is unchanged when the
+// artifact is absent (fail-soft).
+let mut score = ...existing 7 terms...;
+score += MUTATION_WEIGHT * raw_mutation[i];
+```
+
+Wait — should I use raw_mutation[i] directly or normalized? They're the same thing (already in [0,1]). I'll use raw directly with a comment. Actually, let me just compute it cleanly. Since raw_mutation values are in [0,1] already, `raw_mutation[i]` IS the normalized value. Good — skip creating norm_mutation to avoid confusion. Hmm, but for "Normalize into the same 0..1 space" requirement — the raw values are already there; I'll note that in a comment.
+
+Signals:
+```rust
+if raw_mutation[i] > 0.5 {
+    signals.push("▲mut-surv");
+}
+```
+
+FileRisk init — field order: `test_density, mutation_survival`. So:
+```rust
+risks.push(FileRisk {
+    path,
+    score,
+    signals,
+    test_density: td,
+    mutation_survival: raw_mutation[i],
+});
+```
+
+Wait — the comment on the field says "Used for display only... or 0.0 when there is no mutation signal". Good, display-only.
+
+Now the display in format_risk_report. Current row:
+```rust
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+    risk.score
+));
+```
+I'll add a mut tag:
+```rust
+let mut_display = if risk.mutation_survival > 0.0 {
+    format!("  {MAGENTA}mut {:.0}%{RESET}", risk.mutation_survival * 100.0)
+} else {
+    String::new()
+};
+```
+
+Hmm, MAGENTA is available (from format::* constants). Let me use that or CYAN. Let me check what colors are imported — `use crate::format::*;` so BOLD, DIM, YELLOW, CYAN, RED, MAGENTA, ITALIC, RESET all available.
+
+Then append to the row after signals:
+```rust
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}{mut_display}\n",
+    risk.score
+));
+```
+
+Also update the header? The header is "Risk   T/100  File...Signals". Adding a mut tag at the end is fine without a header column (it's an inline tag).
+
+Now — also `risk_context_for_files` uses `risk.signals.clone()` — includes `▲mut-surv` automatically. And `signal_labels_to_description` — needs a mapping for `▲mut-surv`, else it'd be filtered out (returns None → not shown, falls back fine since there are other labels likely). Let me add:
+```rust
+"▲mut-surv" => Some("high mutation survival (undertested)"),
+```
+That improves legibility in fix prompts. Good.
+
+Now the unit tests for `load_mutation_survival` in src/commands_risk.rs test module:
+1. Well-formed file → parses correctly, values clamped to [0,1], non-positive filtered.
+2. Malformed JSON → empty map.
+3. Missing file → empty map.
+4. Empty file → empty map.
+5. Values > 1.0 clamped.
+
+Let me also check test for the score... The task says "With the sensor file absent (normal state), risk scores and the report must be unchanged from before". Since there's no artifact in the repo, I could add a test that computes scores and asserts all mutation_survival == 0.0 and all signals don't contain ▲mut-surv. That's a nice regression test. Let me add that to `test_compute_file_risk_scores_has_coupling_signal`... or a separate test. Actually simpler: extend the existing valid-signals test to include "▲mut-surv" in the valid list, and add a dedicated test that (in the repo, no artifact) no file has a mut signal or nonzero mutation_survival.
+
+Let me now also check `src/commands_risk_emerging.rs` test FileRisk initializers — lines 202, 360. They don't have mutation_survival → compile errors in tests. Same for commands_risk_snapshots.rs lines 566, 668, commands_risk_report.rs lines 200, 448-467, and commands_risk.rs line 4407. `cargo test` compiles test code, so all these need the field. Let me fix all of them with `mutation_survival: 0.0,`.
+
+Let me count all FileRisk initializers again: 
+- src/commands_risk_snapshots.rs:566, 668
+- src/commands_risk_emerging.rs:202, 360
+- src/commands_risk_report.rs:200, 448-467 (4 initializers: high, medium_high, medium, low)
+- src/commands_risk.rs:4407 (risk_b in test) and line 906 (main)
+
+Let me look at the exact contexts around each to make the edits. Let me view the snippets.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The partial implementation added the field/constant/loader but never wired them in. My plan:
+
+1. Wire mutation signal into `compute_file_risk_scores` (additive term with `MUTATION_WEIGHT`, matching the existing test-density penalty pattern so scores are unchanged when the artifact is absent)
+2. Set `mutation_survival` in the initializer at line 906
+3. Add `▲mut-surv` signal tag + report display (`mut NN%`)
+4. Fix all test `FileRisk` initializers in 4 files (compile errors under cargo test)
+5. Add unit tests for `load_mutation_survival`
+
+Let me view the remaining initializer contexts
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '4400,4420p' src/commands_r… ✓ (5ms)
+
+
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '555,585p' src/commands_ris… ✓ (9ms)
+
+
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '195,210p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '205,220p' src/commands_ris… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have all the initializer contexts. Let me make the edits.
+
+### 1. Wire the signal into `compute_file_risk_scores`
+
+In the loop, after the test-density penalty, add the mutation-survival term. I need to load the map once: `let mutation_survival = load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));` before the loop, and add a `raw_mutation` vec or look up directly.
+
+Design: values are survival fractions in [0,1]. Higher survival = more mutants survive = undertested/fragile = HIGHER risk. So add `survival * MUTATION_WEIGHT` to score additively (like the test-density penalty), which keeps fail-soft behavior: absent file → all zeros → no change.
+
+Wait — the task says "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)". Survival is already in 0..1. I'll add `mutation_survival[i] * MUTATION_WEIGHT` directly (already normalized since the sensor emits fractions). No rebalancing needed since this is additive like the penalty, keeping the existing weighted sum at ≤1.0 + penalty. Task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)" — additive approach keeps behavior unchanged when absent and doesn't perturb the distribution. Good.
+
+Let me build a `raw_mutation_survival: Vec<f64>` during the loop (0.0 default), then after normalization... actually the values are already in [0,1], no normalization needed. I'll push directly.
+
+Then the score term: `score += mutation_survival[i] * MUTATION_WEIGHT;` — wait, should the term be inside the weighted-sum `score` computation? To make the mutation signal part of the composite, add it to `score` before pushing to risks. I'll add it right after the penalty block.
+
+Also add signal tag `▲mut-surv` when survival > 0.5 (matching the threshold convention for the other tags).
+
+Set `mutation_survival` field in the initializer.
+
+### 2. Loader path
+
+Also `LEARNED_WEIGHTS_PATH` is used to load learned weights — the mutation term is separate (additive), fine.
+
+Let me also determine if there should be a constant for the artifact path. The task says loader reads `.arc/mutants_per_file.json`. I'll add a const `MUTATION_SURVIVAL_PATH: &str = ".arc/mutants_per_file.json";` — the partial impl used a `PATH` param. For the compute function I'll call `load_mutation_survival(Path::new(MUTATION_SURVIVAL_PATH))`.
+
+### 3. Report display
+
+In `format_risk_report`, add a `mut` column/tag. Looking at the current format:
+
+```
+  📊 File Risk Scores (src/)
+
+  Risk   T/100  File                          Signals
+  ──────────────────────────────────────────────────────────────
+  0.75    1.5   src/foo.rs                    ▲churn ▲size
+```
+
+I'll add the mutation survival into the signals area: append `mut NN%` to signals_str when non-zero. Also `signal_labels_to_description` — add `▲mut-surv` mapping. And the accuracy `label_to_index` in commands_risk.rs already returns None for unknown labels so a new tag won't break accuracy — but wait, `compute_per_signal_hits` iterates over SIGNAL_NAMES (7) and uses label_to_index? Let me check how labels from snapshots map. In commands_risk.rs line 196 `if let Some(idx) = label_to_index(label)` — used in parse_detailed_events. The accuracy stats iterate the 7 SIGNAL_NAMES from commands_risk_accuracy.rs. New labels like "▲mut-surv" just fail to map in label_to_index → not counted in per-signal hits, and won't be in SIGNAL_NAMES. Since task says "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only" — SIGNAL_NAMES is 7 and accuracy is hardcoded to [usize;7] arrays. So keep mutation display-only. Good — just append `mut NN%` to the report.
+
+But there's one wrinkle: if I add a `▲mut-surv` signal tag to `risk.signals`, then snapshots (which serialize `signals`) will include it, and the `test_compute_file_risk_scores_has_coupling_signal` test asserts all signals are within a known list — I'd add `▲mut-surv` to that validate list. Also `signal_labels_to_description` and `label_to_index` return None → fine.
+
+Hmm — but with `.arc/mutants_per_file.json` absent (normal state), no file gets `▲mut-surv` anyway. The test `test_compute_file_risk_scores_has_coupling_signal` asserts signals from computed scores — absent artifact → no new tags → passes unchanged. But to be safe when the artifact exists, add `▲mut-surv` to the valid list in that test.
+
+Now let me also add the report display. Where do I put `mut NN%`? I could add it to the T/100 column area or append to signals. The header is "Risk   T/100  File...Signals". I'll append to signals_str, e.g. `${CYAN}${signals_str}${RESET} ${MAGENTA}mut 55%${RESET}`. Simpler: build a `mut_str` and include in the format line.
+
+Let me write the edits now.
+
+### 4. Fix test initializers — add `mutation_survival: 0.0,` to all FileRisk{} in tests:
+
+- src/commands_risk.rs:4407 (risk_b)
+- src/commands_risk_report.rs:200, 448-473 (4 files)
+- src/commands_risk_snapshots.rs:566, 668
+- src/commands_risk_emerging.rs:202, 360
+
+Let me check there are exactly these. grep found: snapshots 566, 668; emerging 202, 360; report 200, 467; commands_risk 4407. That's 7 initializers to fix (report has 4 within one vec at 448-473... actually grep showed report.rs:467 only one line but there are 4 struct literals. Let me re-grep with the exact count.
+
+Actually the grep output earlier:
+```
+src/commands_risk_snapshots.rs:566:            FileRisk {
+src/commands_risk_snapshots.rs:668:            FileRisk {
+src/commands_risk_emerging.rs:202:            FileRisk {
+src/commands_risk_emerging.rs:360:            FileRisk {
+src/commands_risk_report.rs:200:        let risks = vec![FileRisk {
+src/commands_risk_report.rs:467:            FileRisk {
+src/commands_risk.rs:4407:        let risk_b = FileRisk {
+```
+That's grep matching "FileRisk {" — report.rs test at 446-473 has 4 literals but grep found only 467? Because grep found the first match on line 467? No wait, it found `src/commands_risk_report.rs:467:` — hmm, but the vec has 4 FileRisk literals at 448, 454, 461, 467. grep shows only 467 which is odd... unless the pattern "FileRisk {" didn't match the earlier ones because they're formatted differently (e.g. `FileRisk {\n` still matches). Let me recheck. Ah — grep output was truncated ("... and more" wasn't shown; the output showed "4 more similar lines" style truncation from the earlier grep: `grep -rn "FileRisk {"` output showed for report.rs only 467 plus "(12 more similar lines)" meaning grep collapsed. Actually it showed:
+
+```
+src/commands_risk_report.rs:200:        let risks = vec![FileRisk {
+... (12 more similar lines)
+src/commands_risk_report.rs:467:            FileRisk {
+```
+
+Wait no, it showed only 467 with "12 more similar lines" after 200? The shell collapsed middle lines. It's fine — I'll fix each literal. Let me just grep -n without filtering to be sure of all instances.
+
+Simplest: use a targeted approach on each FileRisk initializer, adding `mutation_survival: 0.0,`. Since there are many, maybe I can add the field to each. Let me count exactly.
+
+Actually, a cleaner approach for tests: add `mutation_survival: 0.0,` to each test literal. There are about 7-10. Let me list them all precisely.
+────────────────────────────────────────────────────────────────────────────────
+Now let me get the complete list of FileRisk initializers to
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "FileRisk {" src/ | cat ✓ (8ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "FileRisk {" src/commands_… ✓ (4ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "test_density:" src/comman… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the situation. The partial implementation added `mutation_survival: f64` field to `FileRisk`, `MUTATION_WEIGHT`, and `load_mutation_survival`, but:
+1. Didn't wire it into `compute_file_risk_scores` (the build error — the `FileRisk` initializer at line 906 is missing `mutation_survival`)
+2. Test initializers across 4 files will also fail to compile under `cargo test`
+
+Let me now:
+1. Wire the mutation signal into `compute_file_risk_scores`:
+   - Load the mutation map
+   - Track survival values per file in the loop
+   - Add signal tag + additive term
+   - Set the field in the initializer
+2. Fix tests (add `mutation_survival: 0.0` to all test initializers)
+3. Add display in report
+4. Add unit tests for `load_mutation_survival`
+
+Let me start with the wiring. The existing pattern: `compute_file_risk_scores` computes weighted sum of 7 normalized signals. The task says: fold mutation survival with weight 0.10, rebalance other weights so sum stays ~1.0, files without the sensor get 0 (no change in behavior when artifact absent).
+
+The safest approach that keeps behavior unchanged when the artifact is absent: keep the 7 weights as-is (sum 1.0), and add the mutation term additively, following the same pattern as the test-density penalty (which adds `f64::max(0.0, (5.0 - td) * 2.0) / 100.0`). The test-density penalty is additive and bounded (max 0.10). 
+
+But wait — the task says "fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates the existing signals. Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+The cleanest interpretation: mutate survival (higher = more mutants survive = worse) is itself in [0,1] already — it's already normalized into 0..1 space! So `survival * MUTATION_WEIGHT` added to the score keeps it in the same space, and when there's no sensor file all values are 0 → unchanged behavior. This is additive like the test-density penalty, doesn't require rebalancing the 7 RISK_WEIGHTS (which are also used for learning), and behavior is unchanged without the artifact. This matches "files with no entry get 0 (no signal)".
+
+The 7 weights stay unchanged (used by learning machinery, SIGNAL_NAMES parallel arrays, validation tests `test_risk_weights_sum_to_one`). Adding a mutation term additively with weight 0.10: max added is 0.10 to a composite that's nominally in [0,1] range — bounded, complements.
+
+For the signal tag: add `▲mut-surv` to signals when `survival > 0.5`. But wait — the test `test_compute_file_risk_scores_has_coupling_signal` checks that all signals are in a valid set `["▲churn", "▲recent", "▲size", "▲reverts", "▲low-test", "▲coupled"]`. If I add `▲mut-surv` to that set too, the test passes. I'll update that test's valid set.
+
+Also `label_to_index` doesn't handle a mutation tag — since `▲mut-surv` would only appear in snapshots via `build_risk_snapshot_json`... let me check how snapshots serialize signals. Let me check `build_risk_snapshot_json`.
+
+Actually, the task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." So the accuracy code iterates SIGNAL_NAMES (7) — I should keep mutation display-only, NOT add to accuracy. But if I push "▲mut-surv" into `risk.signals`, it WILL flow into snapshots (build_risk_snapshot_json uses risk.signals) and potentially into the accuracy pipeline via `parse_detailed_events` → `label_to_index` (returns None → ignored). Let me verify that None is handled gracefully.
+
+From line 196: `if let Some(idx) = label_to_index(label) { ... }` — yes, unknown labels are ignored gracefully. So adding a signal tag is safe for the accuracy math. But the task says "keep it display-only to avoid touching accuracy thresholds" — since label_to_index returns None for unknown labels, the accuracy math is unaffected. But to be conservative and precisely adhere to the task, I could avoid adding it to `signals` and instead show it only via the `mutation_survival` field display.
+
+Hmm. Re-reading: "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". This says display-only. The signals vec powers "▲..." tags in the report. If I add the tag to signals, it shows in the report AND gets serialized into snapshots (as an unknown signal that accuracy ignores). That's fine but slightly touches snapshot data.
+
+Cleanest: add the `mut NN%` tag in the report display from the `mutation_survival` field directly, and ALSO add a `▲mut-surv` signal tag in the scorer (since the scorer's signals are the canonical mechanism). Actually, for minimal ink and strict adherence to "display-only", I'll:
+- In the scorer: set the `mutation_survival` field and add the term to the score. Add "▲mut-surv" to signals when survival high — this makes it visible everywhere incl. format_risk_context, and accuracy ignores unknown labels. Since mutation_survival field is the display source per task ("e.g. a `mut` tag with the %"), the tag with % is from the field.
+
+Let me simplify and be safe:
+- Scorer: fold `survival * MUTATION_WEIGHT` additively; store survival field; when survival > 0.5 push "▲mut-surv" signal.
+- Report: display `mut NN%` from field when > 0.0. Since signals will include ▲mut-surv automatically (it's in the signals vec), both show. Hmm, that's duplicate-ish but fine — actually to keep it clean, I'll show `mut NN%` in the display from the field, and NOT add ▲mut-surv to signals — because task says display-only and snapshots shouldn't record it. That keeps snapshot payloads unchanged (fail-soft purity) and accuracy untouched.
+
+Wait, but then in the report the `mut` tag shows the %. Good. In `risk_context_for_files` (used by watch fix prompts) the signals won't show mutation — acceptable since task says report display.
+
+Actually let me reconsider: visualizing "▲mut-surv" in the signals column of the main report comes free from the signals join. But the task explicitly says "e.g. a `mut` tag with the %" — the % requires the field. I'll do the field-based display with `mut NN%` and skip the signal tag to avoid touching snapshot/signal vocab. Hmm, but there's already a test `test_compute_file_risk_scores_has_coupling_signal` validating signal vocabulary — leaving signals untouched means no test change there. 
+
+Decision:
+1. `compute_file_risk_scores`: load `load_mutation_survival(Path::new(".arc/mutants_per_file.json"))`, per-file survival lookup (0.0 if absent), score += survival * MUTATION_WEIGHT, store in FileRisk.mutation_survival. No new signal tag (keeps signal vocab, snapshot serialization, and accuracy math 100% untouched).
+2. `format_risk_report`: add `mut NN%` display from field when > 0.0.
+3. Fix all test initializers: `mutation_survival: 0.0`.
+4. Add `load_mutation_survival` unit tests (well-formed, malformed, missing).
+5. Maybe add a test asserting the field is set / score unchanged without artifact.
+
+Let me write the edits.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The partial implementation added the `mutation_survival field, MUTATION_WEIGHT, and load_mutation_survival`, but never wired them into `compute_file_risk_scores` — hence the build error. Test initializers in 4 files (under cargo test) will also break. Let me make the edits.
+
+**1. Wire the signal into `compute_file_risk_scores`** — load the map, add an additive bounded term (like the existing test-density penalty, so behavior is unchanged when the artifact is absent), and set the field
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (4 → 10 lines)
+    // 6. Co-change coupling — weight 0.15
+        let coupling_map = co_change_coupling();
+  + 
+  +     // Mutation-survival sensor (Day 173): per-file survival fraction from
+  +     // `.arc/mutants_per_file.json` (written by run_mutants.sh). Fail-soft —
+  +     // an absent/malformed artifact yields an empty map and no signal.
+  +     let mutation_survival_map =
+  +         load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
+    
+        // 5b. Cross-file test coverage — how many test-containing files reference each module
+ ✓ (1ms)
+    // 6. Co-change coupling — weight 0.15
+        let coupling_map = co_change_coupling();
+  + 
+  +     // Mutation-survival sensor (Day 173): per-file survival fraction from
+  +     // `.arc/mutants_per_file.json` (written by run_mutants.sh). Fail-soft —
+  +     // an absent/malformed artifact yields an empty map and no signal.
+  +     let mutation_survival_map =
+  +         load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
+    
+        // 5b. Cross-file test coverage — how many test-containing files reference each module
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (5 → 15 lines)
+            // (only for .rs files where test density is meaningful)
+            if path.ends_with(".rs") {
+                score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;
+  +         }
+  + 
+  +         // Mutation-survival signal: a file where mutants survive is
+  +         // undertested/fragile → higher risk. Inverted so high survival = high
+  +         // risk, bounded 0..MUTATION_WEIGHT so it complements rather than
+  +         // dominates. Files without an entry contribute exactly 0, so behavior
+  +         // is unchanged when `.arc/mutants_per_file.json` is absent.
+  +         let ms = *mutation_survival_map.get(path.as_str()).unwrap_or(&0.0);
+  +         if ms > 0.0 {
+  +             score += MUTATION_WEIGHT * ms;
+            }
+ ✓ (2ms)
+            // (only for .rs files where test density is meaningful)
+            if path.ends_with(".rs") {
+                score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;
+  +         }
+  + 
+  +         // Mutation-survival signal: a file where mutants survive is
+  +         // undertested/fragile → higher risk. Inverted so high survival = high
+  +         // risk, bounded 0..MUTATION_WEIGHT so it complements rather than
+  ... (6 more lines)
+
+Now add the `▲mut-surv` signal tag and set the field in
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (10 → 14 lines)
+    if norm_coupling[i] > 0.7 {
+                signals.push("▲coupled");
+  +         }
+  +         if ms > 0.0 {
+  +             signals.push("▲mut-surv");
+            }
+    
+            risks.push(FileRisk {
+  ···
+                score,
+                signals,
+                test_density: td,
+  +             mutation_survival: ms,
+            });
+ ✓ (1ms)
+    if norm_coupling[i] > 0.7 {
+                signals.push("▲coupled");
+  +         }
+  +         if ms > 0.0 {
+  +             signals.push("▲mut-surv");
+            }
+    
+            risks.push(FileRisk {
+  ... (6 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now update the doc comment on compute_file_risk_scores "7 signals, sum = 1.0" — actually the mutation signal is additive, so let me check that comment at line ~863 (now shifted). Let me also update the "Order: churn, recency..." comment to mention mutation. Minor.
+
+Now line 906→ the missing field. Let me view the current state around that area to confirm.
+
+Next: the report display in format_risk_report. Add a `mut NN%` column/tag. The header currently is "Risk   T/100  File{width}Signals". I'll add mutation survival to the signals area or as a separate tag. Task says: "when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". I'll add it into the signals string as a `mut NN%` tag prefix, or extend the row. Simplest legible approach: append `{DIM}mut NN%{RESET}` to the signals display. Actually let me put it between T/100 and file? The alignment: "Risk   T/100  File...Signals". The T/100 column is width 5. I could add a `Mut%` column but that changes header and alignment for the common case (no mutation data). Better: show as part of the signals cell with a distinct color, e.g. `mut 42%`. Since the report is display-only, appending to signals_str is fine.
+
+Let me update format_risk_report to append mutation info.
+────────────────────────────────────────────────────────────────────────────────
+Now update the comment at the weighted-sum and add the report display. First the comment:
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (2 → 3 lines)
+  - // Weighted sum → final score (7 signals, sum = 1.0)
+  + // Weighted sum → final score (7 signals, sum = 1.0) plus an additive
+  +     // mutation-survival term (0..MUTATION_WEIGHT, 0 when the sensor is absent).
+        // Use learned weights if available, otherwise fall back to defaults.
+ ✓ (1ms)
+  - // Weighted sum → final score (7 signals, sum = 1.0)
+  + // Weighted sum → final score (7 signals, sum = 1.0) plus an additive
+  +     // mutation-survival term (0..MUTATION_WEIGHT, 0 when the sensor is absent).
+        // Use learned weights if available, otherwise fall back to defaults.
+
+Now the report display in `format
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs (4 → 13 lines)
+    let limit = if show_all { risks.len() } else { 15 };
+        for risk in risks.iter().take(limit) {
+  -         let signals_str = risk.signals.join(" ");
+  +         let mut signals_str = risk.signals.join(" ");
+  +         // Surface the mutation-survival sensor (behavioral signal) as a `mut`
+  +         // tag with the survival % whenever it is non-zero.
+  +         if risk.mutation_survival > 0.0 {
+  +             let pct = (risk.mutation_survival * 100.0).round() as u64;
+  +             if !signals_str.is_empty() {
+  +                 signals_str.push(' ');
+  +             }
+  +             signals_str.push_str(&format!("mut {pct}%"));
+  +         }
+            let path_display = &risk.path;
+ ✓ (0ms)
+    let limit = if show_all { risks.len() } else { 15 };
+        for risk in risks.iter().take(limit) {
+  -         let signals_str = risk.signals.join(" ");
+  +         let mut signals_str = risk.signals.join(" ");
+  +         // Surface the mutation-survival sensor (behavioral signal) as a `mut`
+  +         // tag with the survival % whenever it is non-zero.
+  +         if risk.mutation_survival > 0.0 {
+  +             let pct = (risk.mutation_survival * 100.0).round() as u64;
+  ... (6 more lines)
+
+Now fix the test initializers. `commands_risk_report.rs` has 2, `commands_risk_snapshots.rs` 2, `commands_risk_emerging.rs` 4, `commands_risk.rs
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs (6 → 7 lines)
+                score: 0.75,
+                signals: vec!["▲churn", "▲size"],
+                test_density: 1.5,
+  +             mutation_survival: 0.0,
+            }];
+ ✓ (0ms)
+                score: 0.75,
+                signals: vec!["▲churn", "▲size"],
+                test_density: 1.5,
+  +             mutation_survival: 0.0,
+            }];
+
+

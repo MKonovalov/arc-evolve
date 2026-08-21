@@ -1,0 +1,748 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the actual schema written by `run_mutants.sh` vs. what the task description said. The evaluator says the real schema is:
+
+```json
+{
+  "tool": "...",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [{"path": ..., "mutants": ..., "killed": ..., "survived": ...}],
+  "summary": {...}
+}
+```
+
+Let me look at the actual `scripts/run_mutants.sh` to confirm the schema, and then look at `src/commands_risk.rs` for `load_mutation_survival` and `compute_file_risk_scores`, and `src/commands_risk_report.rs`.
+
+Let me read the files.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -3  ▶ search 'mutants_per_file' in .  ▶ search 'load_mutation_survival|mutation_survival|mutants' in src ✓ (11ms)
+ ✓ (11ms)
+ ✗ (10.6s)
+    │ Search error: grep: ./target/debug/arc: binary file matches
+
+────────────────────────────────────────────────────────────────────────────────
+  3 tools completed in 11.1s (2 ✓, 1 ✗)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search in src found no matches for load_mutation_survival or mutants? That's odd — the task says the implementation was done. Let me check the actual source files. Maybe the search tool failed silently or the implementation is in the committed version. Let me look at git show to see what the commit contains.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat c8d6143 | head -30  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "mutants" src/ scripts/ -… ✓ (9ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 659ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the existing implementation in src/commands_risk.rs around the relevant areas.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,80p' src/commands_risk.r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "load_mutation_survival\|m… ✓ (5ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 579ms (2 ✓)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "load_mutation_survival\|f… ✓ (4ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '620,780p' src/commands_ris… ✓ (5ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '780,960p' src/commands_ris… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check the actual schema written by `scripts/run_mutants.sh`. The evaluator says the producer writes `{tool, git_head, generated_at, files: [{path, mutants, killed, survived}], summary}` — all top-level values are str/list/dict, so the loader returns an empty map on every real artifact.
+
+Let me look at scripts/run_mutants.sh to confirm the actual schema.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,140p' scripts/run_mutant… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '140,220p' scripts/run_muta… ✓ (4ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '220,300p' scripts/run_muta… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the actual schema. The producer writes:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "src/foo.rs", "mutants": N, "killed": K, "survived": S},
+    ...
+  ],
+  "summary": {...}
+}
+```
+
+The current `load_mutation_survival` parses a flat `{file: fraction}` map, so it returns an empty map. I need to rewrite it to parse the actual schema: survival fraction per file = `survived / (killed + survived)` (only for entries where killed+survived > 0).
+
+Let me look at the current implementation, the tests, and the report code.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the tests
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '3090,3160p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '120,160p' src/commands_ris… ✓ (5ms)
+ ✓ (6ms)
+  2 tools completed in 865ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the current state. The issue is:
+
+1. `load_mutation_survival` parses a flat `{file: fraction}` map, but the actual producer (`scripts/run_mutants.sh`) writes `{tool, git_head, generated_at, files: [{path, mutants, killed, survived}], summary}`.
+
+I need to:
+1. Fix `load_mutation_survival` to parse the real schema: top-level object with a `files` array, each entry `{path, mutants, killed, survived}`. Compute survival fraction per file = survived / (killed + survived). If no tested mutants for a file (killed+survived == 0), skip. Clamp to [0,1], skip non-positive.
+2. Update tests to use the real schema (well-formed, malformed, missing; maybe also a flat-map tolerance? The evaluator said the flat-map premise is incorrect. I could keep backward compat with flat map, but the task says "reads `.arc/mutants_per_file.json` (the exact schema written by run_mutants.sh...)" so the primary support should be the real schema. I could optionally still tolerate the flat map as a fallback — but being conservative, keep the loader strictly to the real schema, or accept both? The evaluator feedback says tests "were written to the task's incorrect flat-map premise rather than the actual schema". So fix the tests to use the actual schema. Maybe keep tolerance for flat maps too — but that might be unnecessary. Let me just implement the real schema and update tests. Actually, supporting both is harmless and robust, but could confuse. Let me support the real schema primarily, and keep a fallback for the flat map (backward compat with the test's earlier premise)? Hmm, but no real producer writes flat maps. Simplicity wins: parse the real schema only. Actually wait — let me be careful: the task's verify section says test "a temp dir with a well-formed `.arc/mutants_per_file.json`". So well-formed = the real schema. I'll rewrite tests accordingly.
+
+Also, the file paths in the artifact: run_mutants.sh writes `mutants` keys from `mutants.json` which is keyed by file path. Let me check what paths cargo-mutants uses — probably "src/foo.rs" relative paths. The risk scoring uses paths like "src/foo.rs" as keys in all_files (from git file_change_counts which returns... let me check the format). In `compute_file_risk_scores`, `all_files` entries are things like "src/commands_risk.rs" (from read_dir("src") path.to_str() = "src/..."). And git::file_change_counts returns paths like "src/foo.rs" presumably. So the map lookup with `path.as_str()` where path is "src/commands_risk.rs" matches the artifact's `path` field if run_mutants outputs "src/commands_risk.rs". Good.
+
+3. Also check the signal name in the per-signal breakdown — the task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only." Let me check commands_risk_accuracy.rs to see SIGNAL_NAMES and compute_per_signal_hits.
+
+Let me also check the `mut` tag display — currently in format_risk_report it appends "mut {pct}%" to signals_str, that's fine. Also `risk_context_for_files` might include signals descriptions. Let me check where the signal "▲mut-surv" flows into `signal_labels_to_description`.
+
+Let me look at commands_risk_accuracy.rs SIGNAL_NAMES.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES\|mut-surv\|m…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,60p' src/commands_risk_a… ✓ (3ms)
+ ✓ (5ms)
+  2 tools completed in 788ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The core issue: `load_mutation_survival` parses a flat `{file: fraction}` map but the actual producer writes a nested schema:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "...", "mutants": N, "killed": K, "survived": S},
+    ...
+  ],
+  "summary": {"files": N, "mutants": N, "killed": K, "survived": N}
+}
+```
+
+So I need to rewrite `load_mutation_survival` to:
+1. Parse the actual schema: read `files` array, each entry has `path`, `mutants`, `killed`, `survived` — compute survival fraction = survived / (killed + survived) (if killed+survived == 0, skip).
+2. Keep backward-compatible support for the flat map (`{file: fraction}`) since the task says "keys are file paths, values are per-file survival fractions" — but the evaluator says the real schema is the nested one. Best to support BOTH: if top-level object has a "files" array → parse nested; else try flat map fallback.
+3. Update the unit tests to test the real schema (nested) plus malformed/missing.
+
+Let me also check the `mut` tag path: `signals.push("▲mut-surv")` in compute_file_risk_scores and in the report, when `mutation_survival > 0.0`, show `mut {pct}%`. Since the loader returns empty map for every real artifact, mutation_survival is always 0.0. Fixing the loader fixes both.
+
+Let me look at the report test around line 208 and the existing tests to be safe.
+
+Also I should check: does the mutation survival fraction get computed as survived/(killed+survived)? Per the schema each file entry has `mutants`, `killed`, `survived`. So fraction = survived / (survived + killed) when tested > 0.
+
+The header comment at the top of the repo's `load_mutation_survival` should be updated too.
+
+Let me check the docstring around line 625-635.
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '620,640p' src/commands_ris… ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the situation. The current implementation:
+
+1. `load_mutation_survival` parses a FLAT map `{file: fraction}`, but the actual schema written by `run_mutants.sh` is:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "src/foo.rs", "mutants": 10, "killed": 8, "survived": 2},
+    ...
+  ],
+  "summary": {"files": N, "mutants": N, "killed": N, "survived": N}
+}
+```
+
+2. The evaluator wants me to:
+   - Fix `load_mutation_survival` to parse the actual schema (the `files` array with `path` / `survived` / `mutants` entries)
+   - Compute per-file survival fraction = survived / (killed + survived), and if no tested mutants for a file, no signal (skip).
+   - Keep fail-soft behavior.
+   - Update unit tests to use the actual schema.
+   - The rest (scoring fold, `mut` tag display) appears to already be implemented.
+
+Let me look at what signature/producer writes. The survival fraction per file: `f["survived"] / (f["killed"] + f["survived"])` if tested > 0. Should I clamp to [0,1]. Files with no entry get 0.
+
+Also I should keep backward compatibility: the task originally says "keys are file paths, values are per-file survival fractions" — but evaluator says the real producer writes the nested schema. Best approach: support BOTH — if the top-level object has a `files` array, parse that; otherwise fall back to flat map parsing (harmless, keeps existing tests conceptually valid — but I should update tests to the real schema, and maybe keep flat-map support for robustness).
+
+Actually, cleanest: parse the real schema (`files` array), and keep a fallback to the flat map for defensive compatibility. That handles both. Let me write tests for the real schema plus malformed/missing/empty.
+
+Let me now check the full loader and write the fix. Also check that `.arc/mutants_per_file.json` schema keys: path may be like "src/commands_risk.rs". The files in `compute_file_risk_scores` have paths like "src/commands_risk.rs" (relative). Good.
+
+Let me also verify how the existing test file paths in compute_file_risk_scores look — they're "src/xxx.rs" relative paths. The producer's `mutants.json` keys are typically relative paths from repo root like "src/commands_risk.rs". Good.
+
+Now implement:
+
+```rust
+pub(crate) fn load_mutation_survival(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, f64> {
+    use std::collections::HashMap;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+    let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return HashMap::new(),
+    };
+
+    let mut out: HashMap<String, f64> = HashMap::new();
+
+    // Real schema (`scripts/run_mutants.sh`): an object with a `files` array
+    // of per-file entries {path, mutants, killed, survived}.
+    if let Some(files) = obj.get("files").and_then(|v| v.as_array()) {
+        for f in files {
+            let Some(fobj) = f.as_object() else { continue };
+            let Some(path_str) = fobj.get("path").and_then(|v| v.as_str()) else { continue };
+            let tested = fobj
+                .get("killed")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                + fobj
+                    .get("survived")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+            if tested <= 0.0 {
+                continue; // no tested mutants → no signal
+            }
+            let survived = fobj.get("survived").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let fraction = (survived / tested).clamp(0.0, 1.0);
+            if fraction > 0.0 {
+                out.insert(path_str.to_string(), fraction);
+            }
+        }
+        return out;
+    }
+
+    // Legacy/defensive flat map: {file: fraction}
+    for (file, v) in obj {
+        let Some(fraction) = v.as_f64() else {
+            continue;
+        };
+        let fraction = fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            out.insert(file.clone(), fraction);
+        }
+    }
+    out
+}
+```
+
+Wait — there's a subtlety: in the real schema, the top-level object has "files" key. If `files` is present but empty array, return empty map. Good.
+
+Also, need to double check: is there gitignored `.arc/mutants_per_file.json` present in the repo currently? Let me check. If it exists, the behavior during tests might differ, but tests don't call `compute_file_risk_scores` against the real repo... actually some risk tests might. Let me check if `.arc/mutants_per_file.json` exists.
+
+Also, note the mutation survived fraction: `survived / tested` where tested = killed + survived. That's the per-file survival fraction. Good.
+
+Now update the doc comment for load_mutation_survival to describe the real schema.
+
+Also update tests:
+- `test_load_mutation_survival_well_formed` → use real schema: files array with path/killed/survived; check computed fractions, 0-only entries skipped, entries with no tested mutants skipped.
+- `test_load_mutation_survival_malformed_and_missing` → keep, maybe add empty files array.
+
+Let me check the doc comment currently (lines 630-643) and update it.
+
+Also verify whether `.arc/mutants_per_file.json` exists in repo (affects compute_file_risk_scores behavior/tests).
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/ | head && sed -n '628…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mutants_per_file\|\.arc" … ✓ (3ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 551ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. The current implementation parses a flat map `{file: fraction}`, but the real schema written by `scripts/run_mutants.sh` is:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "src/foo.rs", "mutants": 10, "killed": 6, "survived": 4},
+    ...
+  ],
+  "summary": {"files": N, "mutants": N, "killed": N, "survived": N}
+}
+```
+
+I need to rewrite `load_mutation_survival` to:
+1. Parse the top-level object
+2. If it has a "files" array, parse each entry: `path` key → survival fraction = survived/mutants (or survived/(killed+survived))
+3. If it's a flat map (the old premise), still handle it (backward compat) — actually the task reviewer says the flat map premise was wrong. But it's harmless to support both. Actually, let's support the actual schema primarily; keeping the flat-map fallback doesn't hurt and adds robustness. But wait — the doc comment says "keys are file paths, values are survival fraction" which was wrong. I need to update the doc comment.
+
+Per-file survival fraction: `survived / mutants` where mutants = killed + survived (tested mutants). The script computes `survival_rate = survived / tested` where tested = caught + survived (files with only timeout or unviable are excluded from both kills/surv counts... actually in the script's per-file loop, `kills` and `surv` count only killed/survived outcomes and only files with kills or surv get listed). So `mutants` in the file entry = len(mlist) (all mutants including unviable/timeout), while `killed + survived` = tested ones. The survival fraction should be `survived / (killed + survived)` if that's > 0, matching the script's TESTED = CAUGHT + SURVIVED semantics. But if killed+survived == 0 (all timeout/unviable), skip (no signal). Let's use `survived / (killed + survived)` and use `mutants` as a fallback denominator only when killed+survived==0? Actually if killed+survived==0, there's no tested mutants, so no behavioral signal — skip.
+
+Also need to handle: keys in the flat-map fallback might be file paths. Keep the clamp + skip-zero behavior.
+
+Now the file paths in `mutants.json` — how are they written by cargo-mutants? Let me think. cargo-mutants' mutants.json is keyed by file path, typically relative path like "src/commands_risk.rs" — the same form used by `git::file_change_counts` and `co_change_coupling`. Let me check how the risk scoring keys files — `all_files` includes paths like "src/commands_risk.rs" (from read_dir("src") + relative path from `path.to_str()` which is `src/foo.rs` since read_dir gives relative paths). Yes, entry.path() from read_dir("src") gives "src/foo.rs". So the keys match the `path` field in the mutation artifact.
+
+But there can be absolute paths in the artifact if cargo-mutants emitted them... The script uses `path` directly from mutants.json keys. cargo-mutants typically emits relative paths (e.g., "src/lib.rs"). To be safe, I could normalize: if the key starts with the cwd prefix, strip it. But keep it simple — match what the script writes. The task says to just look up survival fraction for each file. I'll do a straightforward lookup, and also a fallback: strip leading "./" — no, keep simple. Also could strip the absolute prefix. Let me add a small normalization helper: if path in artifact doesn't match `path.as_str()`, try stripping a leading common prefix (cwd). Hmm, but that requires computing cwd. Given the script runs from repo root and cargo-mutants writes relative paths, direct match is fine. Let me check how existing code stores risk paths to keep consistency.
+
+Actually, let me check what keys `all_files` uses vs artifact. In `compute_file_risk_scores`, `all_files` = union of:
+- `file_change_counts(30)` keys — let me check git.rs to see the format of these keys.
+- read_dir("src") — relative "src/foo.rs"
+- read_dir("src/format") — relative "src/format/mod.rs"
+
+Let me check git.rs's file paths format.
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn file_change_counts\|\"…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '/pub(crate) fn file_change… ✓ (3ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 772ms (2 ✓)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "file_change_counts" src/g… ✓ (4ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '850,895p' src/git.rs ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So git paths in this repo use `src/...` prefixes (e.g. `src/commands_risk.rs`). The mutation-artifact paths come from `mutants.json` which cargo-mutants writes with paths relative to the repo root, presumably like `src/commands_risk.rs`. Let me check the actual format of cargo-mutants' mutants.json. The script iterates `mutants.items()` — keys are paths. Those are probably relative paths like `src/foo.rs`. So the keys in the artifact files[] entries' `path` field likely are `src/foo.rs`, which matches `all_files` entries (which are `src/commands_risk.rs` from git and read_dir).
+
+But to be safe, I should normalize: strip a leading `./` prefix. Let me write the loader to accept the real schema. The real schema:
+
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [
+    {"path": "src/foo.rs", "mutants": 10, "killed": 7, "survived": 3},
+    ...
+  ],
+  "summary": {"files": N, "mutants": N, "killed": N, "survived": N}
+}
+```
+
+The survival fraction per file: survived / (killed + survived) — that's the fraction of tested mutants surviving. Actually "survival fraction" = survived / tested = survived / (killed + survived). That's the natural metric.
+
+Now, the old loader accepted flat map `{file: fraction}`. Should I keep backward compat with the flat map? The evaluator said the flat-map premise was wrong. But maybe supporting both is more robust: if top-level object values are numbers → flat map; if it has a "files" array → new schema. That's defensive and fail-soft. I'll implement: parse JSON; if object has "files" as array → build map from entries with `path`, `killed`, `survived`. Fraction = survived/(killed+survived) if denominator > 0. Else (flat map) → old behavior. This handles both, and the tests should test both formats.
+
+Now let me also check `commands_risk_emerging.rs` and `commands_risk_snapshots.rs` — the diff touched them (11 and 6 lines). Let me see what they contain regarding mutation. Probably they also construct FileRisk with mutation_survival: 0.0 — fine.
+
+Also check whether the score normalization / weight rebalancing meets the task: "rebalance other weights so sum stays ~1.0". Current RISK_WEIGHTS = [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] sums to 1.0. The mutation term is added additively, not part of normalized weights. Let me check `load_learned_weights` and how weights are used. Also whether the additive term is fine: MUTATION_WEIGHT * ms, ms in [0,1], so adds up to 0.10 extra on top. That keeps the base behavior unchanged when sensor absent. The task says "modest weight (e.g. 0.10) ... keep existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)". Additive 0.10 * ms is a reasonable interpretation — for files without sensor data it's 0, unchanged. Alternatively fold into normalized composite with weights summing to 1.0. But since files without entries get 0 signal, either approach yields unchanged behavior without the sensor. Current implementation looks acceptable; the core issue is just the parser.
+
+Let me now check the current full loader and rewrite it. Also check the report `mut` tag display — that's already implemented in report. Good.
+
+Let me check the learned weights function to ensure nothing else references 7 signals that would break if we add an 8th. The evaluator said not to touch accuracy thresholds. Current approach keeps SIGNAL_NAMES 7 and additive mutation term — that's fine and display-only in accuracy. Good.
+
+Now fix the loader. Also update the doc comment. And update/extend the unit tests:
+1. Well-formed artifact (real schema) → correct fractions.
+2. Flat map (legacy) → still works.
+3. Malformed / empty / missing → empty map.
+4. "files" present but empty array → empty map.
+
+Let me write the new loader.
+────────────────────────────────────────────────────────────────────────────────
+Now I understand the bug. The loader parses a flat `{file: fraction} map, but run_mutants.sh` writes:
+
+```json
+{"tool": "cargo-mutants", "git_head": "...", "generated_at": "...",
+ "files": [{"path": "src/foo.rs", "mutants": 10, "killed": 7, "survived": 3}],
+ "summary": {...}}
+```
+
+Let me check the doc comment above the loader and the report/emerging/snapshots spots that construct `
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '625,665p' src/commands_ris…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '190,215p' src/commands_ris… ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 586ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. The fix:
+
+1. Rewrite `load_mutation_survival` to parse the real schema: `{tool, git_head, generated_at, files: [{path, mutants, killed, survived}], summary}`. For each file entry compute survival fraction: `survived / max(1, mutants)` — or `survived / (killed + survived)`? The script computes per-file: `kills`, `surv`; `mutants` = len(mlist). The per-file "tested" is killed + survived. The overall script survival rate uses `SURVIVED / TESTED` where TESTED = CAUGHT + SURVIVED. So per-file survival fraction should be `survived / (killed + survived)` clamped to [0,1], treating "mutants" as total incl. unviable. Actually, safer: `survived / mutants.min(...)`? Let me think about semantics.
+
+The survival fraction per file = survived mutants / tested mutants. In the script, `TESTED = CAUGHT + SURVIVED` (timeout counted as survived at top level; per-file classify: timeout → survived). Per file entry: killed = kills, survived = surv, mutants = len(mlist) (which includes unviable). The per-file survival fraction should be `survived / (killed + survived)`, guarding divide-by-zero (skip if killed+survived == 0 → no signal).
+
+Also backward compatibility: The task said "keys are file paths, values are per-file survival fractions" — the original flat map assumption was wrong per evaluator. But should we also support the flat map for robustness (fail-soft / both schemas)? The evaluator explicitly says the loader must parse the real schema. Supporting both is defensive and cheap. I'll parse the list-of-files schema as primary, and also tolerate a flat `{path: fraction}` map (older premise) — that makes both unit tests meaningful and robust. Actually, let me not over-engineer; but supporting both is genuinely harmless and handles any legacy artifacts. Hmm — but the doc comment says "the exact schema written by run_mutants.sh". I'll make the loader handle the real schema (files array), and also fall back to flat map if present (defensive). This keeps existing tests passing (well-formed flat map test) and adds new tests for the real schema.
+
+Wait — the evaluator says "Unit tests pass only because they were written to the task's incorrect flat-map premise rather than the actual schema". So the fix is: real schema parsing. I should update the existing well-formed test to use the real schema, and keep malformed/missing tests. Adding flat-map tolerance is optional; I'll include it as a fallback so both parse paths work, and write tests for the real schema.
+
+2. Path matching: The mutation map keys from cargo-mutants are repo-relative paths like "src/commands_risk.rs" (matching how run_mutants.sh extracts `path` from mutants.json keys). In `compute_file_risk_scores`, the lookups use paths like "src/risk.rs" — same shape (from git log --name-only and read_dir("src")). So direct `mutation_survival_map.get(path.as_str())` should work as long as both are repo-relative with forward slashes. cargo-mutants paths: from mutants.json keys — typically repo-relative paths with forward slashes. On Linux, fine.
+
+Actually wait — there's a subtlety in `compute_file_risk_scores`: it also reads files via `std::fs::read_to_string(path)` where path may be "src/foo.rs" — this is relative to cwd which is repo root. Good.
+
+3. Rename-weight rebalance: The task says keep total ~1.0 with a modest weight for mutation (0.10), rebalance others so files without the sensor are unchanged. Note the current implementation adds mutation as an *additive* term (0..MUTATION_WEIGHT) rather than a rebalanced weight — that preserves the no-sensor behavior exactly (score term 0 when absent) while adding up to +0.10 when present. The doc comment says exactly that: "plus an additive mutation-survival term (0..MUTATION_WEIGHT, 0 when the sensor is absent)". So the score isn't normalized to exactly [0,1] anymore — it can exceed 1.0 by up to 0.10. That's acceptable (scores are relative). Keep as is.
+
+But wait — the weights array is `[churn, recency, size, complexity, test_density, coupling, revert_history]` = [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10] = 1.00. The comment earlier said RISK_WEIGHTS. Let me check what weights load_learned_weights returns and if RISK_WEIGHTS is still 7 elements. Yes: "Risk signal weights: [churn, recency, size, complexity, test_density, coupling, revert_history]." — 7 signals summing to 1.0. The additive term is 0..0.10 on top. Task says "Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)". The additive approach keeps unchanged behavior when absent and the base weights sum to 1.0. Good — no rebalance needed, and the current code already documents this. The evaluator's only complaint is the parsing.
+
+4. Report display: already shows `mut {pct}%` tag when mutation_survival > 0. That's fine.
+
+5. Accuracy SIGNAL_NAMES: 7 named signals; task says "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only". The mutation signal is additive, not part of the 7 weighted signals, and per_signal_hits is [usize; 7] aligned with SIGNAL_NAMES. Keep display-only. Good — no change.
+
+Now let me look at the "Verify" requirement: unit tests for load_mutation_survival with real schema. I'll rewrite:
+
+- `test_load_mutation_survival_well_formed` — real schema: full artifact with files array → correct map.
+- Add test for flat-map fallback? The evaluator said tests were written to incorrect premise. I'll replace the well-formed test with the real schema. But maybe keep a test for the flat map as backward-compat fallback too. I'll write:
+
+1. `test_load_mutation_survival_schema_well_formed` — full artifact JSON.
+2. `test_load_mutation_survival_schema_fail_soft` — malformed, empty, missing, plus wrong-shape (e.g. `{"files": "nope"}`), and file entries with zero killed+survived (skipped).
+3. Keep flat-map tolerance: a `test_load_mutation_survival_flat_map_backcompat`? Optional but cheap and guards the fallback.
+
+Let me write the new loader:
+
+```rust
+/// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`.
+///
+/// The artifact `.arc/mutants_per_file.json` uses the cargo-mutants schema:
+/// a top-level object with `tool`, `git_head`, `generated_at`, a `files` array
+/// of `{path, mutants, killed, survived}` entries, and a `summary` object.
+/// The survival fraction for a file is `survived / (killed + survived)` (in
+/// [0,1]); files with no tested mutants get no entry. As a defensive fallback,
+/// a flat `{path: fraction}` map is also accepted (the Day 174 task premise).
+///
+/// Fail-soft: any missing/unparseable/empty file or unexpected shape yields an
+/// empty map so risk scoring never blocks on the artifact.
+pub(crate) fn load_mutation_survival(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, f64> {
+    use std::collections::HashMap;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+    let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return HashMap::new(),
+    };
+
+    let mut out: HashMap<String, f64> = HashMap::new();
+
+    // Primary schema: a `files` array of {path, mutants, killed, survived}.
+    if let Some(files) = obj.get("files").and_then(|v| v.as_array()) {
+        for entry in files {
+            let Some(entry) = entry.as_object() else {
+                continue;
+            };
+            let Some(file) = entry.get("path").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let killed = entry.get("killed").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let survived = entry.get("survived").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tested = killed + survived;
+            if tested <= 0.0 {
+                continue; // no tested mutants → no signal
+            }
+            let fraction = (survived / tested).clamp(0.0, 1.0);
+            if fraction > 0.0 {
+                out.insert(file.to_string(), fraction);
+            }
+        }
+        return out;
+    }
+
+    // Defensive fallback: flat {path: fraction} map (old task premise).
+    for (file, v) in obj {
+        let Some(fraction) = v.as_f64() else {
+            continue;
+        };
+        let fraction = fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            out.insert(file.clone(), fraction);
+        }
+    }
+    out
+}
+```
+
+Wait — one consideration: should I use `survived / mutants` where mutants = total mutants incl. unviable? That would undercount survival. The script's top-level rate uses TESTED = CAUGHT+SURVIVED. Per-file, killed+survived = tested. Using `survived / (killed + survived)` matches the script's semantics. Good.
+
+Now the doc comment in the summary at the loader currently says "keys = file paths, values = survival fraction" — need to update.
+
+Now, in `compute_file_risk_scores`, the map lookup: `mutation_survival_map.get(path.as_str())`. The `path` here is like "src/commands_risk.rs". cargo-mutants paths in mutants.json: typically like "src/main.rs". But do they include the "src/" prefix? cargo-mutants reports paths relative to workspace root, e.g., "src/main.rs". Yes. Good.
+
+But hold on — actually there may be a CLI arg variant: the run_mutants.sh might run with `--file` filter; doesn't matter — still repo-relative.
+
+Also should I normalize paths in the loader (e.g., strip leading "./" or convert backslashes)? Keep simple; the producer uses forward slashes.
+
+Now let me write the edits.
+
+Edit 1: Replace the loader function (lines ~631-665).
+
+Edit 2: Update the doc comment for the FileRisk.mutation_survival field? It's fine.
+
+Edit 3: Update comment at line 628 area and the inline comment in compute_file_risk_scores (mentions "keys = file paths, values = survival fraction"). Let me check line 733-737:
+
+```
+    // Mutation-survival sensor (Day 173): per-file survival fraction from
+    // `.arc/mutants_per_file.json` (written by run_mutants.sh). Fail-soft —
+    // an absent/malformed artifact yields an empty map and no signal.
+```
+
+That's fine.
+
+Edit 4: Rewrite the tests.
+
+Also check: does `compute_file_risk_scores` clamp the final score or does the additive term push it above 1.0? It doesn't clamp. Existing behavior already allows >1.0 via the test-density penalty. Fine — relative ordering matters.
+
+Also verify `MUTATION_WEIGHT = 0.10` is used; yes.
+
+Now, is there any spot where the mutation_survival field flows into accuracy/`format_risk_context`/`risk_context_for_files`? Let me check how the `mut` tag interplay with the "signals" shown in `format_risk_report`. Already handled.
+
+Let me also double check the report test `test_format_risk_report_shows_signals` — maybe add a mutation tag assertion. I'll add one: set mutation_survival: 0.4 and assert contains "mut 40%". Let me look at the full test.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The bug: `load_mutation_survival` parses a flat `{file: fraction}` map, but `run_mutants.sh` writes a structured artifact with a files array of `{path, mutants, killed, survived}` entries. Let me check the report test, then fix.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '625,632p' src/commands_ris… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the exact doc comment text to replace.
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=626 && NR<=665' src/comma… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The read_file output showed `... (2 more similar lines)` — the actual lines 627-628 are the doc comment. Let me get the exact text.
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '627,629p' src/commands_ris… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:626..636 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me make the fix. The loader must handle the actual schema:
+```json
+{
+  "tool": "cargo-mutants",
+  "git_head": "...",
+  "generated_at": "...",
+  "files": [{"path": "src/foo.rs", "mutants": 10, "killed": 7, "survived": 3}],
+  "summary": {...}
+}
+```
+
+Per-file survival fraction = survived / (killed + survived), i.e. fraction of *tested* mutants that survived. I should compute that. Let me write the new loader:
+
+```rust
+/// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`
+/// into `.arc/mutants_per_file.json`. The artifact's shape is:
+///   {"tool": "cargo-mutants", "git_head": ..., "generated_at": ...,
+///    "files": [{"path": "...", "mutants": N, "killed": N, "survived": N}],
+///    "summary": {...}}
+/// and each file's survival fraction is `survived / (killed + survived)`
+/// (i.e. the share of tested mutants that escaped). Fail-soft: a missing,
+/// unparseable, empty, or differently-shaped file yields an empty map so risk
+/// scoring never blocks on the artifact.
+pub(crate) fn load_mutation_survival(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, f64> {
+    use std::collections::HashMap;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+    let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut out: HashMap<String, f64> = HashMap::new();
+    // Actual artifact: {"files": [{path, mutants, killed, survived}, ...]}
+    if let Some(entries) = val.get("files").and_then(serde_json::Value::as_array) {
+        for entry in entries {
+            let Some(path) = entry.get("path").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let killed = entry.get("killed").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let survived = entry.get("survived").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+            let tested = killed + survived;
+            if tested <= 0.0 {
+                continue; // no tested mutants → no survival signal
+            }
+            let fraction = (survived / tested).clamp(0.0, 1.0);
+            if fraction > 0.0 {
+                out.insert(path.to_string(), fraction);
+            }
+        }
+        return out;
+    }
+
+    // Fallback: tolerate a flat {file: fraction} map (older/legacy shape).
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return HashMap::new(),
+    };
+    for (file, v) in obj {
+        let Some(fraction) = v.as_f64() else {
+            continue;
+        };
+        let fraction = fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            out.insert(file.clone(), fraction);
+        }
+    }
+    out
+}
+```
+
+Now update the tests. Existing tests test flat-map shape. I should keep flat-map test? Actually the task says test real schema. I'll rewrite the tests to cover:
+1. Well-formed actual schema → correct map with computed fractions.
+2. Malformed + empty + missing → empty map (fail-soft).
+3. Keep the flat-map fallback test too (well-formed flat still works, to preserve tolerance).
+
+Wait — but should I keep the flat-map fallback? The evaluator's feedback says the loader parses flat map but producer writes the structured one. Keeping the flat fallback doesn't hurt and is defensive (fail-soft), but it also doesn't break anything. However, it could mask issues; but it's cheap and defensible — legacy shapes. Actually, keeping it is fine and safe. But is there any risk of a file with a "files" key that's not an array of the expected shape? E.g., a flat map with a file literally named "files"? Unlikely. I'll keep the fallback since fail-soft is the guiding principle, and it preserves the previous well-formed test's premise for older artifacts.
+
+Actually, let me reconsider — the task's own spec says to parse flat map, but the evaluator overrides with the actual schema. The right fix is to parse the actual schema primarily. Keeping a flat fallback is harmless. I'll keep it.
+
+Now the compute_file_risk_scores flow already works with the map; path keys from run_mutants.sh — let me double check what paths cargo-mutants emits. The python script iterates `mutants.items()` from mutants.json. cargo-mutants' mutants.json is keyed by file path. What form? Typically relative paths like "src/commands_risk.rs". Let me look at the header comment in run_mutants.sh for the schema description to be sure.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the header comment in run_mutants.sh and how path keys look:
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,40p' scripts/run_mutants… ✓ (4ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read scripts/run_mutants.sh:1..26 ✓ (0ms)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ read scripts/run_mutants.sh:25..45 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have full clarity on the schema. Let me now fix:
+
+1. `load_mutation_survival` in `src/commands_risk.rs` — parse the `files` array of `{path, mutants, killed, survived}` entries, compute survival fraction per file as `survived / max(1, mutants)` or `survived / (killed + survived)`. The doc says "survival fraction in [0,1]". Files with 0 tested mutants (all killed or all survived, or total 0) — what do we do?
+
+Looking at run_mutants.sh: `files.append(...)` only when `kills or surv` non-zero. So each file entry has at least one tested mutant. Survival fraction = survived / (killed + survived). Actually `mutants` = len(mlist), but some might be unviable/other. Let me use `killed + survived` as the tested denominator — that matches the script's TESTED=$((CAUGHT + SURVIVED)). But careful: division by zero if killed+survived == 0, which the script guarantees won't happen (only appends if kills or surv nonzero).
+
+Actually the loader is defensive: use denominator = killed + survived, if 0 → skip (no tested mutants → no signal). Clamp fraction to [0,1], skip if <= 0 (no survivors → behavior is well-tested → no risk signal — matches "files with no entry get 0 (no signal)").
+
+2. Also keep backward compatibility with the flat-map form? The evaluator said the loader parses the flat map which is wrong. The task said the flat-map schema but the evaluator overrode with the real schema. I should support the real schema. Supporting both is fine and harmless — but let's focus on the actual producer schema. Actually, supporting both forms makes the loader robust to old artifacts written under the wrong premise. Since the tests in the current tree write the flat map, I'll rewrite the tests to the real schema. But should the loader also accept the flat form? The evaluator said "Unit tests pass only because they were written to the task's incorrect flat-map premise rather than the actual schema". So the fix: parse the real schema. I'll keep the flat-map fallback parsing too, since it's cheap and tolerant (defensive parsing is the theme), but the primary path is the `files` array.
+
+Hmm — but if I keep the flat-map form, a stale test... I'll rewrite the tests to the real schema anyway and add a test confirming the flat form still works as a fallback? That adds robustness. Let me keep it simple but tolerant: parse `files` array entries with `path` + survival. If top-level is an object where values are numbers (flat map), fall back to that too. This handles both.
+
+3. Update doc comment.
+
+4. Also consider: `compute_file_risk_scores` looks up `mutation_survival_map.get(path.as_str())`. The path keys from cargo-mutants are like `src/format/mod.rs` which match the git paths used in file_set. Good.
+
+5. The report: `mut {pct}%` tag shown when non-zero — that's fine already. The task says add signal name to per-signal breakdown only if accuracy code iterates named signals — SIGNAL_NAMES has 7 entries and per_signal_hits is `[usize; 7]`, weights are 7-element. The mutation signal is additive, not part of the 7 weights. So keep display-only. Good — current implementation does that (signals.push("▲mut-surv") plus report mut tag).
+
+Wait, but there's one issue: the `▲mut-surv` signal gets pushed into `risk.signals` and then `format_risk_report` also adds `mut {pct}%` — that's redundant display. Let me check the report again: it joins `risk.signals` and then appends `mut {pct}%`. So a file with survival would show "▲mut-surv mut 40%". Slightly redundant but not broken. Let me look at what the task asked: "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a `mut` tag with the %)". 
+
+Hmm, also `compute_per_signal_hits` maps hit files by their signals — let me check commands_risk_accuracy.rs to see if the "▲mut-surv" string label could bleed into accuracy parsing. The per-signal breakdown counts hits against SIGNAL_NAMES — let me check how it matches signals to SIGNAL_NAMES.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check how accuracy iterates signals, to decide whether `▲mut-surv in signals` bleeds into accuracy thresholds
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '290,360p' src/commands_ris… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check how `signals` is used in accuracy computation. The per-signal hits are computed from `compute_per_signal_hits` — let me look at that to see whether it iterates the 7 named signals (in which case adding `▲mut-surv` to the signals vec has no effect, since it's just a display label) or something else.
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '/pub(crate) fn compute_per… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 27 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "per_signal_hits\|hit_sign… ✓ (4ms)
+
+
+  ╭─ Turn 28 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1560,1640p' src/commands_r… ✓ (4ms)
+
+
+  ╭─ Turn 29 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "hit_signals\|signal_index… ✓ (4ms)
+
+
+  ╭─ Turn 30 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '35,70p' src/commands_risk_… ✓ (6ms)
+
+
+  ╭─ Turn 31 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '78,100p' src/commands_risk… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting! There are TWO SIGNAL_NAMES definitions — one in commands_risk.rs (line 82) and one in commands_risk_accuracy.rs (line 11). But commands_risk.rs re-exports from commands_risk_accuracy: `compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend`. Wait, does it also re-export SIGNAL_NAMES? Let me check the re-export list at the top of commands_risk.rs.
+
+From the earlier read:
+```rust
+pub(crate) use crate::commands_risk_accuracy::{
+    compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
+};
+```
+
+SIGNAL_NAMES is NOT re-exported. So commands_risk.rs has its own SIGNAL_NAMES. That's a slight duplication but fine.
+
+Now the important question: `label_to_index` — how does the accuracy `hit_signals` get derived? The snapshot records `r.signals` (labels like "▲churn"). Then validation compares. Let me look at lines 150-260 in commands_risk.rs to see how hit_signals derive from labels.
+  ╭─ Turn 32 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '90,115p' src/commands_risk… ✓ (7ms)
+
+

@@ -1,0 +1,197 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the failing test to understand what's expected. The test is `commands_risk_report::tests::test_file_signal_tags_no_signals_no_tags` which panicked at `src/commands_risk_report.rs:294:9` with message "no tag list expected, got row: ... src/quiet.rs".
+
+Let me read the relevant code.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '240,340p' src/commands_ris… ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The test at line 294 expects that a file with no signals renders no tag list. But the row shows `0.10     2.0  src/quiet.rs` followed by nothing — wait, the assertion failed saying "no tag list expected, got row: 0.10     2.0  src/quiet.rs". Actually the row appears to have trailing color codes `[36m[0m` after the path. Let me look at the actual row rendering code.
+
+The row is: `  0.10     2.0  src/quiet.rs  ` where after the path there's `[36m[0m` (cyan color reset codes?). Wait, the output shows `src/quiet.rs                      [36m[0m` — the after path content includes color escape codes `\x1b[36m\x1b[0m` which are the cyan color codes for... hmm.
+
+Let me look at the format_risk_report function to see how rows are rendered.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "format_risk_report" src/c… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '161,235p' src/commands_ris… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the `file_signal_tags` function to see how it renders tags.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "file_signal_tags" src/com… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '100,160p' src/commands_ris… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I see the issue. The test `test_file_signal_tags_no_signals_no_tags` expects that when a file has no signals, the row after the path should have only padding whitespace — no tag list.
+
+Looking at the format:
+```rust
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+    risk.score
+));
+```
+
+When `signals_str` is empty, we get:
+```
+  0.10     2.0  src/quiet.rs                   
+```
+
+The test failure shows:
+```
+row:   0.10     2.0  src/quiet.rs                      
+```
+
+Wait, the row shows `src/quiet.rs` followed by some spaces. The test says:
+```rust
+let after = row.split("src/quiet.rs").nth(1).unwrap_or("");
+assert!(
+    after.trim().is_empty(),
+    "no tag list expected, got row: {row}"
+);
+```
+
+The after should be whitespace-only. `after.trim().is_empty()` should be true if after is only spaces. Let me check what happens — the row seems to have trailing spaces and possibly a color code?
+
+Looking at the format string: `{padded_path}{CYAN}{signals_str}{RESET}\n`. When `signals_str` is empty:
+- `{CYAN}` emits the CYAN escape sequence
+- `{signals_str}` emits nothing
+- `{RESET}` emits the reset escape sequence
+
+So the row would be:
+```
+  0.10     2.0  src/quiet.rs                    \x1b[36m\x1b[0m
+```
+
+That's why `after.trim().is_empty()` fails — because `after` contains `\x1b[36m\x1b[0m` which is not whitespace! Well, wait — `\x1b` is ESC, which `trim()` doesn't strip.
+
+The fix: when `signals_str` is empty, don't emit the CYAN...RESET color codes. Let me look at the format:
+
+```rust
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+    risk.score
+));
+```
+
+The fix should be to only include the CYAN/RESET when signals_str is non-empty. Something like:
+
+```rust
+let colored_signals = if signals_str.is_empty() {
+    String::new()
+} else {
+    format!("{CYAN}{signals_str}{RESET}")
+};
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{colored_signals}\n",
+    risk.score
+));
+```
+
+Wait, but why didn't the other tests fail? Let me check `test_format_risk_report_shows_signals`:
+- signals `["▲churn", "▲size"]` → tags `[churn, size]`, non-empty, so CYAN...RESET around it works fine.
+
+The `test_file_signal_tags_with_mutation_churn`:
+- tags `[churn, mut 50%]`, non-empty — works.
+
+The only failing test is the no-signals one. So the fix is to avoid emitting color codes when signals_str is empty.
+
+Let me make this fix.
+────────────────────────────────────────────────────────────────────────────────
+Found the bug. When `signals_str` is empty, the format string still emits `{CYAN}...{RESET}` color codes (invisible escape sequences), so the test's `after.trim().is_empty()` check fails on the stray escape bytes. Fix: only wrap signals in color codes when non
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs (4 → 12 lines)
+  - out.push_str(&format!(
+  -             "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+  + // Only wrap the tag list in color codes when it's non-empty — an empty
+  +         // signals_str must leave the row as pure whitespace after the path so
+  +         // no-signal rows are truly tag-free.
+  +         let colored_signals = if signals_str.is_empty() {
+  +             String::new()
+  +         } else {
+  +             format!("{CYAN}{signals_str}{RESET}")
+  +         };
+  +         out.push_str(&format!(
+  +             "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{colored_signals}\n",
+                risk.score
+            ));
+ ✓ (1ms)
+  - out.push_str(&format!(
+  -             "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{CYAN}{signals_str}{RESET}\n",
+  + // Only wrap the tag list in color codes when it's non-empty — an empty
+  +         // signals_str must leave the row as pure whitespace after the path so
+  +         // no-signal rows are truly tag-free.
+  +         let colored_signals = if signals_str.is_empty() {
+  +             String::new()
+  +         } else {
+  ... (6 more lines)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --bin arc commands_risk… ✓ (19.5s)
+
+The failing test now passes. Running the full verification sequence as instructed
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo build 2>&1 | ta… ✓ (9.5s)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -15 ✓ (57.4s)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | grep -E "test re… ✓ (1m 30s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The full test suite passes — no failures, 3 test binaries all ok. Verified all checks pass. Let me confirm the final state briefly and summarize.
+────────────────────────────────────────────────────────────────────────────────
+All green. The fix is complete:
+
+## What was wrong
+
+In `format_risk_report (src/commands_risk_report.rs`), the row format string always appended `{CYAN}{signals_str}{RESET}` even when signals_str was empty. That emitted invisible ANSI color escape sequences after the path, so the new test `test_file_signal_tags_no_signals_no_tags` — which asserts the text after the path is pure whitespace when no signals fired — failed on the stray escape bytes.
+
+## The fix
+
+Wrapped the tag list in color codes only when it's non-empty:
+
+```rust
+let colored_signals = if signals_str.is_empty() {
+    String::new()
+} else {
+    format!("{CYAN}{signals_str}{RESET}")
+};
+out.push_str(&format!(
+    "  {YELLOW}{:.2}{RESET}   {td_display}  {padded_path}{colored_signals}\n",
+    risk.score
+));
+```
+
+No-signal rows now end in plain whitespace after the path (no hallucinated tags, no stray escapes), while signal-bearing rows still render `[churn, mut 50%]` in cyan.
+
+## Verification
+
+• cargo fmt — pass
+• `cargo build` — pass
+• `cargo test` — full suite passes (3 test binaries, 0 failures; the previously failing `commands_risk_report::tests::test_file_signal_tags_no_signals_no_tags` now passes along with all 19 report-module tests)
+
+

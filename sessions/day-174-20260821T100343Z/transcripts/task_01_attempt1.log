@@ -1,0 +1,329 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls .arc/mutants_per_file.json 2>/d… ✓ (8ms)
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '380,780p' src/commands_ris… ✓ (7ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '780,980p' src/commands_ris… ✓ (5ms)
+
+Let me look at the weights structure and the SIGNAL_NAMES, plus normalize_scores function.
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES\|fn normaliz… ✓ (4ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '55,160p' src/commands_risk… ✓ (4ms)
+
+The task requires me to add a mutation-survival sensor. The current design uses fixed-size `[f64; 7]` weights array everywhere. I need to be careful here. Let me think about the minimal approach that satisfies the task without breaking the learned-weights machinery.
+
+The task says: "fold it into the final composite score with a modest weight (e.g. 0.10) so it complements rather than dominates... Keep the existing total weight distribution sane (rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged)."
+
+So I add an 8th signal. Weights array size goes from 7 to 8. I need to update:
+1. `RISK_WEIGHTS → [f64; 8] = [0.26, 0.13, 0.13, 0.09, 0.10, 0.09, 0.10, 0.10]` — sum must = 1.0. Let me compute: 0.26+0.13+0.13+0.09+0.10+0.09+0.10+0.10 = 1.00. 
+2. `SIGNAL_NAMES → [&str; 8]`
+3. `load_learned_weights` / `_from` — array size and validate len == 8
+4. `compute_file_risk_scores` — add the signal
+5. The learning machinery (lines 280-310, 3875) uses fixed indices.
+
+This is getting invasive. Let me look at how extensive the changes to the learning/accuracy code are. The task says in report: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds."
+
+Let me check the accuracy code in commands_risk_accuracy.rs and the report display.
+
+Let me look at the whole risk computation and learning more carefully first.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '230,380p' src/commands_ris… ✓ (5ms)
+
+The task explicitly says: "Add the signal name to the per-signal breakdown **only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds.**"
+
+Given the weight-learning machinery is fundamentally tied to 7 signals (arrays indexed by signal), fully extending to 8 signals would touch a LOT of code (weight learning, validation events, snapshot serialization, etc.). The task gives me an explicit escape hatch: keep it **display-only** and fold into the composite with a modest weight.
+
+Let me take a pragmatic approach that satisfies the task requirements while minimizing risk:
+
+1. Add `load_mutation_survival(path) -> HashMap<String, f64>`.
+2. In `compute_file_risk_scores`, add mutation-survival as a signal that's folded into the composite score with weight 0.10, rebalancing the existing weights.
+3. Display it as a mut tag with `%` in the report.
+
+The question is whether to extend to 8 weights or fold it separately. The task says "rebalance other weights so the sum stays ~1.0". Let me extend the weight arrays to 8 — but that touches `compute_adjusted_weights, load_learned_weights` validation (len check), `SIGNAL_NAMES`, the signal tag logic, and `label_to_index`. 
+
+Actually, the cleanest approach given the "display-only" escape hatch for accuracy: I'll extend the primary `compute_file_risk_scores` to use 8 weights, and update all the arrays. This is the "proper" thing. Let me check whether `label_to_index` matters for the mutation signal — mutation would never appear in signals vector via label_to_index because no "▲mut" tag maps there, but I should add it so learned weights can learn from it. Actually to keep it minimal and per the escape hatch, let me extend arrays to 8 but treat mutation as a full signal.
+
+Let me check the snapshot format and how signals are serialized to ensure adding an 8th doesn't break parsing.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "signal\|signals\|label_to… ✓ (5ms)
+
+The `SIGNAL_NAMES` is imported into accuracy code. Let me check the interplay. The task explicitly says to keep the accuracy code display-only to avoid touching accuracy thresholds. Extending SIGNAL_NAMES to 8 would change the accuracy breakdown to 8 lines (per-signal block iterates SIGNAL_NAMES?), let me check.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "SIGNAL_NAMES" src/command… ✓ (3ms)
+
+There are two SIGNAL_NAMES — one in `commands_risk.rs` and one in `commands_risk_accuracy.rs`. The task explicitly says to keep accuracy display-only to avoid touching accuracy thresholds. So I'll leave the accuracy code's 7-entry `SIGNAL_NAMES` alone entirely. The accuracy breakdown stays at 7 signals.
+
+The task says: "Add the signal name to the per-signal breakdown only if the accuracy code already iterates named signals — otherwise keep it display-only to avoid touching accuracy thresholds." Since the accuracy code has its own fixed 7-entry array and iterates `SIGNAL_NAMES[i] with [usize;7]` arrays, I'll keep accuracy untouched and make mutation display-only in the file-risk report.
+
+Now, for `compute_file_risk_scores`, I need to add the 8th weight. This is the risk scores array which is separate from the accuracy breakdown. Let me extend the risk weights to 8. The risk `SIGNAL_NAMES` in commands_risk.rs is used at line 381 (saving weights JSON) and 1413 (printing weights in risk effectiveness). Let me look at line 1400-1420.
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1380,1425p' src/commands_r… ✓ (4ms)
+
+Let me check where this per-signal breakdown function reads its `signal_hit_counts — is it [u64;7]`? Let me find the enclosing function and the `_from` variant that computes these.
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1350,1385p' src/commands_r… ✓ (6ms)
+
+The per-signal weight-learning and breakdown code uses `[u64; 7]` arrays and `[&str; 7]` `SIGNAL_NAMES`, [f64;7] weights throughout. The task explicitly says to keep the accuracy path display-only and untouched.
+
+Given this, the cleanest minimal-risk approach that keeps the weight-learning machinery intact at 7 signals while adding the mutation sensor:
+
+**Approach:** Keep the learned-weights / accuracy machinery at 7 signals untouched. Add the mutation survival signal as a separate modest addition inside `compute_file_risk_scores` using its own fixed weight of 0.10, and **rescale the composite** so the base 7-signal score contributes 0.90 and mutation contributes 0.10.
+
+But the task says "rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged." If I simply do `final_score = 0.9 * base7score + 0.1 * mut_signal`, then files without sensor data (mut=0) get `0.9 * base7score` which is *different* from before (before it was `base7score`). That violates "behavior for files without the sensor file is unchanged."
+
+To keep behavior unchanged when the sensor file is absent: only fold mutation in when the sensor file exists AND the file has a non-zero value. Let me re-read: "Normalize into the same 0..1 space and fold it into the final composite score with a modest weight (e.g. 0.10)... rebalance other weights so the sum stays ~1.0 and behavior for files without the sensor file is unchanged."
+
+"behavior for files without the sensor file is unchanged" — this likely refers to when the whole `.arc/mutants_per_file.json` file is absent (the normal state). In that state, there's no mutation data at all, so risk scores should be unchanged. When the sensor file IS present, then mutation contributes to those files that have it.
+
+So the cleanest: 
+• Load the mutation map once. 
+• If the map is empty (sensor file absent), use the existing 7 weights unchanged → risk scores exactly as before.
+• If the map is non-empty, use an 8-weight array where mutation has weight 0.10 and the others are rebalanced.
+
+But that creates two different weight sets and diverges from learned weights. Hmm. Learned weights are [f64;7]. 
+
+Let me simplify to satisfy the task precisely while keeping it robust:
+
+Add 8th weight to `RISK_WEIGHTS` and `SIGNAL_NAMES` in `commands_risk.rs` (the risk-scoring one), extend `load_learned_weights*` to 8. But that forces touching `compute_adjusted_weights, format_signal_breakdown, label_to_index`, and the accuracy `SIGNAL_NAMES` import. That's a lot, and the task explicitly warns against touching accuracy thresholds.
+
+Given the conflict, the intended pragmatic reading is: fold mutation into the composite in `compute_file_risk_scores` with a fixed 0.10 weight, rebalance the *default* base weights so they'd sum to 0.90 when combined with 0.10, and the learned weights/accuracy machinery is left alone (its `[f64;7]` stays). 
+
+Concretely in `compute_file_risk_scores`:
+```rust
+let weights = load_learned_weights(); // [f64;7] as before
+let mut_base = load_mutation_survival(...); 
+// fold: score = (sum of 7 weighted signals) * (1 - MUT_WEIGHT) * ... 
+```
+
+But "behavior unchanged when sensor absent" — if sensor absent, we want exactly the old behavior. So:
+
+```rust
+let mut_base_nonzero = ...; // whether any file has a non-zero mutation value
+if mut_map has any non-zero entries {
+    score = base7 * (1.0 - MUT_WEIGHT) + mut_sig * MUT_WEIGHT
+} else {
+    score = base7  // exact old behavior
+}
+```
+
+Actually simpler and cleaner: normalize by per-file. For files with a mutation entry, `score = base7 * (1 - MUT_WEIGHT) + mut_norm * MUT_WEIGHT`. For files without, `score = base7`. When the whole file is absent, all files lack entries → all unchanged. This perfectly satisfies "files without the sensor file is unchanged" and "files with no entry get 0 (no signal)" — wait, the task says "files with no entry get 0 (no signal)". 
+
+Let me reconcile: "for each file, look up its survival fraction; **files with no entry get 0 (no signal)**." So a file with no entry gets mutation=0. But then if we fold `score = base7*0.9 + 00.1 = base70.9`, that changes files without entries. That contradicts "behavior for files without the sensor file is unchanged."
+
+The two statements reconcile if "the sensor file is absent" (whole map empty) → use base7 unchanged; "a file has no entry" within a present sensor file → mutation=0, so its score becomes `base7*0.9`. Hmm, but that changes behavior for those files when the sensor is present.
+
+I think the intent is: fold with `0.9*base + 0.1*mut` always when computing, but the "no regression for users without the artifact" refers to the normal state where the whole artifact is absent. When the artifact is present, scores may shift slightly — that's expected and desired.
+
+The cleanest, defensible implementation that satisfies the explicit "behaviors... unchanged" test case (sensor absent = normal state) is the conditional: only fold when the sensor map is non-empty. Let me go with the continuous fold but guard on map non-empty. Actually, let me avoid the whole "9/10 scaling changes everything" problem by using the *conditional* approach, which is cleanest for both statements:
+
+• Build the base 7-signal score exactly as today.
+• Load the mutation map.
+• If the map is non-empty (sensor present), fold: for each file, `final = base * (1 - MUT_WEIGHT) + mut_sig * MUT_WEIGHT, where mut_sig` is the normalized survival fraction (0 for files without entries).
+• If the map is empty/absent, `final = base` (exactly today's behavior).
+
+This satisfies "files with no entry get 0" (within a present sensor, mut_sig=0 → final=0.9*base), and "sensor absent → unchanged."
+
+This keeps all the [f64;7] learned-weights machinery untouched. Mutation is a separate modest weight constant. 
+
+Now let me look at the FileRisk struct and the report display to add the `mut` tag.
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct FileRisk\|test_den… ✓ (6ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '40,55p' src/commands_risk.… ✓ (5ms)
+
+Now I understand the structures. Let me implement. I'll:
+
+1. Add `load_mutation_survival` in commands_risk.rs.
+2. Add a `mutation_survival: f64` field to `FileRisk` (default 0.0 for tests that construct it — need to check existing constructors).
+3. Fold into `compute_file_risk_scores`.
+4. Add `▲mut` signal tag when mutation is non-zero.
+5. Display mut% in report.
+
+Let me check existing FileRisk constructors in tests to know if adding a field breaks them.
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "FileRisk {" src/ | head … ✓ (8ms)
+
+Let me check how common these are and count field instances.
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "test_density:" src/ | wc… ✓ (13ms)
+
+Adding a field to `FileRisk` requires touching all 59 `test_density:` constructor sites. That's a lot of churn. Instead, I'll avoid adding a field and use the `signals` vector for the `mut` tag, and compute the mutation survival display within the report by re-reading the file. Actually — simpler: I can add the mutation info into the existing `signals` vec as a ▲mut/mut tag without a struct field, and compute the % display directly in the report by calling `load_mutation_survival` there. But that re-reads the file.
+
+Actually, the cleanest for display: add a `mutation_survival: f64` field but with `#[serde]`-less default handling. Since it's 59 sites, let me reconsider. 
+
+Better: I can add the field but provide it via a `..Default::default()`-style... no, FileRisk doesn't derive Default. 
+
+Alternative that avoids struct change: store mutation survival on the `signals` display. The task says: "Surface the new signal in the file-risk display: when a file has a non-zero mutation-survival value, show it (e.g. a mut tag with the %)". 
+
+I can add a `mut: NN%` tag into the `signals` vec itself as a `&'static str`? No, that can't carry the number. But `FileRisk.signals` is `Vec<&'static str>`. 
+
+Hmm. I could add a field but use a helper constructor. Since there are 59 sites, let me just add the field and update all 59 constructors with `mutation_survival: 0.0` — tedious but mechanical. Actually, let me count exact FileRisk literal sites and see if I can use `rename_symbol` or just do a targeted approach.
+
+Actually the least-churn, cleanest solution: add the field to the struct, and add `mutation_survival: 0.0,` after `test_density:` at every construction site. Let me count exact occurrences of `test_density: ` to update.
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "test_density:" src/ | gr… ✓ (8ms)
+
+Let me check the actual test FileRisk constructors:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '565,575p;670,676p' src/com… ✓ (8ms)
+
+Adding a field to FileRisk would require updating ~7 constructor literal sites (each may have multiple entries). That's manageable. But to be safe and avoid touching accuracy/snapshot serialization, I'll take a cleaner approach: **add a `mutation_survival: f64` field** but make tests that construct `FileRisk set 0.0`.
+
+Actually, wait — the cleanest design that avoids touching 7+ constructor sites AND keeps the display working: I can make the mutation-survival value ride along in the signals vector as a static `▲mut` tag (no numeric %), and separately compute the % for the display by reading the map again in the report. But re-reading is ugly.
+
+Let me reconsider — actually adding a field is fine and clean. Let me add `mutation_survival: f64` and update the constructors. There are these FileRisk literal sites:
+• commands_risk_snapshots.rs:566, 668
+• commands_risk_emerging.rs:202, 360
+• commands_risk_report.rs:200, 461
+• commands_risk.rs:4360
+
+Each `FileRisk {` block needs the field. But there might be more than one block per line numbering. Let me just do it with `edit_file` on each known constructor. First, let me add the field and the loader, then update constructors.
+
+Let me start implementing. First the field and loader + weight constant:
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (9 → 13 lines)
+        /// Tests per 100 lines of code (`#[test]` count / line_count × 100).
+        /// 0.0 for non-Rust files or files that can't be read.
+        pub test_density: f64,
+  +     /// Per-file mutation-survival fraction in [0,1], or 0.0 when there is no
+  +     /// mutation signal for this file (no `.arc/mutants_per_file.json`, or the
+  +     /// file isn't listed). Used for display only.
+  +     pub mutation_survival: f64,
+    }
+ ✓ (1ms)
+        /// Tests per 100 lines of code (`#[test]` count / line_count × 100).
+        /// 0.0 for non-Rust files or files that can't be read.
+        pub test_density: f64,
+  +     /// Per-file mutation-survival fraction in [0,1], or 0.0 when there is no
+  +     /// mutation signal for this file (no `.arc/mutants_per_file.json`, or the
+  +     /// file isn't listed). Used for display only.
+  +     pub mutation_survival: f64,
+    }
+
+Now add a weight constant and the loader function. Let me add them near the top after SIGNAL_NAMES, and add the mutation tag to signal detection. First, let me add the loader function. I'll place it near `co_change_coupling` or before `compute_file_risk_scores`. Let me add it right before `compute_file_risk_scores`.
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (1 → 44 lines)
+  + /// Modest weight given to the mutation-survival signal when folding it into the
+  + /// composite risk score. Kept small so it complements rather than dominates the
+  + /// existing churn/coverage-based signals.
+  + const MUTATION_WEIGHT: f64 = 0.10;
+  + 
+  + /// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`
+  + /// into `.arc/mutants_per_file.json` (keys = file paths, values = survival
+  + /// fraction in [0,1]). Fail-soft: any missing/unparseable/empty file yields an
+  + /// empty map so risk scoring never blocks on the artifact.
+  + pub(crate) fn load_mutation_survival(path: &std::path::Path) -> std::collections::HashMap<String, f64> {
+  +     use std::collections::HashMap;
+  + 
+  +     let content = match std::fs::read_to_string(path) {
+  +         Ok(c) => c,
+  +         Err(_) => return HashMap::new(),
+  +     };
+  +     let trimmed = content.trim();
+  +     if trimmed.is_empty() {
+  +         return HashMap::new();
+  +     }
+  ... (24 more lines)
+ ✗ (2ms)
+    │ old_text not found in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs.
+
+I need to update the FileRisk struct constructors first before adding a field (compile error otherwise). Let me find the exact anchor for the loader — it's after my struct edit. Let me check current line number of the struct field change and locate `compute_file_risk_scores`.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "Compute risk scores for a… ✓ (4ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '618,626p' src/commands_ris… ✓ (3ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (5 → 47 lines)
+        coupling
+    }
+    
+  - /// Compute risk scores for all `src/**/*.rs` files using six weighted signals.
+  - pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
+  + /// Modest weight given to the mutation-survival signal when folding it into the
+  + /// composite risk score. Kept small so it complements rather than dominates the
+  + /// existing churn/coverage-based signals.
+  + const MUTATION_WEIGHT: f64 = 0.10;
+  + 
+  + /// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`
+  + /// into `.arc/mutants_per_file.json` (keys = file paths, values = survival
+  + /// fraction in [0,1]). Fail-soft: any missing/unparseable/empty file yields an
+  + /// empty map so risk scoring never blocks on the artifact.
+  + pub(crate) fn load_mutation_survival(path: &std::path::Path) -> std::collections::HashMap<String, f64> {
+  +     use std::collections::HashMap;
+  + 
+  +     let content = match std::fs::read_to_string(path) {
+  +         Ok(c) => c,
+  +         Err(_) => return HashMap::new(),
+  ... (29 more lines)
+ ✓ (1ms)
+        coupling
+    }
+    
+  - /// Compute risk scores for all `src/**/*.rs` files using six weighted signals.
+  - pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
+  + /// Modest weight given to the mutation-survival signal when folding it into the
+  + /// composite risk score. Kept small so it complements rather than dominates the
+  + /// existing churn/coverage-based signals.
+  ... (13 more lines)
+
+Now modify `compute_file_risk_scores` to load the mutation map and fold it in. Let me see the score computation section (around the loop that builds risks) to add the mutation loading and folding.
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "let norm_revert\|Weighted… ✓ (4ms)
+
+The mutation signal spans multiple files' fold. Let me load the mutation map right after `let weights = load_learned_weights();` and compute per-file in the loop. Let me view lines 860-915.
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '855,915p' src/commands_ris… ✓ (5ms)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '832,860p' src/commands_ris… ✓ (4ms)
+
+
