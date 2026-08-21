@@ -48,9 +48,11 @@ pub(crate) struct FileRisk {
     /// Tests per 100 lines of code (`#[test]` count / line_count × 100).
     /// 0.0 for non-Rust files or files that can't be read.
     pub test_density: f64,
-    /// Per-file mutation-survival fraction in [0,1], or 0.0 when there is no
-    /// mutation signal for this file (no `.arc/mutants_per_file.json`, or the
-    /// file isn't listed). Used for display only.
+    /// Per-file mutation-survival fraction in [0,1] (`survived/(killed+survived)`
+    /// from `.arc/mutants_per_file.json`), or 0.0 when there is no mutation
+    /// signal for this file (no artifact, or the file isn't listed). A nonzero
+    /// value contributes up to `MUTATION_WEIGHT` to the score and is shown as a
+    /// `mut N%` tag in the report. Display + scoring signal.
     pub mutation_survival: f64,
 }
 
@@ -625,9 +627,14 @@ fn co_change_coupling() -> std::collections::HashMap<String, std::collections::H
 const MUTATION_WEIGHT: f64 = 0.10;
 
 /// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`
-/// into `.arc/mutants_per_file.json` (keys = file paths, values = survival
-/// fraction in [0,1]). Fail-soft: any missing/unparseable/empty file yields an
-/// empty map so risk scoring never blocks on the artifact.
+/// into `.arc/mutants_per_file.json`.
+///
+/// The artifact's schema (see `scripts/run_mutants.sh`) is:
+/// `{"tool", "git_head", "generated_at", "files": [{"path", "mutants",
+/// "killed", "survived"}], "summary": {...}}` — not a top-level path→fraction
+/// map. The survival fraction per file is `survived / (killed + survived)`.
+/// Fail-soft: any missing/unparseable/empty file, or one lacking the `files`
+/// array, yields an empty map so risk scoring never blocks on the artifact.
 pub(crate) fn load_mutation_survival(
     path: &std::path::Path,
 ) -> std::collections::HashMap<String, f64> {
@@ -649,19 +656,50 @@ pub(crate) fn load_mutation_survival(
         Some(o) => o,
         None => return HashMap::new(),
     };
+    let Some(files) = obj.get("files") else {
+        return HashMap::new();
+    };
+    let Some(files) = files.as_array() else {
+        return HashMap::new();
+    };
 
-    let mut out: HashMap<String, f64> = HashMap::with_capacity(obj.len());
-    for (file, v) in obj {
-        let Some(fraction) = v.as_f64() else {
+    let mut out: HashMap<String, f64> = HashMap::with_capacity(files.len());
+    for entry in files {
+        let Some(entry) = entry.as_object() else {
             continue;
         };
-        // Clamp to [0,1] and skip non-positive values (no signal).
-        let fraction = fraction.clamp(0.0, 1.0);
+        let Some(fpath) = entry.get("path").and_then(|p| p.as_str()) else {
+            continue;
+        };
+        let Some(killed) = entry.get("killed").and_then(|k| k.as_f64()) else {
+            continue;
+        };
+        let Some(survived) = entry.get("survived").and_then(|s| s.as_f64()) else {
+            continue;
+        };
+        let total = killed + survived;
+        if total <= 0.0 {
+            // No mutants exercised this file — no survival signal.
+            continue;
+        }
+        let fraction = surviving_fraction(killed, survived);
+        // Clamp to [0,1] and skip zero (no signal) entries.
         if fraction > 0.0 {
-            out.insert(file.clone(), fraction);
+            out.insert(fpath.to_string(), fraction);
         }
     }
     out
+}
+
+/// Survival fraction for a file with `killed` killed mutants and `survived`
+/// surviving ones: `survived / (killed + survived)` clamped to [0,1].
+/// Pure helper (extracted so tests can pin the arithmetic).
+fn surviving_fraction(killed: f64, survived: f64) -> f64 {
+    let total = killed + survived;
+    if total <= 0.0 {
+        return 0.0;
+    }
+    (survived / total).clamp(0.0, 1.0)
 }
 
 /// Compute risk scores for all `src/**/*.rs` files using weighted signals.
@@ -731,8 +769,10 @@ pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
     let coupling_map = co_change_coupling();
 
     // Mutation-survival sensor (Day 173): per-file survival fraction from
-    // `.arc/mutants_per_file.json` (written by run_mutants.sh). Fail-soft —
-    // an absent/malformed artifact yields an empty map and no signal.
+    // `.arc/mutants_per_file.json` (written by run_mutants.sh; schema =
+    // `{"tool", "git_head", "generated_at", "files": [{path, killed, survived}],
+    // "summary"}`). Fail-soft — an absent/malformed artifact yields an empty map
+    // and no signal.
     let mutation_survival_map =
         load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
 
@@ -3105,21 +3145,93 @@ src/baz.rs
 
     #[test]
     fn test_load_mutation_survival_well_formed() {
-        // Well-formed .arc/mutants_per_file.json → correct map, clamped, >0 only
+        // Well-formed artifact with the real run_mutants.sh schema (top-level
+        // {"tool", "git_head", "generated_at", "files": [{path, mutants, killed,
+        // survived}], "summary"}) → correct map (survived/(killed+survived)),
+        // clamped, >0 only.
         let dir = tempfile::tempdir().expect("temp dir");
         let path = dir.path().join("mutants_per_file.json");
         std::fs::create_dir_all(dir.path()).expect("create dir");
         std::fs::write(
             &path,
-            r#"{"src/foo.rs": 0.4, "src/bar.rs": 0.0, "src/baz.rs": 1.7, "src/qux.rs": null}"#,
+            r#"{
+                "tool": "cargo-mutants",
+                "git_head": "abc1234",
+                "generated_at": "2026-08-20T00:00:00Z",
+                "files": [
+                    {"path": "src/foo.rs", "mutants": 5, "killed": 3, "survived": 2},
+                    {"path": "src/bar.rs", "mutants": 4, "killed": 4, "survived": 0},
+                    {"path": "src/baz.rs", "mutants": 9, "killed": 1, "survived": 8},
+                    {"path": "src/qux.rs", "mutants": 0, "killed": 0, "survived": 0}
+                ],
+                "summary": {"files": 4, "mutants": 18, "killed": 8, "survived": 10}
+            }"#,
         )
         .expect("write");
         let map = load_mutation_survival(&path);
-        assert_eq!(map.len(), 2, "only >0 entries, clamped to <=1.0");
-        assert!((map["src/foo.rs"] - 0.4).abs() < 1e-9);
-        assert!((map["src/baz.rs"] - 1.0).abs() < 1e-9, "clamped to 1.0");
-        assert!(!map.contains_key("src/bar.rs"), "0.0 means no signal");
-        assert!(!map.contains_key("src/qux.rs"), "non-numeric skipped");
+        assert_eq!(map.len(), 2, "zero-survival and zero-total entries skipped");
+        assert!(
+            (map["src/foo.rs"] - 0.4).abs() < 1e-9,
+            "survived/(killed+survived) = 2/5"
+        );
+        assert!(
+            (map["src/baz.rs"] - 8.0 / 9.0).abs() < 1e-9,
+            "survived/(killed+survived) = 8/9"
+        );
+        assert!(
+            !map.contains_key("src/bar.rs"),
+            "0.0 survival means no signal"
+        );
+        assert!(!map.contains_key("src/qux.rs"), "no mutants → no signal");
+    }
+
+    #[test]
+    fn test_load_mutation_survival_real_schema_shape() {
+        // Only the `files` array entries with valid path/killed/survived
+        // survive; malformed entries are skipped. Missing `files` → empty.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("shape.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "files": [
+                    {"path": "src/ok.rs", "mutants": 2, "killed": 1, "survived": 1},
+                    {"path": "src/missing_killed.rs", "mutants": 2, "survived": 2},
+                    {"path": "src/null_survived.rs", "killed": 1, "survived": null},
+                    "not-an-object",
+                    {"path": "src/zero_total.rs", "killed": 0, "survived": 0}
+                ]
+            }"#,
+        )
+        .expect("write");
+        let map = load_mutation_survival(&path);
+        assert_eq!(map.len(), 1, "only the well-formed entry survives");
+        assert!((map["src/ok.rs"] - 0.5).abs() < 1e-9);
+
+        let no_files = dir.path().join("no_files.json");
+        std::fs::write(&no_files, r#"{"tool": "cargo-mutants"}"#).expect("write");
+        assert!(
+            load_mutation_survival(&no_files).is_empty(),
+            "missing files[] must fail soft"
+        );
+    }
+
+    #[test]
+    fn test_surviving_fraction() {
+        assert!((surviving_fraction(3.0, 2.0) - 0.4).abs() < 1e-9);
+        assert!((surviving_fraction(4.0, 0.0) - 0.0).abs() < 1e-9);
+        assert!((surviving_fraction(1.0, 8.0) - 8.0 / 9.0).abs() < 1e-9);
+        assert_eq!(surviving_fraction(0.0, 0.0), 0.0, "no mutants → 0");
+        assert_eq!(
+            surviving_fraction(-1.0, 1.0),
+            0.0,
+            "degenerate total → 0, not a signal"
+        );
+        assert_eq!(
+            surviving_fraction(1.0, -1.0),
+            0.0,
+            "degenerate total → 0, not a signal"
+        );
     }
 
     #[test]
@@ -3137,6 +3249,12 @@ src/baz.rs
         assert!(
             load_mutation_survival(&empty).is_empty(),
             "empty file must fail soft"
+        );
+        let top_level_array = dir.path().join("array.json");
+        std::fs::write(&top_level_array, r#"[{"path": "src/x.rs"}]"#).expect("write");
+        assert!(
+            load_mutation_survival(&top_level_array).is_empty(),
+            "top-level array (wrong shape) must fail soft"
         );
         let absent = dir.path().join("missing.json");
         assert!(
