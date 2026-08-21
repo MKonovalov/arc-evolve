@@ -204,18 +204,21 @@ mod tests {
                 score: 0.9,
                 signals: vec!["▲churn", "▲size"],
                 test_density: 1.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/stable.rs".into(),
                 score: 0.5,
                 signals: vec![],
                 test_density: 3.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/emerging.rs".into(),
                 score: 0.3,
                 signals: vec!["▲recent"],
                 test_density: 2.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -252,12 +255,14 @@ mod tests {
                 score: 0.9,
                 signals: vec!["▲churn"],
                 test_density: 1.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/other.rs".into(),
                 score: 0.2,
                 signals: vec![],
                 test_density: 5.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -291,6 +296,7 @@ mod tests {
             score: 0.2,
             signals: vec![],
             test_density: 0.0,
+            mutation_survival: 0.0,
         }];
 
         let counts_7 = vec![("src/single_touch.rs".into(), 1u32)]; // only 1 change
@@ -314,12 +320,14 @@ mod tests {
                 score: 0.9,
                 signals: vec![],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/reverted.rs".into(),
                 score: 0.3,
                 signals: vec![],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -350,18 +358,21 @@ mod tests {
                 score: 0.9,
                 signals: vec![],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/fast.rs".into(),
                 score: 0.4,
                 signals: vec![],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/faster.rs".into(),
                 score: 0.3,
                 signals: vec![],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             },
         ];
 

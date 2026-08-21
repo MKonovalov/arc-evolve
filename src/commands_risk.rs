@@ -48,6 +48,10 @@ pub(crate) struct FileRisk {
     /// Tests per 100 lines of code (`#[test]` count / line_count × 100).
     /// 0.0 for non-Rust files or files that can't be read.
     pub test_density: f64,
+    /// Per-file mutation-survival fraction in [0,1], or 0.0 when there is no
+    /// mutation signal for this file (no `.arc/mutants_per_file.json`, or the
+    /// file isn't listed). Used for display only.
+    pub mutation_survival: f64,
 }
 
 /// Min-max normalize a slice of values to the 0.0–1.0 range.
@@ -615,7 +619,52 @@ fn co_change_coupling() -> std::collections::HashMap<String, std::collections::H
     coupling
 }
 
-/// Compute risk scores for all `src/**/*.rs` files using six weighted signals.
+/// Modest weight given to the mutation-survival signal when folding it into the
+/// composite risk score. Kept small so it complements rather than dominates the
+/// existing churn/coverage-based signals.
+const MUTATION_WEIGHT: f64 = 0.10;
+
+/// Load per-file mutation-survival fractions written by `scripts/run_mutants.sh`
+/// into `.arc/mutants_per_file.json` (keys = file paths, values = survival
+/// fraction in [0,1]). Fail-soft: any missing/unparseable/empty file yields an
+/// empty map so risk scoring never blocks on the artifact.
+pub(crate) fn load_mutation_survival(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, f64> {
+    use std::collections::HashMap;
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return HashMap::new();
+    }
+    let val: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+    let obj = match val.as_object() {
+        Some(o) => o,
+        None => return HashMap::new(),
+    };
+
+    let mut out: HashMap<String, f64> = HashMap::with_capacity(obj.len());
+    for (file, v) in obj {
+        let Some(fraction) = v.as_f64() else {
+            continue;
+        };
+        // Clamp to [0,1] and skip non-positive values (no signal).
+        let fraction = fraction.clamp(0.0, 1.0);
+        if fraction > 0.0 {
+            out.insert(file.clone(), fraction);
+        }
+    }
+    out
+}
+
+/// Compute risk scores for all `src/**/*.rs` files using weighted signals.
 pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
     // 1. Change frequency (30 days) — weight 0.30
     let counts_30 = crate::git::file_change_counts(30);
@@ -680,6 +729,12 @@ pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
 
     // 6. Co-change coupling — weight 0.15
     let coupling_map = co_change_coupling();
+
+    // Mutation-survival sensor (Day 173): per-file survival fraction from
+    // `.arc/mutants_per_file.json` (written by run_mutants.sh). Fail-soft —
+    // an absent/malformed artifact yields an empty map and no signal.
+    let mutation_survival_map =
+        load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
 
     // 5b. Cross-file test coverage — how many test-containing files reference each module
     let cross_file_refs = build_test_reference_map();
@@ -813,7 +868,8 @@ pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
     let norm_coupling = normalize_scores(&raw_coupling);
     let norm_revert = normalize_scores(&raw_revert);
 
-    // Weighted sum → final score (7 signals, sum = 1.0)
+    // Weighted sum → final score (7 signals, sum = 1.0) plus an additive
+    // mutation-survival term (0..MUTATION_WEIGHT, 0 when the sensor is absent).
     // Use learned weights if available, otherwise fall back to defaults.
     let weights = load_learned_weights();
     let mut risks: Vec<FileRisk> = Vec::with_capacity(all_files.len());
@@ -836,6 +892,16 @@ pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
             score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;
         }
 
+        // Mutation-survival signal: a file where mutants survive is
+        // undertested/fragile → higher risk. Inverted so high survival = high
+        // risk, bounded 0..MUTATION_WEIGHT so it complements rather than
+        // dominates. Files without an entry contribute exactly 0, so behavior
+        // is unchanged when `.arc/mutants_per_file.json` is absent.
+        let ms = *mutation_survival_map.get(path.as_str()).unwrap_or(&0.0);
+        if ms > 0.0 {
+            score += MUTATION_WEIGHT * ms;
+        }
+
         let mut signals = Vec::new();
         if norm_churn[i] > 0.5 {
             signals.push("▲churn");
@@ -855,12 +921,16 @@ pub(crate) fn compute_file_risk_scores() -> Vec<FileRisk> {
         if norm_coupling[i] > 0.7 {
             signals.push("▲coupled");
         }
+        if ms > 0.0 {
+            signals.push("▲mut-surv");
+        }
 
         risks.push(FileRisk {
             path,
             score,
             signals,
             test_density: td,
+            mutation_survival: ms,
         });
     }
 
@@ -3034,6 +3104,48 @@ src/baz.rs
     }
 
     #[test]
+    fn test_load_mutation_survival_well_formed() {
+        // Well-formed .arc/mutants_per_file.json → correct map, clamped, >0 only
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("mutants_per_file.json");
+        std::fs::create_dir_all(dir.path()).expect("create dir");
+        std::fs::write(
+            &path,
+            r#"{"src/foo.rs": 0.4, "src/bar.rs": 0.0, "src/baz.rs": 1.7, "src/qux.rs": null}"#,
+        )
+        .expect("write");
+        let map = load_mutation_survival(&path);
+        assert_eq!(map.len(), 2, "only >0 entries, clamped to <=1.0");
+        assert!((map["src/foo.rs"] - 0.4).abs() < 1e-9);
+        assert!((map["src/baz.rs"] - 1.0).abs() < 1e-9, "clamped to 1.0");
+        assert!(!map.contains_key("src/bar.rs"), "0.0 means no signal");
+        assert!(!map.contains_key("src/qux.rs"), "non-numeric skipped");
+    }
+
+    #[test]
+    fn test_load_mutation_survival_malformed_and_missing() {
+        // Malformed JSON → empty map; missing file → empty map (fail-soft)
+        let dir = tempfile::tempdir().expect("temp dir");
+        let malformed = dir.path().join("bad.json");
+        std::fs::write(&malformed, "{not valid json").expect("write");
+        assert!(
+            load_mutation_survival(&malformed).is_empty(),
+            "malformed JSON must fail soft"
+        );
+        let empty = dir.path().join("empty.json");
+        std::fs::write(&empty, "").expect("write");
+        assert!(
+            load_mutation_survival(&empty).is_empty(),
+            "empty file must fail soft"
+        );
+        let absent = dir.path().join("missing.json");
+        assert!(
+            load_mutation_survival(&absent).is_empty(),
+            "missing file must fail soft"
+        );
+    }
+
+    #[test]
     fn test_risk_test_density_computed() {
         // A file with 200 lines and 6 #[test] annotations → 6/200*100 = 3.0 tests per 100 lines
         let content = {
@@ -3066,13 +3178,15 @@ src/baz.rs
             path: "src/low.rs".to_string(),
             score: 0.50,
             signals: vec![],
-            test_density: 0.5, // very low
+            test_density: 0.5,      // very low
+            mutation_survival: 0.0, // very low
         };
         let high_td = FileRisk {
             path: "src/high.rs".to_string(),
             score: 0.50,
             signals: vec![],
-            test_density: 8.0, // above 5.0 threshold
+            test_density: 8.0,      // above 5.0 threshold
+            mutation_survival: 0.0, // above 5.0 threshold
         };
 
         // Apply the same penalty formula used in compute_file_risk_scores
@@ -3343,6 +3457,7 @@ src/baz.rs
             score: 0.9,
             signals: vec!["▲churn", "▲low-test", "▲coupled"],
             test_density: 0.2,
+            mutation_survival: 0.0,
         };
         let reason = predict_top_reason(&risk);
         assert!(
@@ -3366,6 +3481,7 @@ src/baz.rs
             score: 0.5,
             signals: vec![],
             test_density: 5.0,
+            mutation_survival: 0.0,
         };
         let reason = predict_top_reason(&risk);
         assert_eq!(reason, "elevated risk score");
@@ -3380,6 +3496,7 @@ src/baz.rs
             score: 0.87,
             signals: vec!["▲churn", "▲low-test", "▲size"],
             test_density: 0.3,
+            mutation_survival: 0.0,
         };
         let card = format_prediction_card(1, &risk);
 
@@ -3418,6 +3535,7 @@ src/baz.rs
             score: 0.40,
             signals: vec!["▲recent"],
             test_density: 3.0,
+            mutation_survival: 0.0,
         };
         let card = format_prediction_card(3, &risk);
         assert!(card.contains("#3"), "card should contain rank #3");
@@ -3431,6 +3549,7 @@ src/baz.rs
             score: 0.60,
             signals: vec!["▲churn", "▲recent"],
             test_density: 1.5,
+            mutation_survival: 0.0,
         };
         let card = format_prediction_card(2, &risk);
         assert!(
@@ -3446,6 +3565,7 @@ src/baz.rs
             score: 0.10,
             signals: vec![],
             test_density: 0.0,
+            mutation_survival: 0.0,
         };
         let card = format_prediction_card(1, &risk);
         assert!(card.contains("(none)"), "empty signals should show (none)");
@@ -3461,12 +3581,14 @@ src/baz.rs
                 score: 0.90,
                 signals: vec!["▲churn", "▲low-test", "▲size"],
                 test_density: 0.2,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/warm.rs".to_string(),
                 score: 0.70,
                 signals: vec!["▲churn"],
                 test_density: 2.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -3496,6 +3618,7 @@ src/baz.rs
             score: 0.80,
             signals: vec!["▲churn"],
             test_density: 1.0,
+            mutation_survival: 0.0,
         }];
 
         let report =
@@ -3512,6 +3635,7 @@ src/baz.rs
             score: 0.80,
             signals: vec!["▲churn"],
             test_density: 1.0,
+            mutation_survival: 0.0,
         }];
 
         let report = format_prediction_report_with_accuracy(&risks, 5, Some((50.0, 2, "Stable")));
@@ -3526,6 +3650,7 @@ src/baz.rs
             score: 0.80,
             signals: vec!["▲churn"],
             test_density: 1.0,
+            mutation_survival: 0.0,
         }];
 
         let report = format_prediction_report_with_accuracy(&risks, 5, None);
@@ -3567,12 +3692,14 @@ src/baz.rs
                 score: 0.95,
                 signals: vec!["▲churn", "▲reverts"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/second.rs".to_string(),
                 score: 0.60,
                 signals: vec!["▲recent"],
                 test_density: 3.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -3620,18 +3747,21 @@ src/baz.rs
                 score: 0.9,
                 signals: vec!["▲churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/b.rs".to_string(),
                 score: 0.7,
                 signals: vec![],
                 test_density: 1.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/c.rs".to_string(),
                 score: 0.4,
                 signals: vec![],
                 test_density: 2.0,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -3995,12 +4125,14 @@ src/baz.rs
                 score: 5.0,
                 signals: vec!["high churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/alpha.rs".into(),
                 score: 5.0,
                 signals: vec!["high churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -4022,12 +4154,14 @@ src/baz.rs
                 score: 5.0,
                 signals: vec!["high churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/zebra.rs".into(),
                 score: 5.0,
                 signals: vec!["high churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -4347,6 +4481,7 @@ src/baz.rs
             score: 0.9,
             signals: vec!["churn"],
             test_density: 0.0,
+            mutation_survival: 0.0,
         };
         write_risk_snapshot_to(
             &snap_path,
@@ -4362,6 +4497,7 @@ src/baz.rs
             score: 0.8,
             signals: vec!["recency"],
             test_density: 0.0,
+            mutation_survival: 0.0,
         };
         write_risk_snapshot_to(
             &snap_path,

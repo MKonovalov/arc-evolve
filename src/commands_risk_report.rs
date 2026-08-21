@@ -131,7 +131,16 @@ pub(crate) fn format_risk_report(risks: &[FileRisk], show_all: bool) -> String {
 
     let limit = if show_all { risks.len() } else { 15 };
     for risk in risks.iter().take(limit) {
-        let signals_str = risk.signals.join(" ");
+        let mut signals_str = risk.signals.join(" ");
+        // Surface the mutation-survival sensor (behavioral signal) as a `mut`
+        // tag with the survival % whenever it is non-zero.
+        if risk.mutation_survival > 0.0 {
+            let pct = (risk.mutation_survival * 100.0).round() as u64;
+            if !signals_str.is_empty() {
+                signals_str.push(' ');
+            }
+            signals_str.push_str(&format!("mut {pct}%"));
+        }
         let path_display = &risk.path;
         // Pad path to 34 chars for alignment
         let padded_path = if path_display.len() < 34 {
@@ -202,6 +211,7 @@ mod tests {
             score: 0.75,
             signals: vec!["▲churn", "▲size"],
             test_density: 1.5,
+            mutation_survival: 0.0,
         }];
         let result = format_risk_report(&risks, false);
         assert!(result.contains("0.75"));
@@ -311,6 +321,7 @@ mod tests {
             score: 0.8,
             signals: vec!["▲churn"],
             test_density: 1.0,
+            mutation_survival: 0.0,
         }];
         let result = risk_context_for_files_from(&[], &risks);
         assert!(result.is_empty(), "empty paths should return empty result");
@@ -324,12 +335,14 @@ mod tests {
                 score: 0.3,
                 signals: vec![],
                 test_density: 5.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/bar.rs".to_string(),
                 score: 0.1,
                 signals: vec![],
                 test_density: 8.0,
+                mutation_survival: 0.0,
             },
         ];
         let paths = vec!["src/foo.rs".to_string(), "src/bar.rs".to_string()];
@@ -348,18 +361,21 @@ mod tests {
                 score: 0.82,
                 signals: vec!["▲churn", "▲low-test"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/stable.rs".to_string(),
                 score: 0.2,
                 signals: vec![],
                 test_density: 10.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/coupled.rs".to_string(),
                 score: 0.65,
                 signals: vec!["▲coupled"],
                 test_density: 3.0,
+                mutation_survival: 0.0,
             },
         ];
         let paths = vec![
@@ -384,6 +400,7 @@ mod tests {
             score: 0.9,
             signals: vec!["▲churn"],
             test_density: 0.5,
+            mutation_survival: 0.0,
         }];
         // Query for a path not in the risk data
         let paths = vec!["src/other.rs".to_string()];
@@ -426,12 +443,14 @@ mod tests {
                 score: 0.9,
                 signals: vec!["▲churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/b.rs".to_string(),
                 score: 0.5,
                 signals: vec![],
                 test_density: 1.0,
+                mutation_survival: 0.0,
             },
         ];
         assert!(file_risk_summary_from("src/nonexistent.rs", &risks).is_none());
@@ -451,24 +470,28 @@ mod tests {
                 score: 0.90,
                 signals: vec!["▲churn", "▲size"],
                 test_density: 0.2,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/medium_high.rs".to_string(),
                 score: 0.70,
                 signals: vec!["▲recent"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/medium.rs".to_string(),
                 score: 0.50,
                 signals: vec![],
                 test_density: 1.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/low.rs".to_string(),
                 score: 0.20,
                 signals: vec![],
                 test_density: 2.0,
+                mutation_survival: 0.0,
             },
         ];
 

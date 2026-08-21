@@ -568,12 +568,14 @@ mod tests {
                 score: 0.82,
                 signals: vec!["▲churn", "▲size"],
                 test_density: 2.0,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/bar.rs".to_string(),
                 score: 0.71,
                 signals: vec!["▲churn"],
                 test_density: 0.5,
+                mutation_survival: 0.0,
             },
         ];
 
@@ -605,6 +607,7 @@ mod tests {
             score: 0.55,
             signals: vec!["▲size"],
             test_density: 0.0,
+            mutation_survival: 0.0,
         }];
 
         let json = build_risk_snapshot_json(&risks, 42, "deadbee");
@@ -633,6 +636,7 @@ mod tests {
                 score: 1.0 - (i as f64 * 0.05),
                 signals: vec!["▲churn"],
                 test_density: 0.0,
+                mutation_survival: 0.0,
             })
             .collect();
 
@@ -664,12 +668,14 @@ mod tests {
                 score: 0.91,
                 signals: vec!["▲churn", "▲size"],
                 test_density: 0.3,
+                mutation_survival: 0.0,
             },
             FileRisk {
                 path: "src/prompt.rs".to_string(),
                 score: 0.64,
                 signals: vec!["▲churn"],
                 test_density: 1.2,
+                mutation_survival: 0.0,
             },
         ];
 
