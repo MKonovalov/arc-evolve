@@ -474,6 +474,103 @@ pub(crate) fn parse_all_snapshots(content: &str) -> Vec<ParsedSnapshot> {
     snapshots
 }
 
+/// Default path for the risk meter cadence stamp.
+pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
+
+/// The dream's milestone: accumulate ≥5 matched prediction-outcome pairs
+/// before the lift measurement is trusted. Referenced in the meter file so
+/// humans/agents reading it see the goal.
+pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+
+/// Computed cadence stamp for the risk prediction meter — a run-counted
+/// summary of the two JSONL ledger files, written alongside each snapshot so
+/// the accumulation state stays legible session-to-session (and we can tell
+/// whether the harness feed is still firing).
+pub(crate) struct RiskMeter {
+    /// Snapshot lines in `.arc/risk_snapshots.jsonl`.
+    pub(crate) snapshots: u64,
+    /// Validation lines in `.arc/risk_validations.jsonl`.
+    pub(crate) validations: u64,
+    /// Matched prediction-outcome pairs: validations whose `scored_broke` is
+    /// present and > 0 (the loop observed at least one scored file breaking),
+    /// per the existing lift-carrying semantics in `compute_accuracy_stats`.
+    pub(crate) pairs: u64,
+    /// Day of the newest parsed snapshot (0 when none exist).
+    pub(crate) last_snapshot_day: u64,
+    /// The dream milestone this meter accumulates toward.
+    pub(crate) target_pairs: u64,
+}
+
+/// Compute the risk meter from snapshot + validation JSONL content.
+///
+/// Re-uses the existing parsers (`parse_all_snapshots`,
+/// `parse_validation_events`) rather than duplicating JSONL parsing, so the
+/// meter's counts can never drift from what the accuracy readers see.
+pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let validations = parse_validation_events(validation_content);
+    let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+    let pairs = validations
+        .iter()
+        .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+        .count() as u64;
+    RiskMeter {
+        snapshots: snapshots.len() as u64,
+        validations: validations.len() as u64,
+        pairs,
+        last_snapshot_day,
+        target_pairs: RISK_METER_TARGET_PAIRS,
+    }
+}
+
+/// Write the risk meter stamp to `meter_path`, computed from the two JSONL
+/// ledger files. Missing ledger files count as zero (writes an all-zero stamp
+/// so the cadence file always exists). Returns the computed meter.
+pub(crate) fn write_risk_meter_to(
+    meter_path: &std::path::Path,
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+) -> std::io::Result<RiskMeter> {
+    let snapshot_content = std::fs::read_to_string(snapshot_path).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(validation_path).unwrap_or_default();
+    let meter = compute_risk_meter(&snapshot_content, &validation_content);
+
+    if let Some(parent) = meter_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::json!({
+        "snapshots": meter.snapshots,
+        "validations": meter.validations,
+        "pairs": meter.pairs,
+        "last_snapshot_day": meter.last_snapshot_day,
+        "target_pairs": meter.target_pairs,
+    });
+    let json_str = serde_json::to_string_pretty(&json).map_err(std::io::Error::other)?;
+    std::fs::write(meter_path, json_str)?;
+    Ok(meter)
+}
+
+/// Write the risk meter stamp to the default `.arc/risk_meter.json` path,
+/// counting from the real snapshot/validation files. Returns `Some(meter)` on
+/// success, `None` if the write failed (callers print a dim note).
+pub(crate) fn write_risk_meter() -> Option<RiskMeter> {
+    write_risk_meter_to(
+        std::path::Path::new(RISK_METER_PATH),
+        std::path::Path::new(RISK_SNAPSHOT_PATH),
+        std::path::Path::new(RISK_VALIDATION_PATH),
+    )
+    .ok()
+}
+
+/// One-line progress note for the harness path:
+/// `risk meter: N/5 pairs (S snapshots, V validations)`.
+pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+    format!(
+        "risk meter: {}/{} pairs ({} snapshots, {} validations)",
+        meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1070,5 +1167,87 @@ mod tests {
         assert_eq!(events.len(), 2, "appending twice yields two lines");
         assert_eq!(events[0].day, 1);
         assert_eq!(events[1].day, 2);
+    }
+
+    #[test]
+    fn test_compute_risk_meter_counts_from_fixtures() {
+        // Fixture: 3 snapshots (last on day 174), 4 validations — two of which
+        // carry a positive scored_broke (matched pairs), one old-format event
+        // with no lift fields, and one with scored_broke absent/None (no scored
+        // file broke → not a matched pair).
+        let snapshot_content = "\
+{\"day\":170,\"git_hash\":\"aaa111\",\"top_10\":[{\"path\":\"src/a.rs\"}]}\n\
+{\"day\":172,\"git_hash\":\"bbb222\",\"top_10\":[{\"path\":\"src/b.rs\"}]}\n\
+{\"day\":174,\"git_hash\":\"ccc333\",\"top_10\":[{\"path\":\"src/c.rs\"}]}\n";
+        let validation_content = "\
+{\"day\":171,\"hits\":[],\"surprises\":[\"src/x.rs\"],\"accuracy_pct\":0.0,\"predicted_count\":10}\n\
+{\"day\":172,\"hits\":[\"src/b.rs\"],\"surprises\":[],\"accuracy_pct\":100.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":1}\n\
+{\"day\":173,\"hits\":[\"src/c.rs\"],\"surprises\":[\"src/z.rs\"],\"accuracy_pct\":50.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":2}\n\
+{\"day\":174,\"hits\":[],\"surprises\":[],\"accuracy_pct\":0.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":0}\n";
+
+        let meter = compute_risk_meter(snapshot_content, validation_content);
+        assert_eq!(meter.snapshots, 3);
+        assert_eq!(meter.validations, 4);
+        assert_eq!(meter.pairs, 2, "only scored_broke > 0 events count as matched pairs");
+        assert_eq!(meter.last_snapshot_day, 174);
+        assert_eq!(meter.target_pairs, RISK_METER_TARGET_PAIRS);
+    }
+
+    #[test]
+    fn test_compute_risk_meter_empty_ledgers() {
+        let meter = compute_risk_meter("", "");
+        assert_eq!(meter.snapshots, 0);
+        assert_eq!(meter.validations, 0);
+        assert_eq!(meter.pairs, 0);
+        assert_eq!(meter.last_snapshot_day, 0);
+    }
+
+    #[test]
+    fn test_format_risk_meter_line() {
+        let meter = RiskMeter {
+            snapshots: 88,
+            validations: 2,
+            pairs: 1,
+            last_snapshot_day: 174,
+            target_pairs: 5,
+        };
+        assert_eq!(
+            format_risk_meter_line(&meter),
+            "risk meter: 1/5 pairs (88 snapshots, 2 validations)"
+        );
+    }
+
+    #[test]
+    fn test_write_risk_meter_to_writes_stamp() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let snap_path = dir.path().join("snapshots.jsonl");
+        let val_path = dir.path().join("validations.jsonl");
+        let meter_path = dir.path().join("risk_meter.json");
+
+        // Seed real JSONL content using the shared parsers' input shape.
+        std::fs::write(
+            &snap_path,
+            "{\"day\":174,\"git_hash\":\"ccc333\",\"top_10\":[{\"path\":\"src/c.rs\"}]}\n",
+        )
+        .expect("write snapshot fixture");
+        std::fs::write(
+            &val_path,
+            "{\"day\":174,\"hits\":[\"src/c.rs\"],\"surprises\":[],\"accuracy_pct\":100.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":1}\n",
+        )
+        .expect("write validation fixture");
+
+        let meter = write_risk_meter_to(&meter_path, &snap_path, &val_path).expect("meter write");
+        assert_eq!(meter.snapshots, 1);
+        assert_eq!(meter.validations, 1);
+        assert_eq!(meter.pairs, 1);
+
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&meter_path).expect("read back"))
+                .expect("meter file is valid JSON");
+        assert_eq!(written["snapshots"], 1);
+        assert_eq!(written["validations"], 1);
+        assert_eq!(written["pairs"], 1);
+        assert_eq!(written["last_snapshot_day"], 174);
+        assert_eq!(written["target_pairs"], 5);
     }
 }

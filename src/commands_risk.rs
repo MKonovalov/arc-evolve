@@ -11,9 +11,10 @@ use crate::format::*;
 // module's own scoring/reporting code) remain unchanged.
 pub(crate) use crate::commands_risk_snapshots::{
     auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
-    last_validation_association, load_validation_history_from, parse_all_snapshots,
-    parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
-    write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    format_risk_meter_line, last_validation_association, load_validation_history_from,
+    parse_all_snapshots, parse_validation_events, risk_autosnapshot_enabled,
+    write_risk_meter, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+    RISK_METER_PATH, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
 };
 
 // Report/context formatting lives in `commands_risk_report.rs`.
@@ -1410,6 +1411,14 @@ fn handle_risk_snapshot() {
         Ok(()) => {
             let count = risks.len().min(10);
             println!("  📸 Snapshot saved — {count} files scored, git HEAD {git_hash}");
+            // Cadence stamp: record WHERE the prediction meter STARTS (snapshot
+            // count, validation count, matched pairs toward the ≥5-pair dream
+            // milestone) and surface the cold-start progress one-line.
+            if let Some(meter) = write_risk_meter() {
+                println!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));
+            } else {
+                eprintln!("  {DIM}(risk meter: could not write {RISK_METER_PATH}){RESET}");
+            }
         }
         Err(e) => {
             eprintln!("  {RED}Error saving risk snapshot: {e}{RESET}");
