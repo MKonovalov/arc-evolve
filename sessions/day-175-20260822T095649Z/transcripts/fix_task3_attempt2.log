@@ -1,0 +1,285 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. The evaluator says the diff is empty — no implementation happened. I need to:
+
+1. Make `arc context` work without an API key (fail-soft local info) in `src/commands_project.rs` `handle_context`
+2. Make `arc model show` work without an API key in `src/commands_info.rs` `handle_model_show`
+3. Add tests for the no-key path
+4. Build clean, fmt, clippy, test
+
+Let me first examine the current state of the relevant files.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ search 'fn handle_context' in src/commands_project.rs  ▶ search 'fn handle_model_show' in src/commands_info.rs ✓ (3ms)
+ ✓ (2ms)
+ ✓ (10ms)
+  3 tools completed in 549ms (3 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the current implementations of `handle_context` and `handle_model_show` to understand what needs to change.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_project.rs:1..141  ▶ read src/commands_info.rs:600..720 ✓ (1ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 821ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the context. Let me look at how `handle_context` and `handle_model_show` are called, and how `resolve_api_key_env` works in cli.rs. Also look at `configured_provider`.
+
+Let me find the call sites.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'handle_context\(' (*.rs)  ▶ search 'handle_model_show\(' (*.rs)  ▶ search 'fn resolve_api_key_env|fn configured_provider|fn set_configu…' in src/cli.rs ✗ (3ms)
+    │ Search error: grep: Unmatched ( or \(
+ ✗ (2ms)
+    │ Search error: grep: Unmatched ( or \(
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  3 tools completed in 548ms (1 ✓, 2 ✗)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "handle_context(" src/ &&… ✓ (14ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch.rs:600..680  ▶ read src/dispatch.rs:1090..1160 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 2.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `resolve_api_key_env` in cli.rs and see how the agent is built. Also let me understand `handle_context`'s local sections: `show_project_context_files()`. Let me look at that, and also `show_context_tokens` and `show_context_files`.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:40..160  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "show_project_context_file… ✓ (2ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 518ms (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_project.rs:145..295 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the structure. `handle_context` in `commands_project.rs` handles subcommands:
+- `system` → `show_system_prompt_sections(system_prompt)` — no agent needed
+- `tokens` → `show_context_tokens(system_prompt, agent)` — needs agent (messages)
+- `files` → `show_context_files(agent)` — needs agent (messages)
+- `relevant` → `handle_context_relevant(query)` — no agent needed
+- default → `show_project_context_files()` — local only, no agent needed
+
+So actually, only `tokens` and `files` subcommands need the agent. The default path (`show_project_context_files`) doesn't need the agent at all! But wait — the task says "handle_context requires an `&Agent` and... they try to build the agent before printing anything".
+
+Let me look at how `arc context` is called in CLI. Let me look at `dispatch_sub.rs` for the CLI subcommand routing of `arc context`.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "context\|model" src/dispa…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"context\"\|\"model\"" … ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 569ms (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch_sub.rs:90..240 ✓ (1ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch_sub.rs:239..399  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "status\|model show\|conte… ✓ (2ms)
+ ✓ (4ms)
+  2 tools completed in 566ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the dispatch. `arc <subcmd>` goes to `dispatch_sub.rs` `try_dispatch_subcommand`. There's no "context" or "model show" subcommand there yet. So for the CLI subcommand `arc model show` and `arc context` — wait, let me check how `arc context` and `arc model show` are routed. Let me check main.rs / cli.rs for subcommand parsing of `context` and `model`.
+
+Actually, wait — the task says "Files: src/commands_info.rs, src/commands_project.rs". The `handle_context` function takes an `&Agent`. Where's it called? In dispatch.rs (REPL) and in a test at commands_project.rs:2414. Let me understand how `arc context` works as a CLI command. Let me search main.rs for how it handles subcommands like "context".
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"context\"\|\"model\"" …  ▶ read src/commands_project.rs:2390..2470 ✓ (1ms)
+ ✓ (4ms)
+  2 tools completed in 661ms (2 ✓)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_project.rs:520..570  ▶ read src/commands_project.rs:2300..2345 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 660ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me think about the design carefully.
+
+**Task requirements:**
+
+1. `handle_context` in `src/commands_project.rs`: detect the no-key / invalid-key case before (or while) building the Agent. If the agent can't be built / provider errors with auth failure, still print the local context content (project context files, git status, file listing — whatever is already computed locally) and append a single honest dim/plain note that model-backed sections were skipped because no usable API key is set. Do not crash with raw 401.
+   - Smallest change: check whether an API key resolves before calling the agent-building code path (there is already `resolve_api_key_env` in `src/cli.rs` — reuse it). If no key, print the local sections and a note, return.
+
+2. In `src/commands_info.rs` `handle_model_show`: it renders local model info (current provider/model from config + CLI state). If building the agent for the info call requires a key, route around it: show the configured provider/model from `configured_provider()` / config state without instantiating the agent, or catch the agent-build failure and degrade to the config-derived view instead of surfacing the transport error.
+
+3. Tests: add/extend a unit test that exercises the no-key path (e.g. build the local-only output with an empty key env and assert it renders without panicking and contains the configured provider). Follow existing test style in these files.
+
+4. `cargo build` clean, `cargo fmt` before finishing.
+
+**Key design decisions:**
+
+For `handle_model_show`:
+- Currently signature is `pub fn handle_model_show(model: &str)`.
+- It's called at dispatch.rs:661 with `&ctx.agent_config.model`.
+- I should add a keyless path. Let me change signature to `handle_model_show(model: &str, provider: &str)` and include provider. Actually — it should show the configured provider/model from `configured_provider()` / config state.
+- The evaluator said: `handle_model_show` (src/commands_info.rs:634) still just prints the passed-in model with no key routing.
+- Smallest change here: add a key detection — check `cli::configured_provider()` and whether an API key resolves. But wait — how do we know which env var to check? `configured_provider()` tells us the provider; then we map provider → env var. There's `KNOWN_PROVIDERS` and api key env vars in providers.rs. Let me check `providers.rs`.
+
+For `handle_context`:
+- Currently `handle_context(input, system_prompt, agent: &Agent)` — takes an already-built agent. It's a REPL command; in the REPL the agent already exists (the session is running). So the no-key case for `/context` inside a REPL is unusual (the session wouldn't have started without a key... unless the REPL starts without a key? Actually can it? Let me check how the REPL starts — maybe there's a way to run arc interactively without a key).
+
+Actually wait — the task says "Assessment Day 175: `arc context` and `arc model show` require a valid API key even for local information — they try to build the agent before printing anything, so in a no-key or bad-key environment they die with HTTP 401 before showing the local data."
+
+Hmm, "they try to build the agent before printing anything". So in the INTERACTIVE path, `arc context` = `/context` in REPL — the agent is already built. But maybe the issue is in a different path — maybe there's an `arc context` CLI subcommand? I didn't find one in dispatch_sub.rs. Let me search more broadly. Maybe `arc` with a prompt... Actually `arc context` might dispatch via... let me check dispatch_sub more carefully. Actually let me search for "context" across the whole dispatch_sub.rs — I only saw it at lines 213 in a comment. There's no `arc context` subcommand in dispatch_sub.rs.
+
+Hmm wait — but the CLI might dispatch `arc context` like `arc status` — let me re-check. The match arms in dispatch_sub.rs at line 103: doctor, health, help, version, setup, init, lint, test, tree, map, outline, run, diff, commit, review, blame, risk, grep, find, index, update, docs, skill, watch, status, undo, changelog, evolution, config, permissions, todo, goal, memories, extended. No "context" or "model".
+
+So where does `arc context` die with 401? Maybe the flow is: `arc` with a single prompt argument (`arc "context"`?) — no. Let me check main.rs for how positional commands are handled. Actually, let me check if `arc context` runs the full agent (as a prompt). When you run `arc context`, if it's not a recognized subcommand, parse_args treats it as... maybe a prompt? Actually, arc has single-prompt mode: `arc "prompt"` or `arc -p "prompt"`. Hmm, "arc context" would be treated as a positional arg. Let me check main.rs to see how positional args are treated.
+
+Actually, the task says "they try to build the agent before printing anything". For `/context` in the REPL, the agent is built at REPL start. So the 401-death scenario might be:
+1. REPL started successfully (or maybe REPL can start without key — check), then user types `/context` → agent already exists so no 401.
+2. Or `arc context` isn't a real subcommand — but the task states it is one. Let me verify with a search of the whole repo for `"context"` subcommand arms.
+
+Let me look at how main.rs handles single positional argument — actually let me grep for "try_dispatch_subcommand" usage and the run mode determination.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "try_dispatch_subcommand\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn api_key_env\|KNOWN_PRO… ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 757ms (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ read src/providers.rs:1..41  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "try_dispatch_subcommand\|… ✓ (1ms)
+ ✓ (4ms)
+  2 tools completed in 533ms (2 ✓)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read src/main.rs:645..765 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `parse_args` runs before subcommand dispatch. Let me check whether `parse_args` requires an API key. Let me look at where `parse_args` resolves the API key and whether it fails without one.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "api_key\|API_KEY\|try_dis… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:500..630 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the flow. In non-interactive (piped/single-prompt) mode with no API key, `parse_model_config` exits with code 1 — that's where `arc context` / `arc model show` die. And note that `try_dispatch_subcommand` is called at line 808 AFTER `parse_args` (line 650). So `arc context` never gets dispatched because parse_args exits first.
+
+Let me check the dispatch order in main.rs again:
+
+```rust
+let Some(config) = parse_args(&args) else { return; };
+if !apply_config_flags(&config) { return; }
+...
+line 808: if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {
+```
+
+Wait, but `parse_args` at line 650 runs BEFORE `try_dispatch_subcommand` at 808. So for `arc context` in non-interactive mode (piped), `parse_model_config` exits code 1 before dispatch. And even the `arc status` bare subcommand — how does it survive? Let me check: for `arc status`, `is_interactive` is false (no stdin terminal) and `prompt_arg` is None → non-interactive → parse_model_config → exit(1). But `arc status` works keyless per the task. So there must be something that dispatches earlier or handles this.
+
+Let me look at line 808 context and lines 770-830 of main.rs. And also check where `parse_args` handles subcommands — line 330 comment says "Subcommands dispatched by try_dispatch_subcommand — if args[1] is one of...". Let me read that part of cli.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read src/main.rs:770..850  ▶ read src/cli.rs:320..380 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 763ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the CLI flow. `try_dispatch_subcommand` is at `dispatch_sub.rs:808`? Wait, no — grep said `src/main.rs:808` has `try_dispatch_subcommand`? Let me look. Actually the grep showed:
+
+```
+808:    if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {
+```
+
+That's at main.rs:808? Wait, no — the grep for "try_dispatch_subcommand" in src/main.rs and src/dispatch_sub.rs showed:
+```
+src/main.rs:808:    if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {
+```
+Hmm, but main.rs:808 is in `run_piped_mode`? No — grep output was:
+```
+src/main.rs:808:    if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {
+```
+Wait, but line 802-808 in main.rs is the piped mode section... The grep output for "try_dispatch_subcommand" in src/main.rs src/dispatch_sub.rs showed only `src/main.rs:808`. Wait, that can't be right because I saw the file at lines 770-849 and line 808 is `run_piped_mode(...`. Hmm — actually the grep results above say `src/main.rs:808:    if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {`. But my read of main.rs lines 770-849 shows line 808 as `run_piped_mode(`. That's contradictory — the grep output was truncated/joined with the earlier grep. Let me re-check: the earlier grep command output was:
+
+```
+src/main.rs:808:    if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args) {
+```
+
+Hmm wait, that came from the first command in that block which grepped cli.rs for api_key... no. Let me just find where try_dispatch_subcommand is called.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "try_dispatch_subcommand\|… ✓ (3ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:795..835 ✓ (1ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "help_text\|print_help\|K…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "\"context\"\|\"model\"\|c… ✓ (5ms)
+ ✓ (4ms)
+  2 tools completed in 901ms (2 ✓)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read src/help.rs:225..290  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "assert_eq!\|assert!\|\.is… ✓ (1ms)
+ ✓ (5ms)
+  2 tools completed in 574ms (2 ✓)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:1236..1276 ✓ (1ms)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:1275..1295 ✓ (1ms)
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ read src/help.rs:289..334 ✓ (1ms)
+
+
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+

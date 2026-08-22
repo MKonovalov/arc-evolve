@@ -1,0 +1,473 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to route `arc risk --help` and `arc risk snapshot --help` to risk-subcommand help instead of generic top-level help.
+
+Let me look at the relevant files first:
+1. `src/commands_risk.rs` — `handle_risk`, `RISK_SUBCOMMANDS`
+2. `src/dispatch_sub.rs` — `try_dispatch_subcommand`, `build_risk_input`
+
+Let me start by reading the relevant parts.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ search 'RISK_SUBCOMMANDS' in src/commands_risk.rs  ▶ search 'build_risk_input|try_dispatch_subcommand' in src/dispatch_sub.rs ✓ (3ms)
+ ✓ (2ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  3 tools completed in 560ms (3 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search for `build_risk_input` in `dispatch_sub.rs` didn't find. Let me search more broadly.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'build_risk_input|risk_input'  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1040,1120p' src/commands_r… ✓ (3ms)
+ ✓ (11.1s)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 20.8s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the dispatch_sub.rs to find how `arc risk` is routed. Let me search for "risk" in dispatch_sub.rs.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'risk' in src/dispatch_sub.rs ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,60p' src/dispatch_sub.rs  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '195,230p' src/dispatch_sub… ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 487ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure:
+
+1. `try_dispatch_subcommand` in `src/dispatch_sub.rs` routes `arc risk ...` → `build_risk_input(&args[2..])` → `handle_risk(&input)`.
+2. `handle_risk` in `src/commands_risk.rs` parses the tail after `/risk`, and handles snapshot/history/validate/predict/accuracy/effectiveness. But `help`/`--help`/`-h` falls through to the generic risk report. And `--help` as tail would produce `input = "/risk --help"`, so `sub = "--help"` — falls through to default report.
+
+So the task:
+1. In `handle_risk`: if input tail is empty, or is `help`/`--help`/`-h`, print concise risk-subcommand usage block, return early.
+2. Verify `build_risk_input` needs no change — it passes tail through as `/risk --help`.
+3. Tests: add unit tests asserting routing behavior.
+4. Build/test/fmt/clippy, commit.
+
+But wait — there's a nuance. The current default behavior for bare `arc risk` is to *print the risk report* (not help). The task notes: "If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block, matching how the assessment describes it."
+
+Looking at `handle_risk`, bare `/risk` currently prints the risk report (the default view). The test `test_try_dispatch_subcommand_risk_bare` says "bare `arc risk` dispatches to handle_risk, which reads the source tree and prints risk scores". So bare `arc risk` printing the risk report IS the existing default view behavior.
+
+Hmm, but the task Steps say: "if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block". And Notes: "If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block".
+
+Bare `arc risk` printing the risk report is the documented existing default view (there's even a test asserting it routes to handle_risk that "reads the source tree and prints risk scores"). So I should preserve that: bare `arc risk` keeps printing the risk report. Only `help`, `--help`, `-h` should print the usage block.
+
+Wait, but let me re-read. The step 1 says "if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block ... and return without falling through to generic help."
+
+The intent is to route `--help` to risk help instead of generic top-level help. The concern in the Notes is about bare `arc risk` — the assessment says bare `arc risk` "renders the generic top-level `--help` instead of subcommand help". Hmm, actually the Context says: "`arc risk snapshot --help` (and bare `arc risk`) renders the generic top-level `--help` instead of subcommand help."
+
+Hmm wait — bare `arc risk` renders the generic top-level `--help`? Let me check how `try_dispatch_subcommand` handles unknown subcommands. Let me look more carefully at the routing — maybe `risk` with an empty tail... Actually the code I saw routes `"risk" => ... handle_risk(...)` and returns Some(None). So bare `arc risk` would go to handle_risk with `/risk`, printing the risk report. Unless there's something before that intercepts... Let me check whether there's a check earlier in try_dispatch_subcommand that validates against KNOWN_SUBCOMMANDS or something. Let me look at the full function and tests.
+
+Actually, wait — the issue might be: when `--help` is in the args, the CLI parser (parse_args) might treat `--help` at the top level and print top-level help before reaching try_dispatch_subcommand. Let me check the flow in main.rs / cli.rs. The task says "Verify `build_risk_input` needs no change (it passes the tail through) and that `handle_risk` is where the empty/`--help` case is intercepted."
+
+But if `parse_args` intercepts `--help` before dispatch, then `handle_risk` never sees it. Let me investigate the actual dispatch flow.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '60,195p' src/dispatch_sub.… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I see the issue. At the top of `try_dispatch_subcommand`:
+
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h") {
+    print_help();
+    return Some(None);
+}
+```
+
+This catches `arc risk --help` before the `"risk"` arm ever runs — so `arc risk --help` prints the top-level help! That's the bug in `dispatch_sub.rs`. The fix: skip the --help check when the subcommand is `risk` (and the first positional is `risk`), letting the tail reach `handle_risk`.
+
+Wait — but this --help check is the first thing. So for `arc risk --help`, `args[1]` is "risk", and the `--help` global check fires before the match. I need to only apply the global `--help` short-circuit when the first positional arg isn't a subcommand that handles `--help` itself. Minimal approach: check the global help only when `args.get(1)` is None or when it doesn't start with a sub that handles its own help. Simplest surgical fix: move the `--help` check after determining there's no subcommand, or special-case: if `args.get(1) == Some("risk")` (and more generally subcommands that route `--help` through), skip the global help.
+
+But careful — changing order could alter behavior for other subcommands. The task says keep it small: specifically for `arc risk --help` and `arc risk snapshot --help`, route to risk-help. The `--help` global check catches ANY `--help` anywhere in args: e.g. `arc grep --help` would also print top-level help. Changing the global check to only fire when args[1] is None or args.len() == 1 would change behavior broadly — e.g. `arc init --help` would currently hit top-level help; after change it'd hit `init` (which may ignore `--help`). That's a behavior change for other subcommands, but arguably fine? The task says "no behavior change for the real subcommands" — meaning risk snapshot/validate etc. For safety, let me scope the fix narrowly: only skip the global `--help` catch when the subcommand is `risk`.
+
+Actually, let me think about what's cleanest and minimal:
+
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h")
+    && args.get(1).map(|s| s.as_str()) != Some("risk")
+{
+    print_help();
+    return Some(None);
+}
+```
+
+Wait, but `arc risk snapshot --help` — `args[1]` is "risk", so global help is skipped, and routing reaches the `"risk"` arm, which builds `/risk snapshot --help` and passes to `handle_risk`. Then in `handle_risk`, I add the help branch.
+
+Also `arc risk --help` → tail is `["--help"]` → `/risk --help` → handle_risk should print usage.
+
+`arc risk` (bare) → `/risk` → handle_risk currently prints the risk report (read-only score display). The task notes: "If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block, matching how the assessment describes it."
+
+Hmm, bare `arc risk` currently computes file risk scores and prints a report — that IS a default view (risk scores). The assessment said `arc risk` falls to generic help... wait no. Let me re-read: "The assessment (Day 175) found: `arc risk snapshot --help` (and bare `arc risk`) renders the generic top-level `--help` instead of subcommand help."
+
+Wait, bare `arc risk` renders generic top-level help? Let me check... `try_dispatch_subcommand` — hmm, wait. Actually let me look: if args = ["arc", "risk"], no --help anywhere, so the global help check doesn't fire. Then `sub = "risk"` arm runs `build_risk_input(&[])` → "/risk" → handle_risk("/risk") → `sub = ""` → falls through to compute_file_risk_scores and prints report. So bare `arc risk` should print the risk report, not generic help.
+
+Hmm, but the assessment says bare `arc risk` renders the generic top-level `--help`? That seems off. Let me actually verify by running the binary... Actually wait — maybe I should check the task steps again:
+
+Step 1: "if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block... and return without falling through to generic help."
+
+Step 3 tests: "asserting that `arc risk --help` and `arc risk snapshot --help` route to the risk help path."
+
+So the bare `arc risk` case — currently it falls to the score report. The task says: preserve the default view "only if it already exists" — bare `arc risk` DOES already open a default view (the risk score report). Hmm, but the note says "If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block".
+
+Hmm — "preserve that only if it already exists". Bare risk already exists as score display. But wait — is the score display "documented"? Let me check what the assessment said. Actually the task step 1 explicitly says: "if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block". So per step 1, empty tail → usage block. But the note says preserve default view if it exists. There's tension. Let me look at the actual behavior more carefully and check the docs for `arc risk`.
+
+Let me check docs and help for what bare `arc risk` does. Let me search the docs.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the current behavior — the global `--help` short-circuit at the top of `try_dispatch_subcommand` is what swallows `arc risk --help` before the `risk` arm runs. Let me verify what bare arc risk currently does and check docs.
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "arc risk" docs/src/ READ…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "meter\|emerging" src/comm… ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 906ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the subcommands that exist — the task mentions `meter` and `emerging` as subcommands to list. Let me check what subcommands handle_risk actually routes on: snapshot, history, validate, predict, accuracy, effectiveness. And there's `--all` flag. The task says list: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus `--all` note.
+
+Wait, but `handle_risk` doesn't route on "meter" or "emerging" currently. Let me check whether there are handlers for meter/emerging. Let me search.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "handle_risk_meter\|handle…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk_meter\|met… ✓ (4ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 520ms (2 ✓)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk" src/comma…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "RISK_SUBCOMMANDS\|handle_… ✓ (3ms)
+ ✓ (3ms)
+  2 tools completed in 1.6s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's no `handle_risk_meter` or `handle_risk_emerging` in commands_risk.rs. Let me check how meter and emerging are exposed. Let me search more broadly.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ search '"meter"|"emerging"' (*.rs) ✓ (27ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "meter" src/commands_risk… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's no `meter` or `emerging` subcommand handler — the task says list subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging. But there's no `handle_risk_meter` or `handle_risk_emerging`. Let me check what exists. The task says "list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each".
+
+Hmm, but `meter` and `emerging` don't exist as handlers. Let me check the RISK_SUBCOMMANDS constant — it has snapshot, validate, history, predict, accuracy, effectiveness, --all. So no meter/emerging subcommands exist as routing.
+
+Wait, the task step 1 says: "list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note for snapshots/validate if present". But since meter and emerging aren't actual routed subcommands (no handlers in handle_risk), I should only list the ones that actually exist. Let me be honest here — I should list the actual subcommands that route: snapshot, validate, history, predict, accuracy, effectiveness. And mention `--all` flag. Let me note that meter/emerging are not routed subcommands.
+
+Actually wait — let me double-check whether `handle_risk_meter` exists anywhere.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "handle_risk_meter\|risk …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "emerging" src/commands.r… ✓ (3ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 552ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `meter` and `emerging` are not separate subcommands handled in `handle_risk` — `RISK_SUBCOMMANDS` includes `--all` but no `meter`/`emerging`. The task says: "print a concise risk-subcommand usage block (list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note for snapshots/validate if present)". Wait, let me check how /risk help handles this in the REPL. Let me look at help.rs for risk help text.
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "risk" src/help_data.rs |…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"risk\"\|risk" src/comm… ✓ (4ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 624ms (2 ✓)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1245,1290p' src/help_data.… ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's a `help_data.rs` with a `command_help()` returning text for "risk". Let me check how that's used — whether there's a generic helper that `handle_risk` could reuse. Let me look at how help text is displayed. Let me check `command_help` signature and the `/help` command.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "command_help\|command_sho…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,40p' src/help_data.rs ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 1.8s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's `command_help(cmd: &str) -> Option<&'static str>` in help_data.rs which has the `/risk` help text. Let me check what `command_help("risk")` returns — that's the usage text I can reuse.
+
+The task says:
+1. In `handle_risk`: if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block (list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note) and return without falling through to generic help. Reuse any existing usage/help text helper if one already exists in the risk module.
+
+Wait — the task mentions subcommands "snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging". Let me check whether `meter` and `emerging` subcommands exist. Looking at the grep results, `handle_risk_meter` doesn't exist, and "emerging" isn't a handler. Let me check the RISK_SUBCOMMANDS list again: `snapshot, validate, history, predict, accuracy, effectiveness, --all`. There's no `meter` or `emerging` subcommand handler.
+
+Hmm, but the task says "list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging". Since the list includes `meter` and `emerging`, I should check if those actually exist. The search for `"meter"` handlers came up empty. And `handle_risk_meter` doesn't exist. But `detect_emerging_risks`/`format_emerging_risks` exist in commands_risk_emerging.rs, and `compute_risk_meter`/`write_risk_meter_to`/etc exist in commands_risk_snapshots.rs.
+
+Let me check if there's a `/risk meter` or `/risk emerging` routing anywhere. Let me grep for "emerging" in commands_risk.rs more thoroughly, and check command_help for risk mentions meter/emerging.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "meter\|emerging" src/comm…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "compute_risk_meter\|writ… ✓ (5ms)
+ ✓ (8ms)
+  2 tools completed in 506ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's no `meter` subcommand handler and no `emerging` subcommand handler. Let me check the `/risk` REPL command dispatch to see what subcommands actually get routed. Let me search the /risk help text and the RISK_SUBCOMMANDS constant context. The task says to list: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each. But `meter` and `emerging` may not be real subcommands. Let me check how the /risk command is dispatched in the REPL.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "handle_risk" src/ --incl…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"risk\"" src/commands.r… ✓ (3ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 766ms (2 ✓)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "KNOWN_COMMANDS" src/comma… ✓ (7ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n "$(grep -n 'KNOWN_COMMANDS'…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "emerging" src/help_data.… ✓ (4ms)
+ ✓ (7ms)
+  2 tools completed in 559ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check the subcommand list for `arc risk`. The task says the usage block should list: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each. Let me check if `meter` and `emerging` subcommands exist at all in `handle_risk`.
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1053,1110p' src/commands_r… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a good picture. Let me check the actual current behavior of `arc risk --help`:
+
+The flow: `arc risk --help` → `try_dispatch_subcommand(args)` — the first check is:
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h") {
+    print_help();
+    return Some(None);
+}
+```
+So `--help` anywhere in args triggers top-level help. This is the first bug — `arc risk --help` matches this and prints top-level help, never reaching the `risk` arm.
+
+Bare `arc risk` (no args) reaches the `risk` arm at line 208, builds input `"/risk"`, and calls `handle_risk("/risk")`. In `handle_risk`, `sub` = `"/risk".strip_prefix("/risk")` = "" → trim → "". None of the subcommand match, so it falls into the default: `compute_file_risk_scores()` and shows the report. Hmm — so bare `arc risk` actually shows the risk scores (default view). The task says:
+
+> - If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block, matching how the assessment describes it.
+
+But wait — the task steps say:
+
+> 1. In `src/commands_risk.rs` `handle_risk`: if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block (list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note for snapshots/validate if present) and return without falling through to generic help.
+
+Hmm. The steps explicitly say empty tail should print usage. But the notes say "If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block".
+
+Bare `arc risk` currently falls through to showing the full risk report (compute_file_risk_scores + emerging). That's a default view — showing the risk scores. Hmm, "documented"? Let me check if it's documented. In help_data.rs: `/risk  Show top 15 riskiest files`. And there's a test `test_try_dispatch_subcommand_risk_bare` that asserts `arc risk` (bare) dispatches to handle_risk "which reads the source tree and prints risk scores". So the default view (showing risk scores) is genuinely existing behavior. 
+
+Wait, but the task's step 1 says: "if the input tail is empty, or is `help`/`--help`/`-h`, print a concise risk-subcommand usage block ... and return". That would change bare `arc risk` behavior — but the notes say to preserve the default view ONLY if it already exists... "preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block".
+
+So the current behavior HAS a default view (shows the risk report). The Notes say to preserve it if it already exists. Hmm, but step 1 says empty tail → usage block. Contradiction-ish. Let me re-read.
+
+Step 1: "In `src/commands_risk.rs` `handle_risk`: if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block..."
+
+Notes: "Keep the change small: no new flags, no behavior change for the real subcommands (`snapshot`/`validate`/etc. must behave exactly as before). If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block, matching how the assessment describes it."
+
+Hmm. These seem directly contradictory. Step 1 says empty tail → usage block. Notes say preserve the default view if it exists.
+
+Actually wait — let me think about what the assessment actually said. The task title says: "Route `arc risk --help` and `arc risk snapshot --help` to risk-subcommand help". The core problem is `arc risk --help` / `arc risk snapshot --help` rendering *generic top-level help* instead of risk-subcommand help.
+
+The "bare `arc risk`" mention: "This is the same class as the top-level `arc risk` (no sub) falling back to generic help". Hmm — wait, is that accurate? Bare `arc risk` does NOT currently fall back to generic help — it reaches handle_risk and shows the risk scores. Let me verify by tracing again carefully.
+
+`arc risk` → args = ["arc", "risk"]. In try_dispatch_subcommand:
+1. No `--help`/`-h` in args. 
+2. No `--version`.
+3. `match sub.as_str()` where sub = args[1] = "risk" → the `risk` arm → builds input "/risk" → `handle_risk("/risk")`.
+4. In handle_risk, sub = "" → falls through to compute_file_risk_scores + report. So bare `arc risk` shows the report (default view).
+
+So the assessment's claim "bare `arc risk` falls back to generic help" is inaccurate w.r.t. the current code — unless the assessment ran an older version. Let me check the test at line 985 — it asserts `arc risk` (bare) dispatches to handle_risk and prints risk scores. So the current code already handles bare `arc risk` → handles → shows scores. 
+
+Now `arc risk --help`: args = ["arc", "risk", "--help"]. First check: `args.iter().any(|a| a == "--help")` → TRUE → print_help() top-level → return Some(None). So `arc risk --help` prints TOP-LEVEL help. That's the bug. Same for `arc risk snapshot --help`.
+
+And `arc risk help`: args = ["arc", "risk", "help"]. No --help flag. match "risk" arm → input = "/risk help" → handle_risk → sub = "help" → doesn't match snapshot/history/validate/predict/accuracy/effectiveness → falls to default: shows full risk report (not help, not usage). So `arc risk help` shows the risk report too. That's also a bug-ish (should show usage).
+
+So the real fix per the task:
+- The global `--help` short-circuit at the top of `try_dispatch_subcommand` swallows `arc risk --help` before reaching the risk arm. I need to make the `risk` arm handle `--help` — i.e., reorder: check the subcommand first, and only if it's not one of the subcommands-with-help, do the global help check. Actually the cleanest: in the global `--help` short-circuit, if args[1] == "risk", skip the short-circuit and let it route to the risk arm. Or move the risk arm BEFORE the global help check. Or modify the global help check to only fire for the top-level.
+
+Simplest, narrowest change: change the global short-circuit to:
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h") && args.get(1).map(|s| s.as_str()) != Some("risk") {
+    print_help();
+    return Some(None);
+}
+```
+Hmm, but then `arc risk --help` would route to the risk arm: input = "/risk --help", handle_risk gets sub = "--help", which we handle with the new usage block. And `arc risk snapshot --help` → input = "/risk snapshot --help", sub = "snapshot --help". Hmm — currently `sub == "snapshot"` won't match "snapshot --help". So I need to handle the case where sub is "snapshot --help" etc.
+
+The task steps say: "if the input tail is empty, or is `help` / `--help` / `-h`, print a concise risk-subcommand usage block". So handle:
+- empty tail → usage block (this changes bare `arc risk` behavior!)
+
+Wait, but the note says preserve default view. Let me re-read the notes once more.
+
+"- If you find that bare `arc risk` (no tail) is documented to open a default view (e.g. meter), preserve that only if it already exists — otherwise bare `arc risk` should also print the usage block, matching how the assessment describes it."
+
+Hmm, this is confusing. "preserve that only if it already exists". So: if bare `arc risk` opens a default view AND that's already the case, preserve it. Otherwise print usage.
+
+Bare `arc risk` currently shows the risk scores (which IS a default view). So per the note, I should preserve it. But then step 1 says empty tail → usage block. These conflict.
+
+Hmm wait. Let me reconsider. Maybe the intended resolution: The "default view" the assessment refers to might be one that does NOT exist currently (like a meter view). The assessment claimed bare `arc risk` "falls back to generic help" — which is factually wrong for the current code (it shows the report). Since the assessment describes bare `arc risk` as showing generic help, and the note says "matching how the assessment describes it" → bare `arc risk` should print the usage block... but that would break the existing test `test_try_dispatch_subcommand_risk_bare` which asserts routing happens (not the output, just routing — `Some(None)`). That test only asserts routing, so output change is OK for that test.
+
+Hmm, but changing bare `arc risk` from showing the report to showing usage would be a behavior change that existing users might rely on (`/risk` in REPL shows top 15 riskiest files). In the REPL, `/risk` shows the report — that's the documented default. If I make handle_risk print usage for empty tail, the REPL `/risk` would no longer show the file scores! That would be a real product regression — the REPL `/risk` command is documented as "Show top 15 riskiest files" in help_data.rs.
+
+Wait, but `ARC_RISK` REPL `/risk` — is that the same handle_risk? Yes: dispatch.rs:438 `commands::handle_risk(ctx.input)`. So `/risk` (empty) in REPL → handle_risk("") → hmm, wait. Actually in the REPL the input would be "/risk". strip_prefix("/risk") → "" → fall through to the report. So making empty tail print usage would break the documented REPL default.
+
+So per "product-safe" discipline: I must NOT break the REPL `/risk` default view. The note's guidance: "preserve that only if it already exists" — a default view DOES exist (showing the risk report, documented in /help). So preserve it.
+
+So the resolution: 
+- Empty tail → keep the default (risk report) — it exists and is documented.
+- `help` / `--help` / `-h` tail → print risk-subcommand usage block.
+- `snapshot --help` etc. → print risk-subcommand usage block (subcommand + help flag).
+
+Hmm, but step 1 explicitly says "if the input tail is empty, or is help/--help/-h, print... and return". Let me reconcile. The step targets the assessment's issue. I think the *spirit* is: `arc risk --help` and `arc risk snapshot --help` must reach risk help instead of generic help. The empty-tail case is described because the assessment believed bare `arc risk` fell to generic help — but in the current code it doesn't (there's a test proving it shows risk scores).
+
+Given the contradiction, the safest product-correct interpretation:
+- `--help` / `-h` / `help` tail → risk usage block (THIS is the task).
+- Empty tail → preserve existing default view (risk report), since it exists and is documented (and the note explicitly says preserve an existing default view). 
+
+But hold on — step 1's wording is quite explicit: "if the input tail is empty, or is help / --help / -h, print a concise risk-subcommand usage block ... and return without falling through to generic help." The key rationale is "without falling through to generic help". Bare `arc risk` doesn't fall through to generic help — it shows the report. So the empty-tail branch in the steps is premised on a wrong description of current behavior. The note clarifies: preserve the default view if it already exists. It exists. So preserve.
+
+Hmm, but wait — let me double check the existing test `test_try_dispatch_subcommand_risk_bare`:
+
+```
+fn test_try_dispatch_subcommand_risk_bare() {
+    // `arc risk` (bare, read-only) dispatches to handle_risk, which reads
+    // the source tree and prints risk scores. Assert only the routing
+    let args = vec!["arc".into(), "risk".into()];
+    ...asserts Some(None)
+}
+```
+
+It asserts routing (Some(None)), not output. So both interpretations pass this test. But the REPL `/risk` default view — I should preserve it because it's documented (help_data) and product users use it.
+
+Actually, let me re-examine: does bare `arc risk` behave differently in the CLI vs REPL? In CLI, `arc risk` → handle_risk("/risk") → sub="" → report shown. In REPL, `/risk` → handle_risk("/risk") → same. Both show the report. Both are documented: help_data "/risk  Show top 15 riskiest files".
+
+OK here's my decision:
+- Empty tail: preserve existing behavior (show risk report + emerging) — it's an existing documented default view. Per note: "preserve that only if it already exists" — it does.
+- Tail `help`, `--help`, `-h`: print risk usage block.
+- Tail like `snapshot --help`, `snapshot -h`, `validate --help`, etc.: print risk usage block too (a subcommand with help flag). To be safe, I'll handle: first token is a subcommand AND rest contains help flag → usage. Simplest: if the full tail contains `--help`/`-h`/`help` anywhere → usage block. That covers `arc risk snapshot --help` and `arc risk --help` and `arc risk help`.
+- `arc risk snapshot foo` (unknown extra args)? Currently sub = "snapshot foo" doesn't match "snapshot" → falls to default report which is weird, but that's pre-existing behavior; not touching it.
+
+Wait, actually, if tail contains "help" anywhere but a real subcommand... e.g. `arc risk snapshot --help` → usage. Good. But what about `arc risk --all`? tail = "--all" — doesn't contain help → falls through to report with show_all. Good.
+
+Hmm, but careful: if I add a "contains help" check, then `arc risk history --help` → usage block (fine, it's help). OK.
+
+But what about the dispatch_sub.rs side? The global `--help` short-circuit:
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h") {
+    print_help();
+    return Some(None);
+}
+```
+`arc risk --help` → hits this → top-level help. I need to bypass for the risk subcommand. Narrowest change: skip this short-circuit when `args.get(1) == "risk"`:
+
+```rust
+if args.iter().any(|a| a == "--help" || a == "-h")
+    && args.get(1).map(String::as_str) != Some("risk")
+{
+    print_help();
+    return Some(None);
+}
+```
+
+Then `arc risk --help` reaches the risk arm → input "/risk --help" → handle_risk → contains "--help" → risk usage block. 
+
+But wait — are there other subcommands where `--help` should route to the subcommand's own handler instead of top-level help? Possibly, but the task scope is only risk. Keep it narrow.
+
+Also — should I keep `--help` routing for `arc --help` (args[1] is None)? Yes — `args.get(1)` is None → != Some("risk") → top-level help. `arc doctor --help` → still top-level help (unchanged). Good, narrow.
+
+Now the usage block text. The task says list subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with one-line descriptions, plus a `--all` note for snapshots/validate if present.
+
+But wait: are `meter` and `emerging` real subcommands? Let me check — RISK_SUBCOMMANDS doesn't include them. And there's no handle_risk_meter or handle_risk_emerging. Hmm. But the task explicitly says to list them. Let me search for "emerging" as a subcommand and "meter" handling.
+
+From the earlier grep, there's `detect_emerging_risks` and `format_emerging_risks` but no `handle_risk_emerging`. And no `handle_risk_meter`. Let me double-check whether "emerging" or "meter" are routed anywhere.
+
+Actually, let me check the /risk help in help_data (lines 1256-1276): lists `/risk`, `/risk --all`, `/risk snapshot`, `/risk validate`, `/risk accuracy`. Doesn't mention history/predict/effectiveness/meter/emerging.
+
+The task instructs: "list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note for snapshots/validate if present".
+
+Hmm, "meter" and "emerging"... let me check if these actually exist as subcommands. Let me grep the whole source for "emerging" subcommand dispatch and meter subcommand dispatch.
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "emerging\|meter" src/dis…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\"emerging\"\|\"meter\""… ✓ (4ms)
+ ✓ (12ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.8s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's no `emerging` or `meter` subcommand as a separate handler — the task description mentions them in the usage block but I should check if there's a `/risk meter` or `/risk emerging` in the actual system. The task says list: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging. But only `snapshot`, `validate`, `history`, `predict`, `accuracy`, `effectiveness` are actual subcommands. "meter" and "emerging" don't have handlers. Let me check the task description again: "print a concise risk-subcommand usage block (list the subcommands: snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging — with a one-line description each, plus a `--all` note for snapshots/validate if present)".
+
+Hmm, but there's no `meter` or `emerging` subcommand handler. The task says list them — but if they don't exist as commands, listing them as subcommands would be misleading. Let me be careful: "with a one-line description each, plus a `--all` note for snapshots/validate if present". The `--all` is a flag to the default view. I should list what actually exists. Let me check the help_data.rs entry which is the canonical help — it lists: `/risk`, `/risk --all`, `/risk snapshot`, `/risk validate`, `/risk accuracy`. And history/predict/effectiveness exist too but aren't documented in help_data.
+
+The task instruction says to list "snapshot, validate, history, predict, accuracy, effectiveness, meter, emerging". But meter and emerging don't have handlers — calling `arc risk meter` would fall through to the default score display. Listing them as subcommands in help would be inaccurate. I'll list only the real subcommands (snapshot, validate, history, predict, accuracy, effectiveness) plus the `--all` flag note, and maybe mention that emerging-risk analysis is included in the default view. That's honest and matches the actual code. Actually wait — let me reconsider: the task explicitly says to list those 8. But two of them (meter, emerging) aren't real subcommands. Following instructions blindly would create a doc lie (a lesson from my own wisdom: "a false claim in a context file is a self-reinforcing error"). I'll list the 6 real subcommands + --all note, and mention emerging is part of the default view. That satisfies the spirit: a concise risk-subcommand usage block.
+
+Let me now check where the CLI help for `arc risk --help` currently goes. In `try_dispatch_subcommand`, there's a global short-circuit: `if args.iter().any(|a| a == "--help" || a == "-h") { print_help(); return Some(None); }`. This happens before the subcommand match. So `arc risk --help` -> prints top-level help. I need to move the `--help` check to after the subcommand routing, or special-case the risk arm before the global help check.
+
+The task says: "In src/dispatch_sub.rs: make sure the routing for `arc risk` / `arc risk <sub>` keeps recognizing `--help` as a tail so it reaches `handle_risk`'s new branch instead of the top-level help."
+
+Options:
+1. Move the global `--help` check after the positional subcommand match (so `arc risk --help` reaches the risk arm). But that changes behavior for other subcommands — e.g., `arc doctor --help` would reach the doctor handler... actually many handlers probably don't handle `--help`, so that would be worse. Hmm, but wait — currently `arc doctor --help` prints top-level help. If I move the global check after the match, `arc doctor --help` would run the doctor handler which ignores the flag presumably. That changes behavior.
+
+2. Add a special case: before the global `--help` check, check if `args.get(1) == Some("risk")` and `args[2..]` contains `--help`/`-h`/`help`, then route to handle_risk.
+
+Option 2 is the narrowest change. Let me look at the exact structure again:
+
+```rust
+pub(crate) fn try_dispatch_subcommand(args: &[String]) -> Option<Option<Config>> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return Some(None);
+    }
+    ...
+    if let Some(sub) = args.get(1) {
+        match sub.as_str() {
+            ...
+            "risk" => {
+                let input = build_risk_input(&args[2..]);
+                crate::commands_risk::handle_risk(&input);
+                return Some(None);
+            }
+```
+
+Wait, but there's also a `"help"` subcommand arm: `"help" => { print_help(); return Some(None); }` — that's for `arc help`. For `arc risk help`, args[2] == "help" — that goes to the risk arm and then handle_risk("/risk help"). Good.
+
+For `arc risk --help`: the global short-circuit catches `--help` before the match, printing top-level help. I need to bypass that for the risk arm.
+
+The cleanest approach given the guard structure: hoist the `--help` check to happen *after* we handle "risk"? That's complex. Alternative: handle "risk" early — add a separate pre-check before the global help check:
+
+```rust
+// `arc risk --help`
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+

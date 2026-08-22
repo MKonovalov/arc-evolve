@@ -1,0 +1,358 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to make `arc model show` and `arc context` work without an API key (fail-soft local info).
+
+Let me look at the relevant files first:
+1. `src/commands_info.rs` - `handle_model_show`
+2. `src/commands_project.rs` - `handle_context`
+3. `src/cli.rs` - `resolve_api_key_env`, `configured_provider`
+
+Let me read these files to understand the current state.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -3  ▶ search 'fn handle_model_show' in src/commands_info.rs  ▶ search 'fn handle_context' in src/commands_project.rs ✓ (3ms)
+ ✓ (2ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  3 tools completed in 1.2s (3 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the relevant code sections.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_info.rs:600..720  ▶ read src/commands_project.rs:1..121 ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 507ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I see `handle_context` takes an `agent: &Agent` already built. The task says the problem is at the call sites — the agent build dies with 401 before this command runs. Let me find where `handle_context` and `handle_model_show` are called from, and how the agent is built. Also, `handle_model_show` itself is trivial — it only prints `current model: {model}`. So the failure must be at the caller.
+
+Let me trace the callers.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'handle_model_show|handle_context\(' in src  ▶ search 'model show|model_show|"show"' in src/commands_info.rs ✗ (2ms)
+    │ Search error: grep: Unmatched ( or \(
+ ✓ (2ms)
+  2 tools completed in 480ms (1 ✓, 1 ✗)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'handle_model_show' in src  ▶ search 'handle_context' in src (*.rs) ✓ (9ms)
+ ✓ (8ms)
+  2 tools completed in 554ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at how `handle_model_show` is called in dispatch.rs, and how the args reach it. Also look at the `dispatch.rs` around line 661.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch.rs:630..690  ▶ read src/dispatch.rs:1070..1140 ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 531ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the CLI subcommand path — `arc model show` and `arc context` as CLI subcommands. Let me find where these are dispatched in `dispatch_sub.rs`.
+────────────────────────────────────────────────────────────────────────────────
+Now let me find the CLI subcommand path for `arc model show and arc context`:
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'model[ _](show|list|info)' in src (*.rs)  ▶ search 'context|model' in src/dispatch_sub.rs (*.rs) ✓ (2ms)
+ ✓ (10ms)
+  2 tools completed in 522ms (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'context' in src/dispatch_sub.rs  ▶ search 'model' in src/dispatch_sub.rs ✓ (3ms)
+ ✓ (2ms)
+  2 tools completed in 622ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — so `arc model show` and `arc context` as CLI subcommands are not handled in `dispatch_sub.rs`? Let me look at how subcommands are routed. Let me search for where CLI subcommands get routed, e.g. `arc status`, `arc map`, `arc risk`.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch_sub.rs:80..220 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. So `arc context` isn't in dispatch_sub.rs — there's no `context` or `model` subcommand yet! Let me check how `arc context` and `arc model show` are actually invoked. The assessment says "arc context and arc model show require a valid API key" — let me check main.rs to see how CLI subcommands like these get dispatched.
+
+Wait, but the task says:
+1. In `src/commands_project.rs` `handle_context`: detect the no-key / invalid-key case before (or while) building the `Agent`. If the agent can't be built...
+2. In `src/commands_info.rs` `handle_model_show`: it renders local model info...
+
+But this is the REPL handler. The `handle_model_show` in commands_info.rs is the REPL `/model` command handler — it prints `current model: {model}` — it doesn't build an agent at all! It just prints from `ctx.agent_config.model`.
+
+Hmm, wait. Let me re-read the task. The task says `arc model show` / `arc context` work without an API key. But these might be different entry points. Let me check dispatch_sub.rs for more subcommands, maybe there are "model" and "context" arms further down.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch_sub.rs:219..349 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the rest of the dispatch_sub.rs to see if there are `model` and `context` subcommands. Also, I need to understand the actual flow of the task. Let me look at where `arc model show` and `arc context` are handled in the CLI.
+
+Wait, the task says `arc model show` and `arc context`. Let me check:
+1. How `arc context` routes (maybe `context` isn't a subcommand; maybe `arc context` isn't in dispatch_sub.rs yet?)
+2. How `arc model show` routes.
+
+Let me continue reading dispatch_sub.rs.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read src/dispatch_sub.rs:348..478 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the CLI subcommand dispatch. Let me check: does `arc model show` and `arc context` currently route through `dispatch_sub.rs`, or do they fall through to `parse_args` which builds an agent?
+
+Let me check how parse_args handles `model` and `context` positionals. These are REPL slash commands mostly. The task says:
+
+"Assessment Day 175: `arc context` and `arc model show` require a valid API key even for local information — they try to build the agent before printing anything, so in a no-key or bad-key environment they die with HTTP 401 before showing the local data."
+
+So the flow: `arc context` → parse_args → builds an agent (which requires an API key) → dies with 401. Let me check parse_args to see where the agent gets built and where a 401 would come from.
+
+Let me check what happens with unknown positional args like "context" and "model" in parse_args. They'd fall through to normal flag parsing, and the "context"/"model" tokens would be... unknown flags → warn. Then the agent gets built with `build_agent`. Let me look at where 401 could happen - probably in `main.rs` after parse_args, creating the agent. Actually let me look at how parse_args handles this.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ search '"context"|"model"' in src/cli.rs  ▶ search 'build_agent|prompt_messages|Agent::' in src/main.rs ✓ (3ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 494ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how `arc model show` and `arc context` are invoked from CLI — the task says these are CLI subcommands. Let me check main.rs / parse_args for subcommand handling.
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ search 'try_dispatch_subcommand' in src (*.rs)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "model" src/main.rs | hea… ✓ (3ms)
+ ✓ (11ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 550ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There is no `arc model` or `arc context` CLI subcommand in `dispatch_sub.rs` — the task mentions `arc model show` / `arc context` as CLI subcommands. Let me check `cli.rs` around line 330 to see the subcommand list and how model/context might be handled. Wait, maybe they're not currently dispatched as subcommands at all! Let me check.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:300..380  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "context\|\"model\"" src/c… ✓ (1ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 674ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `arc context` and `arc model show` as CLI subcommands (positional subcommands) don't actually exist in `try_dispatch_subcommand`! Let me check. Looking at the KNOWN_SUBCOMMANDS list: blame, changelog, commit, config, diff, docs, doctor, evolution, extended, find, grep, health, help, index, init, lint, map, memories, outline, permissions, review, run, setup, skill, status, test, todo, tree, undo, update, version, watch. No "context" or "model".
+
+But the task says "arc model show" / "arc context" work without an API key (fail-soft local info). Let me check how `arc context` and `arc model show` are invoked. Maybe they're invoked via `--prompt`? No... Let me search more carefully.
+
+Actually wait — maybe they're run as `arc context` and `arc model show` where the text "context" or "model show" is treated as... hmm. Let me look at how the assessment noted the issue. Let me check the `handle_context` (REPL /context) — but the task says `arc context` (CLI). Let me check if there's a "context" or "model" subcommand anywhere in dispatch_sub.
+
+Actually, let me re-check. The task says:
+
+"Context: Assessment Day 175: `arc context` and `arc model show` require a valid API key even for local information — they try to build the agent before printing anything, so in a no-key or bad-key environment they die with HTTP 401 before showing the local data."
+
+So the assessment presumably ran `arc context` and `arc model show` as CLI commands and they tried to build the agent... But the subcommand dispatcher doesn't have "context" or "model". Hmm, wait — maybe they're run differently. Let me check `parse_args` more carefully to see how a bare "context" or "model show" positional arg is handled. It might fall into the prompt path (which builds the agent and dies with 401).
+
+Let me look at how main.rs handles single-prompt mode. In main.rs, `run_prompt` builds an agent and prompts. If the user runs `arc context` with no API key... "context" would be treated as a positional prompt → try to run prompt → fail with 401.
+
+But wait — the task description says to modify `src/commands_info.rs` `handle_model_show` and `src/commands_project.rs` `handle_context`. These are the REPL handlers. So maybe the change should make these handlers work without an agent — and there should be CLI subcommand routes that call them. Let me check whether the assessment's claim is about the REPL or the CLI. The task title says "`arc model show` / `arc context` work without an API key".
+
+Hmm, maybe the convention: `arc model show` is a CLI subcommand? Let me search for where "model show" might be parsed. Actually, the flag_value / KNOWN_SUBCOMMANDS list doesn't have "model". Let me search for how the CLI dispatches. Maybe in cli.rs there's a separate match. Let me grep for `"context"` and `"model"` as subcommand strings in the whole repo.
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn '"context"' src/ && echo … ✓ (13ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. It looks like `arc model show` and `arc context` might not exist as CLI subcommands yet! Let me check `dispatch_sub.rs` for any "model" or "context" subcommand arms. From the earlier read, I saw arms: doctor, health, help, version, setup, init, lint, test, tree, map, outline, run, diff, commit, review, blame, risk, grep, find, index, update, docs, skill, watch, status, undo, changelog, evolution, config, permissions, todo, goal, memories, extended.
+
+No "model" or "context" subcommand. So the assessment says "`arc model show` / `arc context` require a valid API key even for local information — they try to build the agent before printing anything". Hmm, but the task says Files: src/commands_info.rs, src/commands_project.rs, and steps reference `handle_context` in `src/commands_project.rs` and `handle_model_show` in `src/commands_info.rs`. Wait — maybe the task assumes these are CLI subcommands. Let me check the task title again: "`arc model show` / `arc context` work without an API key (fail-soft local info)".
+
+Let me check whether these subcommands exist — maybe there are "model" and "context" arms in dispatch_sub.rs that I missed. Let me re-check. The read showed lines 348-477 and I saw the arms. Let me grep for `"context" =>` and `"model" =>` in dispatch_sub.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n '"context"\|"model"' src/d… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The grep for `arc context` / `arc model` in README/docs returned nothing. Let me check what the assessment said. The task says "`arc model show` / `arc context` work without an API key". So there must be CLI subcommands with these names. Let me search for how "model" or "context" might be dispatched as subcommands. Search the main.rs and cli.rs header comments.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "context" src/main.rs | h… ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — `arc context` and `arc model show` don't yet exist as CLI subcommands in `dispatch_sub.rs`! The task says:
+
+"Assessment Day 175: `arc context` and `arc model show` require a valid API key even for local information — they try to build the agent before printing anything, so in a no-key or bad-key environment they die with HTTP 401 before showing the local data."
+
+Let me check if there's a `context` subcommand at all. From what I saw in `dispatch_sub.rs` — `status` shows a bare line, there's no `context` or `model` arm. Let me search more carefully. Maybe they were added in a recent commit and I missed them. Let me check git log for these.
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n '"context"\|"model"' src/d… ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `arc model show` and `arc context` are NOT currently dispatched in `dispatch_sub.rs`. Let me check how they behave today — maybe they fall through to `parse_args` and try to build an agent. Let me look at how `arc status` works (it works keyless). The task says:
+
+"Assessment Day 175: `arc context` and `arc model show` require a valid API key even for local information — they try to build the agent before printing anything, so in a no-key or bad-key environment they die with HTTP 401 before showing the local data."
+
+So `arc model show` probably falls through the subcommand dispatch (not in the list) and gets treated as... hmm. Let me check how `arc model show` is even invoked — maybe there's something that routes `model` as a subcommand elsewhere. Let me run the actual binary to see what happens.
+
+Actually wait — maybe `arc model show` and `arc context` are handled via the `--print-system-prompt` or the REPL... Let me search the whole repo for how `arc context` would be parsed. Since "context" is not in KNOWN_SUBCOMMANDS in dispatch_sub.rs, `arc context` would fall through to parse_args where "context" becomes a positional arg → treated as a prompt! That would build an agent and hit the API.
+
+Let me verify by running the binary. First build it.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how `arc model show` / arc context currently behave by building and running:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 && ls -… ✓ (159ms)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && env -u ANTHROPIC_API_KEY ./target/…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && env -u ANTHROPIC_API_KEY ./target/… ✓ (7ms)
+ ✓ (7ms)
+  2 tools completed in 553ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Confirmed — both `arc model show` and `arc context` fail with "No API key found" before printing anything. `arc context` isn't even in the KNOWN_SUBCOMMANDS list in cli.rs, but the model show path goes through parse_args which requires an API key.
+
+Let me look at where the key check happens in cli.rs parse_args.
+────────────────────────────────────────────────────────────────────────────────
+Confirmed the failure. Now let me find where the key check happens and how `arc context reaches handle_context`:
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "No API key found\|resolve…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "arc context\|arc model" … ✓ (5ms)
+ ✓ (25ms)
+  2 tools completed in 598ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The assessment says `arc context`/`arc model show` fail with HTTP 401 auth error when the harness's `ANTHROPIC_API_KEY` is set but invalid. But in our no-key test, it says "No API key found" — that's from `parse_args`'s key resolution. Wait, but `try_dispatch_subcommand` is called from `parse_args` — and the key check happens inside parse_args after subcommand dispatch. Let me look at the flow.
+
+Actually wait — dispatch_sub is called at line 808 of cli.rs: `if let Some(result) = crate::dispatch_sub::try_dispatch_subcommand(args)`. Let me check whether the key check happens before or after that.
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:525..645 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the failure. `arc model show` and `arc context` are not subcommands in `try_dispatch_subcommand` — they fall through to `parse_args` which requires an API key (exits with exit 1 for non-interactive mode with no key).
+
+The task says:
+1. In `src/commands_project.rs` `handle_context`: detect the no-key / invalid-key case before (or while) building the `Agent`. If the agent can't be built / the provider errors with an auth failure, still print the *local* context content ... and append a single honest dim/plain note. Do not crash with a raw 401.
+   - Prefer the smallest change: check whether an API key resolves before calling the agent-building code path (there is already `resolve_api_key_env` in `src/cli.rs` from the Day-175 dotenv work — reuse it). If no key, print the local sections and a note, return.
+
+2. In `src/commands_info.rs` `handle_model_show`: it renders local model info (current provider/model from config + CLI state). If building the agent for the info call requires a key, route around it: show the configured provider/model from `configured_provider()` / config state without instantiating the agent, or catch the agent-build failure and degrade to the config-derived view instead of surfacing the transport error.
+
+But wait — `handle_model_show` and `handle_context` are REPL handlers taking `agent: &Agent` already. The REPL path already has an agent, so the no-key failure only happens in the CLI subcommand path (`arc model show`, `arc context`). Wait, but do those CLI subcommands exist yet? Let me check.
+
+From my search: `try_dispatch_subcommand` has arms for doctor, health, help, version, setup, init, lint, test, tree, map, outline, run, diff, commit, review, blame, risk, grep, find, index, update, docs, skill, watch, status, undo, changelog, evolution, config, permissions, todo, goal, memories, extended. No "context" or "model".
+
+So `arc model show` and `arc context` currently fall through to parse_args → API-key check → exit(1). That's exactly the failure observed.
+
+Hmm — but the task says "Files: src/commands_info.rs, src/commands_project.rs". The smallest change that makes `arc model show` and `arc context` work keyless: add subcommand arms in `try_dispatch_subcommand` (dispatch_sub.rs) that route to a keyless path. But the task explicitly scopes to the two handler files... Let me re-read.
+
+"In `src/commands_project.rs` `handle_context`: detect the no-key / invalid-key case before (or while) building the `Agent`."
+
+`handle_context` takes `&Agent` — it doesn't build the agent. The dispatch routing (`dispatch_sub`) doesn't have a "context" arm at all. Hmm, but maybe the intended design: `arc context` and `arc model show` as CLI subcommands should be added, OR the task description is written loosely and the actual work is to add the subcommands while keeping changes narrowly in those files plus dispatch routing.
+
+Actually, "If the change turns out larger than expected (e.g. `handle_context` is deeply entangled with the Agent), scope down to just `handle_model_show` + the keyless context *header/list* path and note the remainder".
+
+So the plan:
+1. Add a `context` subcommand arm in dispatch_sub.rs that calls a keyless path. The default `/context` (no args) calls `show_project_context_files()` which is local-only (no agent needed). The `tokens` and `files` subcommands need an agent. So for `arc context` bare → show project context files (local). For `arc context system` → show system prompt sections (needs system_prompt, local). We need keyless routing.
+
+2. Add a `model` subcommand arm that handles `arc model show` / `arc model list` keylessly using config-derived provider/model.
+
+Let me look at the actual functions involved:
+- `show_project_context_files()` — local, no agent.
+- `show_system_prompt_sections(system_prompt)` — needs system_prompt but that's local (from config).
+- `show_context_tokens(system_prompt, agent)` — needs agent (messages).
+- `show_context_files(agent)` — needs agent.
+- `handle_context_relevant(query)` — let me check whether it needs an agent... it calls `auto_context_for_prompt` probably, local.
+
+The task says: "still print the *local* context content (project context files, git status, file listing — whatever is already computed locally) and append a single honest dim/plain note that model-backed sections were skipped because no usable API key is set."
+
+Let me look at what `show_project_context_files` does and the CLAUDE.md description: "`commands_project.rs` — `/context`, `/init`, `/docs`, project-type detection".
+
+Let me read the relevant part of commands_project.rs around show_project_context_files and the token/files functions.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the local context functions in `commands_project.rs and resolve_api_key_env / configured_provider`:
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:100..140  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn show_project_context_f… ✓ (1ms)
+ ✓ (4ms)
+  2 tools completed in 729ms (2 ✓)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:30..110  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn show_project_context_f… ✓ (2ms)
+ ✓ (6ms)
+  2 tools completed in 587ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand. `show_project_context_files()` is the local-only function — it doesn't use the agent. The bare `/context` command calls it. Let me check what happens with `arc context` subcommand — it's not in `dispatch_sub.rs` currently! So `arc context` falls through to normal parse_args, which requires an API key and dies with "No API key found" at line 579-583.
+
+Same for `arc model show` — neither `model` nor `context` are in `try_dispatch_subcommand`. So they fall through to `parse_args` → `create_model_config` → no key → `std::process::exit(1)`.
+
+So the fix is in `dispatch_sub.rs`:
+1. Add `"context"` and `"model"` subcommand arms that handle the local info without requiring an agent/key.
+2. For `arc context`: call the local context display (`show_project_context_files`), and handle sub-args like `relevant`, `system` (if we have a system prompt), `tokens`, `files` — but files/tokens require an agent. The task says: "print the *local* context content (project context files, git status, file listing — whatever is already computed locally) and append a single honest dim/plain note that model-backed sections were skipped because no usable API key is set."
+
+But wait — the task title says `arc model show` / `arc context`. Currently in `dispatch_sub.rs`, `model` and `context` aren't handled as subcommands at all. The task says "Files: src/commands_info.rs, src/commands_project.rs". So the intended approach is:
+
+1. In `src/commands_project.rs` `handle_context`: detect the no-key case before building the Agent. But `handle_context` takes `agent: &Agent` — the agent is already built in the REPL. In the REPL, there's always an agent (built with empty key → but wait, in REPL, when there's no key, `needs_setup()` triggers the wizard in main). Hmm, actually for the interactive REPL path, handle_context receives an `agent: &Agent` — the agent is already constructed by that point, so the key issue doesn't apply in the REPL the same way.
+
+Actually, the failure is specifically for the CLI subcommand path: `arc context` and `arc model show` aren't in `try_dispatch_subcommand`, so they go through `parse_args` which hard-exits when no key.
+
+Let me re-read the task steps:
+
+1. In `src/commands_project.rs` `handle_context`: detect the no-key / invalid-key case before (or while) building the Agent... — but `handle_context` doesn't build an Agent; it receives one. "Prefer the smallest change: check whether an API key resolves before calling the agent-building code path (there is already `resolve_api_key_env` in `src/cli.rs`... reuse it). If no key, print the local sections and a note, return."
+
+Hmm. The task author's mental model may be slightly off from the actual code. Let me check where `arc context` currently goes. Actually, wait — maybe there IS an `arc context` handling somewhere. Let me check help_data and see if `context`/`model` are documented as subcommands. Let me search more broadly.
+
+Actually the "model show" — in the REPL, `/model` shows current model. For CLI, `arc model show` isn't handled. Let me verify that `arc model show` goes through parse_args → dies. Yes, we confirmed: `arc model show` gives "No API key found." error. And `arc context` too.
+
+So the right fix:
+- In `dispatch_sub.rs`, add "context" and "model" subcommand arms:
+  - `arc context` → print local context (project context files, plus maybe git status/file listing) without agent, with a note if no key.
+  - `arc model show`/`arc model` → show configured provider/model from config + CLI state without agent.
+
+The task says "Files: src/commands_info.rs, src/commands_project.rs". The natural place to put the keyless handlers:
+- `commands_project.rs`: add a function like `show_keyless_context()` that prints local context info. Or modify `handle_context`? But `handle_context` receives an agent — in the REPL it always has one. The CLI path `arc context` must not build an agent. So a new function `handle_context_keyless(input)` or just wire the existing `show_project_context_files()`.
+
+Let me look at how `arc context` is supposed to work per docs. Let me check the docs for `arc <subcommand>` list.
+
+Actually — let me check the README/docs for what `arc context` and `arc model` are documented as.
+
+Also the task title says "`arc model show` / `arc context` work without an API key". So `arc model show` is the CLI form. Let me check if there's an existing `arc model` subcommand documented.
+
+Let me search the help text.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how `arc context / arc model` are documented and whether there's existing subcommand intent:
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "arc context\|arc model\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "show_project_context_fil… ✓ (4ms)
+ ✓ (6ms)
+  2 tools completed in 6ms (2 ✓)
+
+
