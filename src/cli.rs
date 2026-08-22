@@ -54,6 +54,77 @@ pub fn configured_provider() -> Option<String> {
     CONFIGURED_PROVIDER.get().cloned()
 }
 
+/// Parse a `.env` file's contents into a key→value map.
+///
+/// Hand-rolled (no dotenv dependency — this codebase is minimal-dependency).
+/// Rules:
+/// - `KEY=value` lines (also `export KEY=value`)
+/// - comments start with `#`; a full-line comment is skipped, trailing
+///   inline comments are NOT stripped (values may legitimately contain `#`)
+/// - whitespace is trimmed around the key and the value
+/// - values may be unquoted, single-quoted (`'...'`), or double-quoted
+///   (`"..."`); quotes are stripped. No escape-sequence processing.
+/// - blank lines are ignored
+/// - later duplicate keys override earlier ones (`HashMap` insert)
+pub fn parse_dotenv(content: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some(eq) = line.find('=') else {
+            continue; // not a KEY=value line
+        };
+        let key = line[..eq].trim();
+        let value = line[eq + 1..].trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = if value.len() >= 2 {
+            let first = value.as_bytes()[0];
+            let last = value.as_bytes()[value.len() - 1];
+            if (first == b'\'' && last == b'\'') || (first == b'"' && last == b'"') {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+        map.insert(key.to_string(), value.to_string());
+    }
+    map
+}
+
+/// Best-effort read of the `.env` file in the current working directory.
+///
+/// Only the CWD is checked (no upward walk, no system dirs). Returns an empty
+/// map when the file is missing or unreadable — `.env` is purely additive.
+pub fn load_cwd_dotenv() -> std::collections::HashMap<String, String> {
+    match std::fs::read_to_string(".env") {
+        Ok(content) => parse_dotenv(&content),
+        Err(_) => std::collections::HashMap::new(),
+    }
+}
+
+/// Resolve a provider API key with dotenv fallback.
+///
+/// Precedence: process environment > `.env` in the CWD. This is the single
+/// place key resolution happens; it returns the first non-empty value found.
+pub fn resolve_api_key_env(env_var: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(env_var) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    match load_cwd_dotenv().get(env_var) {
+        Some(v) if !v.is_empty() => Some(v.clone()),
+        _ => None,
+    }
+}
+
 /// Number of skills auto-discovered from `~/.arc/skills/` and `.arc/skills/`.
 /// Set once during `parse_args`; read by the banner to show auto-loaded count.
 static AUTO_DISCOVERED_SKILL_COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -469,9 +540,9 @@ fn parse_model_config(
     let api_key = match api_key_from_flag {
         Some(key) if !key.is_empty() => key,
         _ => {
-            // Try provider-specific env var first
+            // Try provider-specific env var first (process env > .env in CWD)
             let from_provider_env = provider_env_var
-                .and_then(|var| std::env::var(var).ok())
+                .and_then(resolve_api_key_env)
                 .filter(|k| !k.is_empty());
             // Provider-specific .arc.toml key (e.g. nous_api_key,
             // opencode_api_key) — lets users keep multiple provider keys in one
@@ -486,10 +557,10 @@ fn parse_model_config(
                     Some(key) => key,
                     None => {
                         // Fallback chain: ANTHROPIC_API_KEY > API_KEY > config file
-                        match std::env::var("ANTHROPIC_API_KEY")
-                            .or_else(|_| std::env::var("API_KEY"))
+                        match resolve_api_key_env("ANTHROPIC_API_KEY")
+                            .or_else(|| resolve_api_key_env("API_KEY"))
                         {
-                            Ok(key) if !key.is_empty() => key,
+                            Some(key) if !key.is_empty() => key,
                             _ => match file_config.get("api_key").cloned() {
                                 Some(key) if !key.is_empty() => key,
                                 _ => {
