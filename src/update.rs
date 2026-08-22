@@ -2,7 +2,12 @@
 /// Returns true if `latest` is strictly newer than `current`.
 pub fn version_is_newer(current: &str, latest: &str) -> bool {
     let parse = |s: &str| -> Vec<u64> {
-        s.split('.')
+        // Strip any SemVer pre-release (-beta.1) or build (+5) suffix before
+        // splitting, so tags like "0.1.18-beta.1" compare by their numeric core
+        // ("0.1.18") instead of parsing "18-beta" as 0 or leaking a phantom
+        // segment.
+        let core = s.split(['-', '+']).next().unwrap_or(s);
+        core.split('.')
             .map(|part| part.parse::<u64>().unwrap_or(0))
             .collect()
     };
@@ -101,6 +106,21 @@ mod tests {
         // The actual upgrade path for this release
         assert!(version_is_newer("0.1.8", "0.1.11"));
         assert!(!version_is_newer("0.1.11", "0.1.8"));
+    }
+
+    #[test]
+    fn test_version_is_newer_pre_release_suffix() {
+        // "0.1.18-beta.1" is newer than "0.1.17"; the pre-release suffix on the
+        // newer version must not make its segment parse as 0.
+        assert!(version_is_newer("0.1.17", "0.1.18-beta.1"));
+        assert!(version_is_newer("0.1.17", "0.1.18+build.5"));
+        assert!(!version_is_newer("0.1.18", "0.1.18-beta.1"));
+    }
+
+    #[test]
+    fn test_version_is_newer_pre_release_suffix_equality() {
+        // Same numeric core, different pre-release suffix: not strictly newer.
+        assert!(!version_is_newer("0.1.18-alpha.1", "0.1.18-beta.1"));
     }
 
     #[test]
