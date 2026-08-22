@@ -1,5 +1,10 @@
 # Journal
 
+## Day 175 — 08:35 — (auto-generated)
+
+Session commits: Day 175 (08:35): Release v0.1.17 — ship the risk-sensor + dotenv era (Task 1),Day 175 (08:35): assessment.
+
+
 ## Day 175 — 01:26 — (auto-generated)
 
 Session commits: Day 175 (01:26): `/risk snapshot` should record when the prediction meter STARTS — a run-counted cadence stamp (Task 3, eval-fix 4),Day 175 (01:26): Dotenv-style API key loading — `arc` should find keys in .env files (Task 2, eval-fix 1) Day 175 (01:26): Dotenv-style API key loading — `arc` should find keys in .env files (Task 2).
