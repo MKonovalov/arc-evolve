@@ -1,0 +1,439 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the current state of the code. The evaluator says the commit touches only src/cli.rs, and the dotenv parser and resolution logic work, but the unit test and docs paragraph are missing. Let me check the current state.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -3  ▶ search 'dotenv|\.env|env_file|load_dotenv' in /home/runner/work/arc-evolve/arc-evolve/src ✓ (7ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.1s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The commit d4da29e touches only src/cli.rs. Let me look at the current implementation of the .env loading in src/cli.rs.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show d4da29e --stat && grep -n… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The implementation is in `src/cli.rs`. Let me look at the actual implementation to understand what exists, then add the missing unit test and docs.
+────────────────────────────────────────────────────────────────────────────────
+The implementation exists in `src/cli.rs`. Let me read it to understand the parser before adding tests and
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:50..140 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The parser is already there. Now I need to:
+1. Add a unit test for the .env parser (comments, quoting, precedence with process env wins)
+2. Add docs paragraph to `docs/src/getting-started/quick-start.md` or `docs/src/configuration/models.md`
+
+Let me look at the existing tests in cli.rs to see the test module style, and check the docs files. Also check Cargo.toml for dotenv dependency (already know it's not there since the parser is hand-rolled — let me verify).
+────────────────────────────────────────────────────────────────────────────────
+The parser and resolution logic are in place. Now let me check the test module conventions in cli.rs and
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_dotenv\|mod test… ✓ (5ms)
+
+Good — no dotenv crate in Cargo.toml (hand-rolled as required). Let me look at the existing test module and the docs sections to place things
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:1221..1281 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me add the unit test for the .env parser. Let me add it near the top of the tests module. Let me check how the test module ends and look for any helpers to change CWD in tests.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how tests handle CWD changes (there may be existing helpers) and view the doc
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "current_dir\|set_current_…  ▶ read /home/runner/work/arc-evolve/arc-evolve/docs/src/getting-started/quick-start.md:1..41 ✓ (0ms)
+ ✓ (3ms)
+  2 tools completed in 930ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I see test 4 safety note about run_git destructive guard — not relevant here. Let me check how existing tests use tempdir with CWD, e.g., line 3448. Also need to look for serial_test usage since `resolve_api_key_env` reads process env (global state). Let me look at the existing tests using tempdir + set_current_dir.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:3440..3485 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good — tests use `tempfile::TempDir`. For precedence tests, I need to test that process env wins over .env. The `resolve_api_key_env` reads from process env via `std::env::var` and from CWD `.env` via `load_cwd_dotenv()`. To test precedence I'd need to change CWD (which affects global state) or test `parse_dotenv` + `resolve_api_key_env` separately.
+
+Let me look at how the tests handle env var setting — they use `std::env::set_var` (line 2363). But `resolve_api_key_env` reads the actual CWD `.env`. Tests that change CWD are risky with Rust 2024 (set_current_dir in tests is unsafe with multithreading). Let me check the Rust edition.
+
+Actually, a simpler approach: test the precedence at the `parse_dotenv`/`resolve_api_key_env` level. For precedence, I can factor the dotenv map loading so the test can inject. But the task says don't refactor what works. Let me check whether resolve_api_key_env could accept a dotenv map parameter... Actually the evaluator said logic works, just add tests + docs.
+
+For the precedence test, I can write a test that:
+1. Sets env var (with serial_test::serial since env vars are global)
+2. Creates a temp dir with .env, changes CWD... but changing CWD in a multithreaded test env is dangerous.
+
+Alternative: test `resolve_api_key_env` directly by checking that when env var is set, it returns the env value regardless of .env. Since there's no `.env` in the repo root (let me verify), if env var is set and no .env exists, it returns env value — that tests process-env-wins partially. But to truly test precedence I'd want a .env present.
+
+Let me check if there's an existing pattern for CWD-dependent tests. Actually, let me check the Rust edition first — if edition 2024, set_current_dir is unsafe in tests.
+
+Alternative cleaner approach: extract the precedence logic into a testable function that takes the dotenv map. Something like:
+
+```rust
+pub fn resolve_api_key_env_from(env_var: &str, dotenv: &HashMap<String,String>) -> Option<String>
+```
+
+But the task says don't refactor what works — main resolution logic works. However, adding a small pure helper to make the precedence testable is minimal and surgical. Actually — the evaluator only complained about missing test and docs. The simplest testable path: `parse_dotenv` for parser tests (comments, quoting) and for precedence, test that `resolve_api_key_env` returns process env value when set, plus test that when not set it reads from a `.env`... 
+
+Hmm, but the precedence test "process env wins" needs both set. Let me look at whether there's a way to inject. Actually I could restructure slightly: `resolve_api_key_env` internally calls `resolve_api_key_env_with(env_var, &load_cwd_dotenv())`. Then the precedence test calls the `_with` version directly with a populated map. That's a tiny, safe refactor that keeps behavior identical and makes the precedence testable without touching global process state or CWD.
+
+Let me check the edition and how git.rs handles things. Also check serial_test usage — it's already imported.
+
+Let me verify the edition.
+────────────────────────────────────────────────────────────────────────────────
+Tests use `tempfile::TempDir and serial_test::serial`. Let me check the Rust edition and confirm there's no .env at repo root (for precedence testing
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "edition" Cargo.toml && ls… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture. Let me look at the last test in the module to append tests after it, and check the end of the file.
+────────────────────────────────────────────────────────────────────────────────
+Now let me see the end of the test module to append
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '3484,3546p' src/cli.rs ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a full picture. The implementation exists. Missing:
+1. Unit test for the .env parser (comments, quoting, precedence with process env wins)
+2. Docs paragraph
+
+I'll add tests at the end of the test module, before the final closing brace. I need to be careful with `#[serial]` for the precedence test since it touches the environment and CWD (load_cwd_dotenv reads ".env" from CWD — I should chdir to a temp dir for reliability).
+
+For the precedence test: process env > .env. I'll set the env var, create a temp dir with .env containing different value, chdir there, then call resolve_api_key_env and verify the process env wins. Then remove env var and verify .env value is returned.
+
+Note `serial_test::serial` — the whole module uses `serial` for env-touching tests, so marking mine `#[serial]` is consistent. But does it use `serial` for CWD changes? The existing tests at 2074, 2092 etc. use current_dir without chdir. Changing CWD in a test could affect parallel tests, but with `#[serial]` it's serialized against other `#[serial]` tests in this module... actually serial_test's `serial` attribute serializes against OTHER tests marked `serial` in the same crate? Let me recall: `#[serial]` (no key) means tests are serialized with respect to each other — all tests with `#[serial]` share a single lock. Yes.
+
+So I'll mark the CWD-changing test `#[serial]`.
+
+Let me write the tests:
+
+```rust
+#[test]
+fn test_parse_dotenv_basic() {
+    let content = "\
+# comment line
+FOO=bar
+export BAZ=qux
+  TRIMMED =  spaced value  
+EMPTY=
+QUOTED='single quotes'
+DQ=\"double quotes\"
+no_equals_here
+";
+    let map = parse_dotenv(content);
+    assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
+    assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
+    assert_eq!(map.get("TRIMMED").map(String::as_str), Some("spaced value"));
+    assert_eq!(map.get("EMPTY").map(String::as_str), Some(""));
+    assert_eq!(map.get("QUOTED").map(String::as_str), Some("single quotes"));
+    assert_eq!(map.get("DQ").map(String::as_str), Some("double quotes"));
+    assert!(!map.contains_key("no_equals_here"));
+    assert!(!map.contains_key("comment"));
+}
+
+#[test]
+fn test_parse_dotenv_duplicate_last_wins() {
+    let map = parse_dotenv("KEY=first\nKEY=second\n");
+    assert_eq!(map.get("KEY").map(String::as_str), Some("second"));
+}
+
+#[test]
+fn test_parse_dotenv_inline_hash_not_stripped() {
+    // Trailing "# comments" are part of the value
+    let map = parse_dotenv("KEY=value#notacomment\n");
+    assert_eq!(map.get("KEY").map(String::as_str), Some("value#notacomment"));
+}
+
+#[test]
+#[serial]
+fn test_resolve_api_key_env_precedence() {
+    // start clean
+    std::env::remove_var("arc_TEST_DOTENV_KEY");
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(".env"), "arc_TEST_DOTENV_KEY=from-dotenv\n").unwrap();
+
+    // Save and switch CWD
+    let orig_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+
+    // 1. No env var → dotenv value
+    assert_eq!(
+        resolve_api_key_env("arc_TEST_DOTENV_KEY").as_deref(),
+        Some("from-dotenv")
+    );
+
+    // 2. Env var set → process env wins
+    std::env::set_var("arc_TEST_DOTENV_KEY", "from-env");
+    assert_eq!(
+        resolve_api_key_env("arc_TEST_DOTENV_KEY").as_deref(),
+        Some("from-env")
+    );
+
+    // 3. Env var empty string → dotenv value used (empty env treated as unset)
+    std::env::set_var("arc_TEST_DOTENV_KEY", "");
+    assert_eq!(
+        resolve_api_key_env("arc_TEST_DOTENV_KEY").as_deref(),
+        Some("from-dotenv")
+    );
+
+    // restore
+    std::env::remove_var("arc_TEST_DOTENV_KEY");
+    std::env::set_current_dir(orig_cwd).unwrap();
+}
+```
+
+Wait — check remove_var is available: `std::env::remove_var` — stable since 1.0, fine.
+
+Also should test the quoted value with spaces, and `export` with quotes. Good enough.
+
+Note: in `parse_dotenv`, for the DQ line `DQ="double quotes"` — first and last bytes are `"`, so stripping works.
+
+One edge: `EMPTY=` → value is "" (len 0), no strip, insert "". Good.
+
+Also for the inline `#` test — `KEY=value#notacomment` — first byte is not quote, so the whole value kept. Good, matches doc comment (inline comments NOT stripped).
+
+Also add a test that load_cwd_dotenv with missing file returns empty map — that's simple and doesn't chdir. Actually the missing-file case: CWD might have .env in test env? Repo root has no .env. But tests run from repo root. Fine, but to be safe use tempdir chdir. I'll fold that into the precedence test — actually the precedence test already proves reading from CWD .env. A separate small test for parse_dotenv empty/comment-only:
+
+```rust
+#[test]
+fn test_parse_dotenv_blank_and_comments_only() {
+    let map = parse_dotenv("\n# only a comment\n   \n");
+    assert!(map.is_empty());
+}
+```
+
+Now docs. Add to quick-start.md after the API key section. There's a natural spot after line 14 (the --api-key block) or after the "First time?" note. I'll add a short paragraph:
+
+```markdown
+> **`.env` files:** arc also reads provider API keys from a `.env` file in the
+> current directory when the corresponding environment variable is not set
+> (e.g. `ANTHROPIC_API_KEY=sk-ant-...`). The process environment always wins
+> over `.env`, and only the current directory is checked — no upward walk.
+```
+
+The task says: "one short paragraph: 'arc reads provider API keys from a `.env` file in the current directory when the environment variable is not set.'"
+
+I'll add it to quick-start.md right after the --api-key example, before the "First time?" note. With env var precedence note matching the task wording.
+
+Let me add the code now.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The implementation exists; I need to add (2) unit tests and (3) a docs paragraph. Let me add the tests at the end of the test module
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/cli.rs (7 → 95 lines)
+            let config2 = parse_args(&args2).expect("should parse");
+            assert!(config2.auto_edit);
+            assert!(!config2.auto_approve, "--auto-edit should not imply --yes");
+  +     }
+  + 
+  +     #[test]
+  +     fn test_parse_dotenv_basic() {
+  +         // comments, optional `export ` prefix, whitespace trimming,
+  +         // and unquoted/single-quoted/double-quoted values
+  +         let content = "\
+  + # a full-line comment
+  + FOO=bar
+  + export BAZ=qux
+  +   TRIMMED =  spaced value  
+  + EMPTY=
+  + QUOTED='single quotes'
+  + DQ=\"double quotes\"
+  + also_export = value
+  + no_equals_here
+  + ";
+  ... (73 more lines)
+ ✓ (1ms)
+            let config2 = parse_args(&args2).expect("should parse");
+            assert!(config2.auto_edit);
+            assert!(!config2.auto_approve, "--auto-edit should not imply --yes");
+  +     }
+  + 
+  +     #[test]
+  +     fn test_parse_dotenv_basic() {
+  +         // comments, optional `export ` prefix, whitespace trimming,
+  ... (13 more lines)
+
+Now the docs paragraph in quick-start.md (the most natural spot, right after the API
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/getting-started/quick-start.md (8 → 17 lines)
+    > environment variable first or press Ctrl+C to cancel. Re-running setup over
+    > an existing config backs it up to `.arc.toml.bak` and preserves any settings
+    > the wizard doesn't manage (e.g. `auto_watch`).
+  + >
+  + > **`.env` support:** arc also reads provider API keys from a `.env` file in
+  + > the current directory when the environment variable is not set. This works
+  + > in any directory that keeps secrets in a `.env` file (the standard for a
+  + > decade). Precedence is process environment > `.env` file — if
+  + > `ANTHROPIC_API_KEY` (or the key for your configured provider) is set in the
+  + > shell, it wins. If a `.env` `.env` in your CWD sets the key. Keys are parsed
+  + > as `KEY=value` lines; `#` comments and an optional `export ` prefix are
+  + > supported.
+ ✓ (0ms)
+    > environment variable first or press Ctrl+C to cancel. Re-running setup over
+    > an existing config backs it up to `.arc.toml.bak` and preserves any settings
+    > the wizard doesn't manage (e.g. `auto_watch`).
+  + >
+  + > **`.env` support:** arc also reads provider API keys from a `.env` file in
+  + > the current directory when the environment variable is not set. This works
+  + > in any directory that keeps secrets in a `.env` file (the standard for a
+  + > decade). Precedence is process environment > `.env` file — if
+  ... (4 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check if the two docs files are actually part of the markdown book — the task mentioned `docs/src/getting-started/quick-start.md` or `docs/src/configuration/models.md`. Wait, quick-start.md is at `docs/src/getting-started/quick-start.md`? Actually the file listed in project files is `docs/src/getting-started/quick-start.md` — yes it exists. I edited that one.
+
+Let me first run fmt, then build/test the new tests. Also I should double-check whether quick-start.md has `getting-started` directory — yes per project files.
+
+Let me check the wording I wrote — "If a `.env` `.env` in your CWD sets the key." — that's a typo! Let me fix it.
+────────────────────────────────────────────────────────────────────────────────
+I made a typo in the docs ("If a .env .env in your CWD"). Let me fix it
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/getting-started/quick-start.md (8 → 8 lines)
+    > in any directory that keeps secrets in a `.env` file (the standard for a
+    > decade). Precedence is process environment > `.env` file — if
+    > `ANTHROPIC_API_KEY` (or the key for your configured provider) is set in the
+  - > shell, it wins. If a `.env` `.env` in your CWD sets the key. Keys are parsed
+  - > as `KEY=value` lines; `#` comments and an optional `export ` prefix are
+  - > supported.
+  + > shell, it wins; otherwise a `KEY=value` entry in `.env` in your CWD is used.
+  + > Keys are parsed as `KEY=value` lines; `#` comments and an optional `export `
+  + > prefix are supported.
+ ✓ (0ms)
+    > in any directory that keeps secrets in a `.env` file (the standard for a
+    > decade). Precedence is process environment > `.env` file — if
+    > `ANTHROPIC_API_KEY` (or the key for your configured provider) is set in the
+  - > shell, it wins. If a `.env` `.env` in your CWD sets the key. Keys are parsed
+  - > as `KEY=value` lines; `#` comments and an optional `export ` prefix are
+  - > supported.
+  + > shell, it wins; otherwise a `KEY=value` entry in `.env` in your CWD is used.
+  + > Keys are parsed as `KEY=value` lines; `#` comments and an optional `export `
+  + > prefix are supported.
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me also consider — the task said "Update docs if behavior changes: quick-start.md or models.md gets one short paragraph". I've added a paragraph to quick-start.md. Good.
+
+Let me also double-check the models.md to see if there's an even more appropriate spot, but quick-start is fine per the task (one short paragraph in either).
+
+Now run fmt, clippy, build, test.
+────────────────────────────────────────────────────────────────────────────────
+Now run the verification suite
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (8.6s)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -2 && carg… ✓ (51.2s)
+
+All green. Let me verify the new tests actually ran, plus do the manual smoke check
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test parse_dotenv resolve_ap… ✓ (9ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test -- parse_dotenv resolve… ✓ (117ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test -- parse_dotenv resolve… ✓ (98ms)
+
+5 tests matched the filter (4 `parse_dotenv` + 1 `resolve_api_key_env`), all passing. Now the manual smoke test with a real
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tmp=$(mktemp -d) && printf 'ANTHRO… ✓ (7ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+`--version` runs clean with the .env key present and env var unset — no missing-key error. But let me also compare: with env var unset and NO .env, does `--version` emit a missing-key error? The evaluator's feedback said "smoke-tested: --version with a dummy key in .env and env var unset runs clean". Let me verify that the .env actually mattered — check whether --version emits a missing-key error when .env is absent to confirm the smoke test is meaningful.
+────────────────────────────────────────────────────────────────────────────────
+`--version` runs clean. Let me confirm the smoke test is meaningful — with no .env and env var unset, `--version` should surface the missing-key warning (proving `.env` suppressed it)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tmp=$(mktemp -d) && (cd "$tmp" && … ✓ (7ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tmp=$(mktemp -d) && printf 'GEMINI… ✓ (7ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The `--provider gemini --model` invocation with `--version` — does `--version` short-circuit before key resolution? Let me check how the code surfaces the missing-key error. Let me look at the parse_args flow around line 534-590 to see if missing key produces an error at parse time. Note `--version` likely returns early. Let me check the missing-key path more carefully — run without `--version` but that would start the REPL. Let me instead check that a missing key produces a warning and the .env suppresses it. Let me look at the code at line 534+.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how the missing-key error surfaces at parse time to make the smoke test meaningful
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:530..600 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The key-surfacing happens when a piped/single-shot mode is used (no API key found → `eprintln` + exit 1). For `--version` it doesn't hit that path (version is handled before). Let me test with piped mode (stdin not a terminal) and no key, to see the error appears without .env but not with .env.
+────────────────────────────────────────────────────────────────────────────────
+The error surfaces in piped mode (stdin not a terminal + no key). Let me verify the smoke test that way — it should error without .env but run clean with it
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tmp=$(mktemp -d) && (cd "$tmp" && … ✓ (220ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The smoke test confirms the behavior:
+- Without `.env` and env unset: "error: No API key found." exit=1
+- With `.env` containing dummy key: proceeds to prompt mode (exit 101 is just the API call failing because dummy key, but parse-time no missing-key error — which is what the task asked).
+
+All four verification items are done:
+1. `cargo build && cargo test` green ✓
+2. Smoke: `.env` with dummy key, env unset → no missing-key error ✓ (proceeds past parse time)
+
+The task deliverables:
+1. Dotenv loading — done (in prior commit)
+2. Unit tests — added ✓
+3. Docs — added ✓
+
+Let me run the full verification once more (fmt check was done, clippy done, build done, test done). Let me do a final git diff review and confirm everything is in order.
+────────────────────────────────────────────────────────────────────────────────
+The smoke test is now meaningful: without .env, piped mode prints `error: No API key found.` and exits 1; with `.env` containing a dummy key, it passes parse time and proceeds to prompt mode (exit 101 = the dummy key failing at the real API call, which is expected). Let me review the final diff
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff --stat && git status --sh… ✓ (7ms)
+
+All four checks pass and both missing deliverables are now completed:
+
+## Summary
+
+**Missing deliverables (evaluator feedback) — now added:**
+
+1. **Unit tests for the .env parser** (`src/cli.rs` test module, 5 new tests):
+   • `test_parse_dotenv_basic` — comments, optional export  prefix, whitespace trimming, unquoted/single-quoted/double-quoted values, blank-line skipping
+   • `test_parse_dotenv_blank_and_comments_only` — empty map for comment-only files
+   • `test_parse_dotenv_duplicate_last_wins` — later keys override earlier
+   • `test_parse_dotenv_inline_hash_kept_in_value — inline #` preserved (per the parser's documented contract)
+   • `test_resolve_api_key_env_precedence` — #[serial], uses `tempdir`: env var unset → .env used; env var set → process env wins; empty env var → falls through to `.env`
+
+2. **Docs paragraph** (`docs/src/getting-started/quick-start.md`): added a .env support note — arc reads provider API keys from a `.env` in the CWD when the env var is unset, with precedence process env > .env, and mentions the KEY=value / comments / export  syntax.
+
+Verification:
+• cargo fmt — clean
+• `cargo clippy --all-targets -- -D warnings` — clean
+• `cargo build` — clean
+• `cargo test` — 88 passed, 0 failed (5 new dotenv tests among them)
+• Smoke test: in a temp dir with `ANTHROPIC_API_KEY=dummy in .env` and env var unset, piped mode no longer emits `error: No API key found.` at parse time (proceeds to prompt instead of exiting 1); the same invocation without .env still exits 1 with the key-missing error, confirming the `.env` path is what suppresses it.
+
+The implementation itself (parser, CWD-only lookup, precedence in `resolve_api_key_env`, and wiring into the provider key resolution in `parse_args`) was already committed and untouched.
+
+

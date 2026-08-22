@@ -1,0 +1,656 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. The evaluator says the implementation is missing - only the diagnostic half was done. I need to:
+
+1. Read `auto_validate_by_replay` in src/commands_risk.rs and the snapshot/validation functions in src/commands_risk_snapshots.rs
+2. Diagnose why 88 snapshots yield only 2 validation events
+3. Fix the gate
+4. Add a unit test
+5. Run cargo fmt && cargo clippy && cargo build && cargo test
+
+Let me first look at the current state of the repo and the relevant files.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -5  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l .arc/risk_snapshots.jsonl .a… ✓ (3ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 689ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the relevant code. Start with `auto_validate_by_replay` in src/commands_risk.rs and the snapshot/validation functions in src/commands_risk_snapshots.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay\|… ✓ (4ms)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay\|… ✓ (4ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_validate_by_replay"… ✓ (5ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2400..2650 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I need to see `replay_validate_core` and the span selection logic. Let me look at the code around lines 2300-2430.
+────────────────────────────────────────────────────────────────────────────────
+Now let me see the core function `replay_validate_core` (before
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2220..2400 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the core mechanism. Let me look at the flow:
+
+1. `replay_validate_last_snapshot()` loads the **most recent snapshot** (`.last()`), checks if there are commits since that snapshot's git_hash, and validates.
+2. The dedup: `last_validation_association` checks if the same (from, to) pair is already recorded.
+
+Key insight: The task says the `arc risk snapshot` command is supposed to do BOTH: write a new snapshot AND run `replay_validate_last_snapshot()` of the *prior* snapshot. Let me check how `arc risk snapshot` (dispatch_sub / handle_risk) invokes this.
+
+Let me look at the `handle_risk` function and the snapshot subcommand path.
+────────────────────────────────────────────────────────────────────────────────
+Now let me see how `arc risk snapshot` triggers validation, and look at the dispatch path
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "handle_risk_snapshot\|fn … ✓ (4ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1364..1494 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the architecture. The flow is:
+1. `handle_risk_snapshot()` calls `replay_validate_last_snapshot()` which replays the prior snapshot against commits since its git_hash.
+2. `replay_validate_last_snapshot()` does `git log {hash}..HEAD --name-only --oneline`.
+3. `replay_validate_core` computes hits/surprises.
+
+Key point: `git log {hash}..HEAD` requires the snapshot's hash to be an **ancestor of HEAD**. If the repo does force-pushes (rewriting history), the old hashes become unreachable → `git log {oldhash}..HEAD` returns nothing useful... wait, actually `git log <unreachable-hash>..HEAD` would just show all commits from HEAD back to the merge base? No — `<hash>..HEAD` means "commits reachable from HEAD but not from hash". If hash is unreachable from HEAD (not an ancestor), then... `git log A..B` = commits in B not in A. If A is not an ancestor of B, it just excludes commits reachable from A. If A is completely unrelated, it may show a superset. Actually the key issue: if the snapshot hash is not an ancestor of HEAD, then `git log hash..HEAD` might still succeed but show commits since the merge-base. But more importantly — we need the snapshot hash to be an ancestor for the span to be sound.
+
+Let me check the actual reachability. Let me check how many of the 88 snapshot hashes are actually reachable from HEAD.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the actual data — how many of the 88 snapshot hashes are reach
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (17 lines) ✓ (167ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (25 lines) ✓ (164ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The head -50 truncated the reachable count. Let me get the full count without truncation.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (14 lines) ✓ (162ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So of 88 snapshots, only 11 snapshots have reachable hashes (days 171-174), and the rest are unreachable (force-pushed away). This confirms hypothesis (a): the span-selection gate requires the prior snapshot's git hash to be an ancestor of HEAD, and force-pushes make most historical hashes unreachable → the validation only runs for the last few snapshots.
+
+Now, wait — the real issue is deeper. `replay_validate_last_snapshot` only validates the *last* snapshot. So each time `arc risk snapshot` runs, it validates the previous snapshot against commits since its hash. Let me trace through:
+
+- Snapshot at day 172 `c96395b` validated against `ff6b971` (2nd validation event: `git_hash_from: c96395b, git_hash_to: ff6b971`). 
+- Snapshot at day 171 `d76b695` validated against `c96395b` (1st validation event).
+
+So actually only 2 validation events were recorded. Why? Because validation only happens for the snapshot *immediately prior* to each new snapshot, and only if:
+1. The prior snapshot's hash is reachable (ancestor of HEAD)
+2. There are commits since the prior snapshot
+3. When hits or surprises exist (i.e., something broke), record.
+
+But the key insight: why only 2 events despite many snapshots?
+
+Let me look at the actual dates. Snapshots on days 134-170 are unreachable (force-pushed). Days 171-174: let me check which snapshots are reachable:
+
+reachable days: [171, 172, 173, 174]
+
+So 11 reachable snapshots on days 171-174. Let me count: from the last-6 printout, days 171-174 have snapshots: 171 (x3: a6f414d, ed086b1, d76b695), 172 (x3: c96395b, ff6b971, ba1c380), 173 (x3: c5597b5, 1ac258f, 709cc09), 174 (x2: 3f99fda, 467588b). Wait but there may be more. Let me count precisely.
+
+Actually there were 11 reachable. But only 2 validation events. Why?
+
+The flow: when `arc risk snapshot` runs, it validates the *last* snapshot in the file. So:
+- When snapshot `c96395b` was written (day 172 09:20), prior last was `d76b695` (day 171). It validated `d76b695...HEAD` → wrote event 1 (git_hash_from d76b695, git_hash_to c96395b).
+- When snapshot `ff6b971` was written (day 172 17:15), prior last was `c96395b`. Validated `c96395b...HEAD` → wrote event 2 (git_hash_from c96395b, git_hash_to ff6b971).
+- When snapshot `ba1c380` was written (day 172), prior last was `ff6b971`. Validated `ff6b971...HEAD`. But no event recorded! Why? Either no commits since ff6b971 (same HEAD at snapshot time — snapshots can be taken at the same git hash multiple times), or the dedup (already recorded: `from == last.git_hash && to == head_hash`) tripped, or no hits/surprises.
+
+Actually wait - `ff6b971` was the hash at 17:15 day 172. Let me check whether there were commits between ff6b971 and ba1c380's HEAD. Since ba1c380 has git_hash=ba1c380, that means at the time of that snapshot HEAD was ba1c380. So `git log ff6b971..ba1c380` — try that.
+
+Let me check commit counts between consecutive reachable snapshot hashes and whether `git log --name-only` shows anything (i.e., commits reachable from HEAD but not from the snapshot hash).
+
+Actually the important thing: maybe multiple snapshots were taken at the same git hash (i.e., `git log <hash>..HEAD` empty → return None → no event). The extend: sessions per day ~3, but snapshots can share HEAD because the evolve loop commits then snapshots... Actually each session snapshot happens at different commits.
+
+Let me check empirically what happened for each consecutive reachable pair.
+────────────────────────────────────────────────────────────────────────────────
+Only 11 of 88 snapshot hashes are reachable — force-pushes wiped most history, confirming hypothesis (a). Now let me trace why only 2 events were recorded among the reachable ones
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (23 lines) ✓ (179ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the whole picture. The `replay_validate_core` only ever validates the **last** snapshot in the file (`snapshots.last()`). So on any given `arc risk snapshot` call, only the prior snapshot is validated against commits since its hash.
+
+The validation events recorded: d76b695 → c96395b (day 171) and c96395b → ff6b971 (day 172). Wait, but the reachable chain has more pairs: a6f414d → ed086b1, ed086b1 → d76b695, d76b695 → c96395b, c96395b → ff6b971, ff6b971 → ba1c380, ...
+
+So why only 2 events? Let's analyze `replay_validate_core`:
+1. It validates the LAST snapshot in the file only.
+2. At the time `arc risk snapshot` ran (day 172, session with hash c96395b), prior snapshot was d76b695. Validating d76b695 → HEAD (c96395b) recorded event 1.
+3. Next snapshot at ff6b971: prior snapshot is c96395b, validated c96395b → ff6b971, recorded event 2.
+4. Next snapshot should've validated ff6b971 → ba1c380... but that didn't get recorded.
+
+Hmm wait. Why did validation stop after ff6b971 → ba1c380? Let me check what happened. The validation requires `!hits.is_empty() || !surprises.is_empty()` — i.e., something must have broken. If no predicted files broke and no surprises either, no event is recorded.
+
+Look at the recorded events:
+- Event 1: `hits:["src/commands_risk.rs"]`, surprises include a bunch. accuracy 10%.
+- Event 2: hits + scored_broke=3.
+
+So event recording only happens when there ARE hits/surprises. If between ff6b971 and ba1c380 the commits touched no scored files (e.g., only DAY_COUNT/journal/CLAUDE.md etc. non-source files), then classify_broke_files filters to scored files → broke_files empty → hits empty → surprises empty → no event recorded.
+
+Let me check the commits between ff6b971 and ba1c380 to see if they touched source files.
+────────────────────────────────────────────────────────────────────────────────
+Now I see the pattern. Let me check why recording stopped after the second event — what files changed in subsequent
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && for pair in "f… (5 lines) ✓ (9ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand what `classify_broke_files` does, and how the `predicted` set works. The key question: why did validation only fire 2 times, but there were more reachable snapshots.
+
+Wait — let me re-read the flow. `handle_risk_snapshot` (which evolve.sh calls via `arc risk snapshot`) does:
+1. `replay_validate_last_snapshot()` — replays the *currently last* snapshot against commits since its hash (up to HEAD).
+2. Then writes the *new* snapshot.
+
+So each time `arc risk snapshot` runs, it validates the *previous* snapshot against commits up to the current HEAD. The validation is recorded IF:
+- `git log {last.git_hash}..HEAD --name-only` is non-empty (commits since the snapshot)
+- there are hits or surprises (predicted files that broke OR files that broke that weren't predicted)
+- dedup: not already recorded for (from=last.git_hash, to=head_hash)
+
+The two real validation events:
+- d76b695 (day 171) -> c96395b (day 172): hit src/commands_risk.rs
+- c96395b (day 172) -> ff6b971 (day 172): hit src/commands_risk.rs, src/commands_risk_snapshots.rs
+
+Then after that... snapshot c96395b was recorded at day 172 09:20, ff6b971 at 17:15. Next snapshot ba1c380 recorded day 172 01:45 (next morning). At that point, replay validated ff6b971..HEAD. HEAD was presumably ba1c380 or close. But the validation for ff6b971 -> ba1c380 wasn't recorded.
+
+Wait, actually let me think about the timeline:
+- Day 172 09:20: snapshot c96395b recorded. Before writing, replay validated prior snapshot d76b695..HEAD (HEAD = c96395b). Validation event 1 recorded: d76b695 -> c96395b.
+- Day 172 17:15: snapshot ff6b971 recorded. Replay validated c96395b..HEAD (HEAD = ff6b971). Validation event 2 recorded.
+- Day 172(bumper) 01:45: snapshot ba1c380 recorded. Replay validated ff6b971..HEAD (HEAD = ba1c380). Why wasn't a validation event recorded?
+
+The commits ff6b971..ba1c380 touched: CLAUDE_CODE_GAP.md, journals/JOURNAL.md, src/commands_risk_accuracy.rs. 
+
+The predicted list for snapshot ff6b971 — the top 10 risk files. Was src/commands_risk_accuracy.rs in the predicted top-10? Let me check. If it wasn't, then those 3 changed files would be "surprises" only if they're in the scored population (`all_ranked`). classify_broke_files → compute_validation filters surprises to scored files. Let me look at compute_validation.
+
+Actually, looking at the first validation event: surprises include `.arc/risk_snapshots.jsonl`, `.skill_evolve_counter`, CLAUDE.md, DAY_COUNT, journals/JOURNAL.md — those are NOT scored source files, yet they appear as surprises. Hmm, so surprises include non-scored files? Let me look at compute_validation and classify_broke_files.
+
+Actually wait — in the first event, surprises: [".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "CLAUDE.md", "DAY_COUNT", "dd691e6 Day 172 (08:42): Close the risk-validation cold-start...", "fd51812 Day 172 (01:28): session wrap-up", "journals/JOURNAL.md"].
+
+Interesting — the surprises include git log lines like "22f857b Day 172: bump skill-evolve counter (2)" — those look like *commit message lines* from the git log, not file names. So `parse_git_log_name_only` is parsing the `git log --oneline --name-only` output, and the commit subject lines get included as "files". That's a parsing artifact. Let me look at parse_git_log_name_only and classify_broke_files.
+
+Actually wait, that's important: `parse_git_log_name_only` is probably splitting on whitespace or something. If commit message lines (with spaces) are treated as file entries, that would explain why the commits "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" appears as a "surprise" file — it's a commit subject line.
+
+Hmm, but the second event's surprises only included "src/commands_risk_accuracy.rs" — and no garbage. Let me look at the actual function.
+
+Let me look at parse_git_log_name_only and classify_broke_files carefully — this is the key to understanding measurement accuracy, and possibly why the count is low.
+
+Also — key deduction: the task is asking WHY only 2 validation events exist. My measurement shows:
+1. 77 of 88 snapshot hashes are unreachable (force-pushed away) → their spans can't be validated. This is cause (a).
+2. Even among the 11 reachable, only 2 validation events were recorded.
+
+For #2, let me examine: for the span ff6b971 → ba1c380, the changed files were CLAUDE_CODE_GAP.md, journals/JOURNAL.md, src/commands_risk_accuracy.rs. If none of these were in the predicted top-10 AND none were scored files... Actually wait, surprises ARE recorded for non-scored files in event 1 (CLAUDE.md etc). Hmm, but that has the garbage parsing issue.
+
+Let me think about what make a validation event record:
+```rust
+if !hits.is_empty() || !surprises.is_empty() {
+```
+So we need at least one hit or surprise. Hits = predicted files that broke. Surprises = files that broke but weren't predicted (filtered to scored files by compute_validation per the comment).
+
+So for ff6b971 → ba1c380: the changed files were CLAUDE_CODE_GAP.md, journals/JOURNAL.md, src/commands_risk_accuracy.rs. If src/commands_risk_accuracy.rs was not in ff6b971's predicted top-10, and the .md files are not scored files, then surprises = [] (only src/commands_risk_accuracy.rs is scored, and it was a surprise if not predicted → wait it WOULD be a surprise if it's scored).
+
+Hmm wait, "surprises are already filtered to scored files by compute_validation". So src/commands_risk_accuracy.rs IS a scored file (it's in src/). If it wasn't predicted, it'd be a surprise → the event would be recorded. But event 2 (c96395b → ff6b971) surprised src/commands_risk_accuracy.rs too... Let me check what ff6b971 predicted.
+
+Let me look at the actual predicted lists in the snapshot JSON and check whether these files broke.
+────────────────────────────────────────────────────────────────────────────────
+Let me examine the snapshot predictions and the parsing/classification functions to understand why recording stopped
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (12 lines) ✓ (19ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Hmm, the predicted field isn't a simple list — let me look at the snapshot format.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (10 lines) ✓ (20ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+Let me examine the snapshot's predicted field and the `parse_all_snapshots` function
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (10 lines) ✓ (19ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_all_snapshots\|f… ✓ (3ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:150..280 ✓ (0ms)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:430..550 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the core flow. Let me look at `classify_broke_files` and `compute_validation` to understand exactly what breaks recording:
+
+The key insight: `replay_validate_core` only records a validation event when `!hits.is_empty() || !surprises.is_empty()`. But look at the snapshots — they only have `top_10` with paths (no "predicted" field). `parse_all_snapshots` reads `predicted` from `val["top_10"]`.
+
+Now `classify_broke_files` and `compute_validation` — let me look at these. The broke files are filtered to "src/" paths presumably. When a snapshot's predicted files don't include files that broke (e.g. `journals/JOURNAL.md` or non-src files), hits could be empty. But surprises would include any src file that broke.
+
+Wait — for `ff6b971 -> ba1c380`: files changed were `CLAUDE_CODE_GAP.md`, `journals/JOURNAL.md`, `src/commands_risk_accuracy.rs`. `commands_risk_accuracy.rs` IS a src file and it's in ff6b971's top_10 (score 0.36). So it should be a HIT. Why wasn't it recorded?
+
+Let me check the dedup logic:
+```rust
+let already = last_validation_association(validation_path)
+    .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+```
+
+Hmm, in `replay_validate_core`, the dedup compares `from == last.git_hash && to == head_hash`. But the association recorded is `(last.git_hash, head_hash)`. That should be fine.
+
+Wait, but let me think about the actual sequence. The validation events that exist:
+- day 171: d76b695 -> c96395b
+- day 172: c96395b -> ff6b971
+
+The snapshots in order (reachable): a6f414d (171), ed086b1 (171), d76b695 (171), c96395b (172), ff6b971 (172), ba1c380 (172), c5597b5 (173), 1ac258f (173), 709cc09 (173), 3f99fda (174), 467588b (174).
+
+The `replay_validate_last_snapshot` in `handle_risk_snapshot` replays the LAST snapshot against commits since its hash. So when the snapshot at c96395b was taken (day 172 09:20), it first replayed d76b695 (the prior last) against commits since d76b695 → recorded d76b695 -> c96395b. Wait, but the timing: the snapshot file at the time had d76b695 as last. Then replay validates d76b695..HEAD (where HEAD includes c96395b's commit since HEAD would be the current commit of that session). Hmm — git_hash_to is recorded as HEAD's short hash at the time of validation, which would be the commit of the current session (c96395b). So event 1 = d76b695 -> c96395b. ✓.
+
+Then when ff6b971 snapshot was taken, replay validated c96395b (last at the time) .. HEAD (which is ff6b971's commit). Recorded c96395b -> ff6b971. ✓.
+
+Now, when ba1c380 was taken, replay validated ff6b971 .. HEAD(ba1c380). Files changed in ff6b971..ba1c380: CLAUDE_CODE_GAP.md, journals/JOURNAL.md, src/commands_risk_accuracy.rs. 
+
+Now here's the thing: `replay_validate_last_snapshot` calls git log `{last.git_hash}..HEAD` where HEAD is the CURRENT head at the time. But wait — the snapshot is written AFTER the replay. So at snapshot-take time for ba1c380, HEAD == ba1c380's commit. And ff6b971..ba1c380 = 4 commits. That should be non-empty and include src/commands_risk_accuracy.rs which was predicted by ff6b971 → should be a hit → event should have been recorded!
+
+Hmm, unless... `classify_broke_files` filters. Let me look.
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1860..1980 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. Let me analyze the flow:
+
+**The key insight**: `replay_validate_last_snapshot` (the function called from `handle_risk_snapshot` — which `arc risk snapshot` in evolve.sh calls) validates **only the last snapshot** against commits since its hash. When evolve.sh runs `arc risk snapshot`:
+
+1. Loads the most recent snapshot (e.g., `c96395b` at timestamp T1)
+2. Runs `git log c96395b..HEAD --name-only --oneline`
+3. If commits exist and there are hits/surprises, records validation.
+
+But here's the thing — the validation data shows `d76b695 -> c96395b` and `c96395b -> ff6b971` were recorded. That means those two were validated. But subsequent snapshots (`ff6b971 -> ba1c380`, `ba1c380 -> c5597b5`, etc.) were NOT validated despite commits existing between them and predicted files like `src/commands_risk_accuracy.rs` changing in those spans.
+
+Wait — but sections show `src/commands_risk_accuracy.rs` changed in `ff6b971 -> ba1c380` and `ba1c380 -> c5597b5` spans. `commands_risk_accuracy.rs` is in the top_10 predictions of `ff6b971` and `ba1c380` snapshots. So why no validation events?
+
+Let me think about the actual flow in evolve.sh:
+
+```bash
+arc risk snapshot
+```
+
+This calls `handle_risk_snapshot()` which:
+1. First calls `replay_validate_last_snapshot()` — validates the last snapshot in the file (which is the snapshot from the PREVIOUS session, since the current session hasn't written a new snapshot yet... wait, no).
+
+Actually wait — each evolve session calls `arc risk snapshot` ONCE per session. Let me check evolve.sh.
+
+Actually let me re-read the CLAUDE.md:
+
+> `arc risk snapshot` (which `scripts/evolve.sh` already calls once per session) BOTH writes the new snapshot AND runs a `replay_validate_last_snapshot()` of the prior snapshot against commits since it (order: validate prior, then record new)
+
+So each session:
+1. `replay_validate_last_snapshot()` validates the prior snapshot (from the previous session) against commits since the prior snapshot's hash.
+2. Then writes the new snapshot with the current HEAD.
+
+Now, the validation dedup: `last_validation_association` returns the `(from, to)` of the LAST validation event. If `from == last.git_hash && to == head_hash`, skip.
+
+So each session:
+- Loads last snapshot (priorsnap with hash H_prev)
+- git log H_prev..HEAD
+- If hits/surprises → check last validation association. If the last event was NOT `(H_prev, HEAD_now)`, record `(H_prev, HEAD_now)`.
+
+So each session one validation event could be recorded per snapshot→HEAD span. Over day 172-174, there are ~10 reachable snapshots, but only 2 validation events got recorded.
+
+The spans with commits: 
+- a6f414d -> ed086b1: 4 commits (day 171)
+- ed086b1 -> d76b695: 6 commits (day 171)
+- d76b695 -> c96395b: 5 commits (day 171-172) ← VALIDATED
+- c96395b -> ff6b971: 5 commits (day 172) ← VALIDATED
+- ff6b971 -> ba1c380: 4 commits (day 172-173) ← NOT
+- ba1c380 -> c5597b5: 5 commits (day 172-173) ← NOT
+- c5597b5 -> 1ac258f: 6 commits (day 173) ← NOT
+- 1ac258f -> 709cc09: 2 commits (day 173) ← NOT
+- 709cc09 -> 3f99fda: 7 commits (day 173-174) ← NOT
+- 3f99fda -> 467588b: 2 commits (day 174) ← NOT
+
+Wait but there's a subtlety: the snapshot file contains ALL snapshots (88 of them), and `replay_validate_last_snapshot` validates only the LAST one. So the sequence of validation depends on WHEN the `arc risk snapshot` command ran relative to when each snapshot was written.
+
+Session timeline:
+1. Session A writes snapshot S1 at hash H1.
+2. Session B runs `arc risk snapshot` → validates S1 against HEAD_B → writes S2 at H2(=HEAD_B).
+3. Session C runs → validates S2 against HEAD_C → writes S3 at H3.
+...
+
+So each session's `arc risk snapshot` validates the most recent snapshot. The dedup means: the last validation association `(H_prev, HEAD_now)` — each session produces a distinct pair, so it should record!
+
+Unless... validation doesn't record when there are no hits AND no surprises. Looking at `replay_validate_core`:
+
+```rust
+let mut recorded = false;
+if !hits.is_empty() || !surprises.is_empty() {
+    let already = last_validation_association(validation_path)
+        .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+    if !already {
+        ...
+        recorded = true;
+    }
+}
+```
+
+So validation events are ONLY recorded when there's at least one hit OR surprise. If the commits between the snapshot and HEAD touched NO scored source files (e.g., only journals/JOURNAL.md, DAY_COUNT, .skill_evolve_counter, docs), then hits and surprises are both empty → no validation event is recorded!
+
+Let me check the commit ranges that were NOT validated:
+- ff6b971 -> ba1c380: files: CLAUDE_CODE_GAP.md, journals/JOURNAL.md, src/commands_risk_accuracy.rs — `src/commands_risk_accuracy.rs` IS a scored file and IS in the top_10 of ff6b971!
+
+Hmm wait — but was it a "fix" or "revert" commit? `classify_broke_files` only counts files from commits whose message contains "fix" or "revert"! So if the commits between ff6b971 and ba1c380 don't have "fix"/"revert" in their messages, no broke files → but surprises would still be... no, surprises come from broke_files too. If no breaks, both hits and surprises empty → no event.
+
+Let me verify what those commits were.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the actual commit messages in the un-validated spans to understand what `classify_broke_files` saw
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && for pair in "f… (5 lines) ✓ (12ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the mechanism. Let me verify by checking the actual classification:
+
+For a validation event to be recorded, `classify_broke_files` must find commits whose messages contain "revert" or "fix". Let's test each span:
+
+1. `ff6b971 -> ba1c380`: commits are "Refresh CLAUDE_CODE_GAP.md...", "Gate the risk-accuracy lift...", "bump skill-evolve counter", "session wrap-up". No "fix"/"revert". → no breakage → no validation recorded.
+2. `ba1c380 -> c5597b5`: "Self-improvement", "skill-evolve: reset counter", "bump", "update day counter", "session wrap-up". No fix/revert. → no validation.
+3. `c5597b5 -> 1ac258f`: "Emit per-file mutation-survival JSON", "Bang-capture keeps...", "Per-signal accuracy breakdown...", "assessment", "bump", "session wrap-up". No fix/revert! → no validation.
+4. `1ac258f -> 709cc09`: "bump", "session wrap-up". → no.
+5. `709cc09 -> 3f99fda`: includes "Fold the mutation-survival sensor into the risk sense organ's file scoring (Task 1, **eval-fix 2**)"! That contains "fix". Files: src/commands_risk.rs etc. But wait — the validation should have fired then. Let me check: the snapshot at 709cc09, commits to 3f99fda: eval-fix 2 commit touches src/commands_risk.rs, c8d6143 touches src/commands_risk.rs. "fix" is in "eval-fix 2" message. So classify_broke_files would find "src/commands_risk.rs" as broke. And the prediction at 709cc09 has src/commands_risk.rs in top_10 → hit → validation should be recorded!
+
+Let me check whether snapshot 709cc09's git_hash is reachable and what happened. Actually wait, snapshot at 709cc09 — when was the next snapshot taken? 3f99fda day 174. But `replay_validate_last_snapshot` runs BEFORE writing the new snapshot, i.e. at the time of writing snapshot 3f99fda, it replays 709cc09 against commits since 709cc09... to HEAD, which is 3f99fda's parent? Let me think.
+
+Actually, replay_validate_last_snapshot runs at the moment `arc risk snapshot` is invoked. At that time HEAD is some commit (e.g. the current working state before the snapshot write). Wait, the flow: evolve.sh calls `arc risk snapshot` once per session — likely at session start or before commits. Hmm.
+
+Only 2 validation events exist: `d76b695 (day 171) -> c96395b (day 172)` and `c96395b (day 172) -> ff6b971 (day 172)`.
+
+Interesting — so the validation events pair snapshot at d76b695 → snapshot c96395b. These were recorded on day 172 (the "cold-start" fix). Both recorded events correspond to spans where there was a fix/revert commit with src/ files.
+
+Now for the subsequent snapshots: no validation recorded. Why? Because `classify_broke_files` requires commit messages to contain "fix" or "revert", AND — importantly — also, the replay's git log uses `{hash}..HEAD` at the time of the snapshot write. 
+
+Wait, but consider: at the moment `arc risk snapshot` is run by evolve.sh... When in the session does evolve.sh run it? Let me check scripts/evolve.sh. Also important: does the span from 709cc09 → 3f99fda contain a "fix" commit? Yes: "Fold the mutation-survival sensor into the risk sense organ's file scoring (Task 1, eval-fix 2)". This touches src/commands_risk.rs which is in 709cc09's top_10. So a validation should have been recorded at day 174 when snapshot 3f99fda was written...
+
+Unless: the eval-fix commits were reverted, OR the git hashes are such that at snapshot-write time the HEAD was before those commits landed... no wait, the snapshot 3f99fda has git_hash 3f99fda which is the commit "Day 174 (08:46): Make the risk report legible..." — the snapshot is written at that commit, and HEAD would be that commit. The log 709cc09..3f99fda includes the eval-fix commits. So validation should have fired...
+
+Hmm, but wait — maybe `run_git` fails in the evolve loop context? Or... Let me check more carefully — maybe the issue is that when the validation event's `last_validation_association` dedup check happens. No, dedup would only block if same (from,to).
+
+Actually, wait. Let me reconsider. Maybe `arc risk snapshot` in evolve.sh is run at a point when there ARE no commits since the last snapshot yet? Let me check evolve.sh.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how evolve.sh invokes `arc risk snapshot`, and examine the actual parse/classify logic with real
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk snapshot\|risk_snaps… ✓ (3ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/scripts/evolve.sh:2075..2115 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `arc risk snapshot` fires every session. The `handle_risk_snapshot` calls `replay_validate_last_snapshot()` first, which:
+1. Loads last snapshot from `.arc/risk_snapshots.jsonl`
+2. Goes `git log {hash}..HEAD --name-only --oneline`
+3. If empty → returns None
+4. Computes validation via `compute_validation`
+5. Records if hits or surprises non-empty (dedup by association)
+
+The two recorded events:
+- day 171: d76b695 → c96395b (hits: ["src/commands_risk.rs"], predicted_count 10)
+- day 172: c96395b → ff6b971 (hits: 2, scored_broke 3)
+
+Wait — the validation event "d76b695 -> c96395b" was recorded at ts day 171's snapshot time... actually let me re-read. The event day is the snapshot's day. The `replay_validate_last_snapshot` validates the PRIOR snapshot against commits since its hash. So when snapshot c96395b was recorded (during a session where HEAD was c96395b), the replay validated prior snapshot d76b695 against commits d76b695..HEAD(=c96395b). The git_hash_from=d76b695, git_hash_to=c96395b.
+
+So the flow: each `arc risk snapshot` run validates the *previous* snapshot against commits since the previous snapshot's hash up to current HEAD.
+
+Now why did it stop? After the second validation event (c96395b → ff6b971), the next snapshot run (when HEAD was ba1c380) would validate ff6b971 against ff6b971..ba1c380. That span contains commits: "Gate the risk-accuracy lift..." and "Refresh CLAUDE_CODE_GAP.md..." etc. The message "Gate the risk-accuracy lift on the dream's ≥5-pair cold-start threshold..." contains "fix"? No. Does any commit in that span contain "fix" or "revert"? 
+
+Commits ff6b971..ba1c380:
+- ba1c380 Day 173 (01:27): Refresh CLAUDE_CODE_GAP.md against the 2026 competitor landscape (Task 2)
+- 459493a Day 173 (01:27): Gate the risk-accuracy lift on the dream's ≥5-pair cold-start threshold and surface milestone progress (Task 1)
+- c844332 Day 172: bump skill-evolve counter (4)
+- 6d2122e Day 172 (16:36): session wrap-up
+
+None contain "fix" or "revert". So broke_files would be empty → hits empty, surprises empty → **no validation event recorded** (the `if !hits.is_empty() || !surprises.is_empty()` gate). That's the key!
+
+Wait, but the second event (c96395b → ff6b971): commits c96395b..ff6b971 — those would include "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" (dd691e6), "fd51812 Day 172 (01:28): session wrap-up", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter". Hmm, none contain "fix" or "revert" either... but the event shows hits: ["src/commands_risk.rs", "src/commands_risk_snapshots.rs"], scored_broke: 3, surprises: ["src/commands_risk_accuracy.rs"]. 
+
+Let me check the actual spans again. Wait, the events list their git_hash_from/git_hash_to. Event 2: from c96395b to ff6b971, hits src/commands_risk.rs + src/commands_risk_snapshots.rs, surprises src/commands_risk_accuracy.rs. So 3 broke files. For that to happen, 3 commits with "fix" or "revert" in message must touch those files between c96395b and ff6b971.
+
+Actually wait — `classify_broke_files` treats any commit with "fix" in the message as breaking. And "eval-fix 2" or "eval fix" would contain "fix". Let me check the log c96395b..ff6b971.
+
+Actually let me just check git log for earlier spans to see which contain "fix".
+────────────────────────────────────────────────────────────────────────────────
+Let me check which spans contain "fix"/"revert" commits (what `classify_broke_files` needs) and reconstruct exactly why recording
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && for pair in "a… (5 lines) ✓ (22ms)
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && for pair in "e… (5 lines) ✓ (9ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the gap. Wait — I need to re-examine. Let me reconsider.
+
+The two recorded validation events:
+1. day 171: `d76b695 -> c96395b` — this was recorded when the session at c96395b ran `arc risk snapshot`. At that time, the latest snapshot was `d76b695` (day 171). It replayed `d76b695..HEAD` (c96395b). Files in the span included commits with "fix" in message: `dd691e6` (Close risk-validation cold-start... Task 1) touching `src/commands_risk.rs`, `c96395b` touching `CLAUDE.md` only. So broke_files = {src/commands_risk.rs}. Predicted (d76b695's top_10) — need to check whether commands_risk.rs was in it. The event recorded hits: ["src/commands_risk.rs"], predicted_count: 10, so yes it was predicted.
+
+2. day 172: `c96395b -> ff6b971`. Snapshot at ff6b971 ran `arc risk snapshot` when latest snapshot was c96395b. The span `c96395b..ff6b971` has "fix" commits dd9de762/ff6b971 touching `src/commands_risk.rs`, `src/commands_risk_accuracy.rs`, `src/commands_risk_snapshots.rs`. So broke_files = {commands_risk.rs, commands_risk_accuracy.rs, commands_risk_snapshots.rs}. Hits: commands_risk.rs, commands_risk_snapshots.rs (2 predicted, 3rd surprise commands_risk_accuracy.rs).
+
+Then snapshot `ff6b971` was recorded (day 172). After that... next `arc risk snapshot` call at ba1c380. The span `ff6b971..ba1c380` — 4 commits, no fix/revert. So `classify_broke_files` = empty → no hits, no surprises → `replay_validate_core` records nothing (only records when hits or surprises non-empty). That's exactly what happened: no event for ff6b971→ba1c380, ba1c380→c5597b5, c5597b5→1ac258f (all have no fix/revert).
+
+Wait — but 1ac258f→709cc09 also no fix/revert. 709cc09→3f99fda has fix commits (c363368, c8d6143 "Fold the mutation-survival sensor... eval-fix"). Hmm, that span SHOULD have produced a validation event when 3f99fda's session ran `arc risk snapshot` with latest snapshot = 709cc09.
+
+Wait let me check: `709cc09 -> 3f99fda` has commits: 3f99fda (Make risk report legible... Task 2), c363368 (eval-fix 2), c8d6143 (Task 1), e2922e4 (assessment), c56ae68 (bump counter 3), 528ee01 (update day counter), 22ccfe5 (session wrap-up). The fix commits c363368 & c8d6143 touch src/commands_risk.rs, src/commands_risk_emerging.rs, src/commands_risk_report.rs, src/commands_risk_snapshots.rs. So broke = those 4. Predicted (709cc09 top_10) — presumably includes commands_risk.rs, commands_risk_snapshots.rs etc. So we'd get hits → event should have been recorded!
+
+But only 2 events exist. So why wasn't a validation event recorded for 709cc09→3f99fda?
+
+Hmm, wait. Maybe the eval-fix commits... Let me think about when the snapshot command ran. The `arc risk snapshot` at the session that produced commit 3f99fda ran BEFORE the wrap-up commit. Let me trace:
+
+Session flow: The `arc risk snapshot` is called near the end of evolve.sh — after task agents, before the wrap-up commit. The HEAD at the moment of `arc risk snapshot`... hmm, let's check the actual sequence. Actually the snapshot command runs at line 2083-2094 which is AFTER the issue response agent and BEFORE "Commit any remaining uncommitted changes (journal, etc.) commit -m session wrap-up".
+
+Wait no. Let me re-read: "Risk-meter feed (#575): record one risk snapshot per session so the prediction meter accumulates ground truth. Runs before the wrap-up commit so the appended .arc/risk_snapshots.jsonl line is swept into that commit".
+
+So the sequence at session end:
+1. `arc risk snapshot` (records snapshot of current HEAD, and validates prior snapshot against commits since its hash)
+2. `git add -A && git commit -m "Day $DAY session wrap-up"` — sweeps the new snapshot line in
+3. update DAY_COUNT commit
+4. bump counter commit
+
+So for the session whose final HEAD ended up being `3f99fda`:
+- At the time `arc risk snapshot` ran, HEAD was... well 3f99fda is the "Make the risk report legible" Task 2 commit. But the wrap-up/session commit for that day came after. Wait — the snapshot hashes: `3f99fda (day 174)` then `467588b (day 174)`. The last recorded snapshot at 467588b (day 174) — that's the "bump skill-evolve counter (4)" commit which is probably the last commit of the day-174 early session (08:46). Wait no — 467588b is "Day 174: bump skill-evolve counter (4)" and HEAD d0b0ff5 is "skill-evolve: reset counter (cycle 2026-08-21T17:05Z)".
+
+Hmm, so snapshots are recorded at various points during the day (multiple sessions/day). Let me look at the timestamps:
+- 3f99fda ts=2026-08-21T10:03:43Z day 174
+- 467588b ts=2026-08-21T16:56:58Z day 174
+
+And the latest HEAD d0b0ff5 (skill-evolve reset counter at 2026-08-21T17:05Z).
+
+Wait, there should be more sessions after 467588b (the d0b0ff5 reset and any task commits). Let me check the log between 467588b and HEAD.
+
+Actually the task says "88 snapshots yield only 2 validation events". The question is why so few. Let me now carefully diagnose the actual causes:
+
+**Cause (a): unreachable hashes.** 77 of 88 snapshot hashes are unreachable (force-push rewrites). This repo regularly force-pushes (`git push -f`) cleaning up history. So `git log <hash>..HEAD` fails or is empty for those. Confirmed: only 11 reachable.
+
+**Cause (b): the only validations that fire are via `replay_validate_last_snapshot` (from the snapshot subcommand), which only validates the LAST snapshot against HEAD.** So it validates ONLY the most recent snapshot at the time the command runs, against the commits since it. The `handle_risk_snapshot` path validates the prior snapshot before writing the new one.
+
+**Cause (c): `classify_broke_files` requires the commit message to contain "fix" or "revert".** Most spans between successive snapshots have NO fix/revert commits, since most session commits are feature commits ("Task N", "bump counter", "wrap-up"). So `broke_files` is empty → `compute_validation` returns no hits/surprises → the code at line 2391 `if !hits.is_empty() || !surprises.is_empty()` skips recording.
+
+So the validation event is only recorded when a snapshot-to-HEAD span happens to contain fix/revert commits. That's a very narrow definition of "broke". It's semantically strict: it only counts actual revert/fix breakage, which is the honest definition of "prediction failed". But it results in very few events because the daily cadence rarely includes fix/revert commits in the span between successive snapshot commands.
+
+Additionally, the biggest issue: because `replay_validate_last_snapshot` only looks at the last snapshot and the code only records when the span includes fix/revert, and then dedups by association: `last_validation_association` compares `(from == last.git_hash && to == head_hash)` — since each snapshot command runs at a new HEAD, the `to` differs each time, so dedup wouldn't block.
+
+Let me reconsider the count. Between d0b0ff5 (HEAD) and the last snapshot 467588b:
+- `git log 467588b..HEAD` — what commits? d0b0ff5 (skill-evolve reset counter). That's the only one? Let me check.
+
+Actually — the current working tree is at d0b0ff5 and the last snapshot 467588b was recorded at 2026-08-21T16:56:58Z — that commit IS 467588b. So `467588b..HEAD` = the d0b0ff5 commit only (skill-evolve reset). Its message contains "reset", no fix/revert → no event.
+
+So what fix can I make that stays sound?
+
+The task says:
+1. Diagnose why only 2 events.
+2. Fix the cause — prefer fixing (a)/(b)/(c) over weakening semantics.
+3. Add/adjust a unit test for the fixed gate.
+
+Let me think about what's actually the dominant cause. 
+
+The strongest, most concrete root cause is **(a)**: 77/88 hashes unreachable → those snapshots can never be validated regardless of any gate. Of the 11 reachable, 10 spans... the 2 validations recorded are spans that contained fix/revert commits. But wait — there were also spans with fix commits that did NOT get recorded (709cc09→3f99fda). Let me verify why that one didn't record.
+
+Let me check the top_10 of 709cc09 to see if the fix-touched files were predicted.
+
+Actually wait — maybe the span 709cc09->3f99fda was validated but produced hits → event recorded. But there are only 2 events total. So it wasn't recorded. Why?
+
+Let me re-examine: when was a snapshot recorded for the session ending at 3f99fda? The snapshot at 467588b (day 174, 16:56) is the LAST snapshot. Snapshots: 3f99fda (10:03), 467588b (16:56). So sessions ~08:46 and ~16:40 on day 174. Between 3f99fda and 467588b there's the span `3f99fda..467588b` = 467588b (bump counter 4), 3ea1069 (session wrap-up). No fix → no event.
+
+When the 16:40 session ran `arc risk snapshot` (recording 467588b), it validated prior snapshot = 3f99fda against commits `3f99fda..HEAD` where HEAD at that moment was... hmm, careful: when is `arc risk snapshot` called relative to commits? It's called AFTER all task commits and the issue response agent, BEFORE the wrap-up commit. So at the time of the call, HEAD included all the task commits of that session (3f99fda task 2, c363368 eval-fix, c8d6143 task 1, etc.) but not yet the wrap-up/bump-counter commits.
+
+So for the session that made 3f99fda... wait no. 3f99fda is itself the last task commit of the early session. The snapshot at 3f99fda was recorded at 10:03 during that session — validating the prior snapshot 709cc09 against commits `709cc09..HEAD` where HEAD = 3f99fda (or some commit in that session's chain).
+
+The span 709cc09..3f99fda DID contain fix commits (c363368, c8d6143 eval-fix). If 709cc09's prediction included those files, a hit would happen and an event recorded. But no event was recorded for it. Why?
+
+Hmm — wait. Maybe the parse of that session's chain failed. Let me look at 709cc09's top_10 and the "fix" commit's files.
+
+c8d6143 "Fold the mutation-survival sensor into the risk sense organ's file scoring (Task 1)" touches: src/commands_risk.rs, src/commands_risk_emerging.rs, src/commands_risk_report.rs, src/commands_risk_snapshots.rs.
+
+709cc09's top_10 would be the risk ranking at its HEAD (day 173 late session). Let me check whether commands_risk.rs etc. were in it.
+
+Actually, I need to look at 709cc09's snapshot. Let me print it. And also check whether the span really lacked a recorded event because... let me also consider `compute_risk_scores` at snapshot time vs the snapshot's stored top_10 — no, the stored top_10 is what's used.
+
+Wait, actually — did the early day-174 session have a snapshot at 3f99fda at all? Yes, ts=2026-08-21T10:03:43Z. And commits of that session: 3f99fda (10:03:43?). Hmm, the commit 3f99fda — when was it made? Actually the skill-evolve reset cycle at d0b0ff5 (2026-08-21T17:05Z). Looks like day 174 had two evolve sessions: 08:46 (commits 22ccfe5 wrap-up, 528ee01 counter, c56ae68 counter 3, e2922e4 assessment, c8d6143, c363368, 3f99fda) and 16:40 (3ea1069 wrap-up, 467588b counter 4). Wait, but timestamps: 3f99fda snapshot at 10:03. Hmm.
+
+Let me just check git log timestamps to reconstruct. Actually, let me be more careful — maybe I should just check directly whether the span 709cc09..3f99fda would have recorded, by literally running the logic. But that requires running the binary. Instead I can compute with python.
+
+Actually, simpler: let me check the git log with hashes and dates for the day-174 early session to understand ordering.
+
+Actually, let me reconsider — the exact reason for the second gap (709cc09→3f99fda containing fix commits but not recorded) matters for the fix. Possible reasons:
+1. The `parse_git_log_name_only` parser treats "Day 174 (08:46): assessment" as a commit with one file... wait, "assessment" commit e2922e4 — does it touch session_plan/assessment.md? Possibly. Not relevant.
+2. Dedup: `last_validation_association` compares `(from == last.git_hash && to == head_hash)`. If the same span was already recorded... no.
+3. `git log 709cc09..HEAD` at the time of the snapshot call — HEAD was maybe NOT 3f99fda. Hmm wait — what if the snapshot at 3f99fda (10:03) was recorded while HEAD was still c8d6143 or c363368 (before 3f99fda Task 2 commit)? Then the span would be `709cc09..c363368` or similar — still containing the fix commits. Should have recorded.
+
+Unless... replay_validate_last_snapshot returned None because `parse_all_snapshots` uses `top_10` — at that session the snapshot 709cc09 existed. `last.predicted` non-empty. git log non-empty. So it would compute. Then `if !hits.is_empty() || !surprises.is_empty()` — if 709cc09 predicted some of {commands_risk.rs, commands_risk_emerging.rs, commands_risk_report.rs, commands_risk_snapshots.rs}, we'd have hits.
+
+Let me check 709cc09's top_10.
+
+Actually maybe 709cc09's snapshot top_10 didn't include those files! The mutation-survival sensor was added in that session (Task 1). Prior to that, commands_risk_emerging.rs / commands_risk_report.rs may not have ranked high. But commands_risk.rs was surely predicted (score 0.73 consistently). If hit = commands_risk.rs only → hits non-empty → event recorded. But there's no event for it!
+
+Unless... the span 709cc09..HEAD at snapshot-record time was EMPTY. Wait — what if the report shows the snapshot 3f99fda was written at 10:03, and the git log 709cc09..3f99fda shows 7 commits. So there were commits. Hmm.
+
+Let me actually check the exact file changes and whether hit would occur, and check if maybe `classify_broke_files` uses `parse_git_log_name_only` which requires specific formatting. The git log command is `git log <hash>..HEAD --name-only --oneline`. With `--oneline --name-only` output format:
+```
+c363368 Day 174 (08:46): Fold the mutation-survival sensor into the risk sense organ's file scoring (Task 1, eval-fix 2)
+src/commands_risk.rs
+
+c8d6143 Day 174 (08:46): ...
+src/commands_risk.rs
+src/commands_risk_emerging.rs
+...
+```
+The parser: each commit = first non-blank line (message) followed by non-blank lines as files, blank separates commits. That works.
+
+OK let me just test empirically — run the actual computation in python to see what events WOULD have been recorded for each reachable span, given the stored top_10s and the git logs.
+
+Actually — wait. Let me reconsider. There may be a subtlety I'm missing: `replay_validate_last_snapshot()` loads `parse_all_snapshots` and takes `.last()`. When multiple snapshots accumulated per session... no, one per session.
+
+Hmm, one more possibility: `git log <hash>..HEAD` where hash is 709cc09 — that works only if 709cc09 is an ancestor. It is reachable (11 reachable). OK.
+
+Let me just reproduce: I'll write a small python script mimicking parse + classify + compute with the real data and see which spans produce events. This will tell me exactly whether 709cc09→3f99fda would have been recorded, and confirm the fix.
+
+Actually hold on — there's the key issue! Look again at `replay_validate_last_snapshot`:
+
+```rust
+let last = snapshots.last()?;
+if last.predicted.is_empty() { return None; }
+let log_output = crate::git::run_git(&["log", &format!("{}..HEAD", last.git_hash), "--name-only", "--oneline"]).ok()?;
+```
+
+And then in `replay_validate_core`, `last = snapshots.last()` again. This validates the LAST snapshot only, against HEAD. But when `handle_risk_snapshot` runs, the "prior snapshot" it validates IS the current last one (since the new one is written after). That's correct one-event-per-session behavior.
+
+But the KEY point: the event is recorded only when the span HAS fix/revert commits (broke_files non-empty) AND at least one predicted or surprise file. Between consecutive snapshots in normal sessions, most spans have no fix/revert commits. So most sessions produce NO validation event. Over 11 reachable snapshots, only 2 spans had fix/revert + predictable hits → 2 events.
+
+And NOW look at the recent trend — since the cold-start fix (d76b695→c96395b→ff6b971), events stopped because subsequent spans (ff6b971→ba1c380, ba1c380→c5597b5, c5597b5→1ac258f...) contain NO fix/revert commits in the meshes of session commits. So the count is flat at 2.
+
+So the **dominant cause for the ongoing starvation is (c)-ish: the "broke" definition requires fix/revert commit messages**, which are rare in this repo's session-commit pattern (most work is committed as "Task N" without "fix" in the title, even when a file changed and possibly broke).
+
+But wait — is that a "defect"? The semantics of "broke" = files that appeared in revert or fix commits. That's the honest signal — it only records "prediction → actual failure" pairs, avoiding fake associations. Loosening it to "any changed file" would weaken the semantics (a changed file isn't necessarily broken).
+
+Hmm, but the task says: "a validation event must pair a snapshot (prediction) with the actual set of scored files that broke in the commits since it — never invent a fake association." And "Prefer fixing (a)/(b)/(c) over weakening semantics."
+
+So what's fixable without weakening semantics?
+
+**Root cause (a): 77/88 hashes unreachable due to force-pushes.** This is the dominant proportional cause. But can we fix it? We can't resurrect force-pushed commits. We CAN make the validation span-selection more robust: instead of requiring `last.git_hash` to be an ancestor of HEAD (git log <hash>..HEAD silently returns nothing when hash is not an ancestor), we could:
+
+1. **Fall back to the most recent reachable snapshot**: when the last snapshot's hash is unreachable, walk backward through snapshots to find the most recent one whose hash IS an ancestor of HEAD, and validate THAT. This is sound: it still pairs a real snapshot (prediction) with the actual commits since it. This would unlock validation for the reachable snapshot even when newer snapshots were recorded at force-pushed commits.
+
+Wait, but in practice: snapshots are recorded at commits that exist in the repo (they record the current HEAD at snapshot time). The unreachable ones are because later force-pushes rewrote history. So a snapshot hash like `c96395b` (reachable) means the commit still exists; `a6f414d` etc. Force-pushes make old snapshot hashes unreachable — those commits were rewritten. When a snapshot hash is unreachable, `git log <hash>..HEAD` returns an error or empty? Let me check: `git log <unreachable-hash>..HEAD` — if the hash doesn't exist in the object DB, git errors "unknown revision". If the object exists but isn't an ancestor, git log shows ALL commits (since <hash> is not an ancestor... actually it shows commits reachable from HEAD but not from <hash> — for a non-ancestor hash, it's like hash is a separate root → shows effectively the whole HEAD history).
+
+Hmm wait — that's a subtle hazard! If a snapshot's hash is a commit that exists in the object DB but was force-push-orphaned (not an ancestor of HEAD), `git log <hash>..HEAD` shows all of HEAD's history (because <hash> isn't an ancestor, nothing is excluded). That would create a FAKE association: pairing the snapshot's predictions with a huge span of unrelated commits. That's exactly the "invent a fake association" the task warns about!
+
+Let me verify: are the unreachable hashes still in the object DB? `git merge-base --is-ancestor` returned rc != 0 for 77. That means either the object doesn't exist or it's not an ancestor. Let me check if the objects exist: `git cat-file -e <hash>`.
+
+If the objects still exist (orphaned), then `git log <hash>..HEAD` would produce the ENTIRE history (all commits reachable from HEAD). And `classify_broke_files` would find fix/revert commits across the whole history → fake association. The dedup-gate (from==last.git_hash) would prevent re-recording the same from..to pair, but each snapshot call would validate against a DIFFERENT from hash → many fake events!
+
+But the actual count is only 2. So git log with unreachable hashes must be FAILING (empty/error), not returning the whole history. Let me verify what `git log 0f3017f..HEAD --oneline` outputs for an unreachable hash.
+
+So the picture:
+- If unreachable hash doesn't exist in object DB (gc'd), `git log <hash>..HEAD` errors → `.ok()?` returns None → no validation. This matches the count being low.
+- If unreachable hash exists but is orphaned, `git log <hash>..HEAD` returns full history — dangerous.
+
+Let me check both.
+
+Then the **fix**:
+
+**(a) fix — robust span selection**: `replay_validate_last_snapshot` should pick the most recent snapshot whose git_hash is a valid ancestor of HEAD, skipping unreachable ones. This keeps semantics sound (always pairs a real snapshot with the actual commits since it). Given 11 reachable snapshots, the most recent reachable one at each snapshot-call time would be validated → events for those spans.
+
+But wait — would it double-record? Dedup by (from,to) pair. Each snapshot call has a different HEAD... The problem: with 11 reachable snapshots and each session validating the most recent reachable one, we'd record events for spans with fix/revert commits only. Since most spans have no fix/revert, still few events.
+
+**The deeper issue — (c): broke definition too narrow for the cadence.** The `classify_broke_files` only counts fix/revert commits. In this repo's session-cadence, "fix" words appear in eval-fix commits but those are rare (only when a task fails eval). Most sessions: top_10 predictions, then commits saying "Task N", "wrap-up", "counter". So validation starvation is largely EXPECTED if we keep the strict "broke" definition.
+
+What about `auto_validate_after_failure`? That fires on watch failures — but the evolve loop doesn't run watch; it's for interactive use, and it's gated on changed src files matching prediction. Not part of the harness feed.
+
+Hmm, let me look at what `handle_risk_snapshot`'s siblings do. The task explicitly lists candidate causes a/b/c and says "Fix the cause you find" and "Only loosen gates in ways that stay sound... Prefer fixing (a)/(b)/(c) over weakening semantics" and "If the diagnosis turns out to require a multi-file restructure, STOP... leave the fix for a follow-up."
+
+So a sound, surgical fix: 
+1. **(a)**: span selection fallback — instead of only the last snapshot, walk back to the most recent snapshot whose hash is usable (exists and is ancestor of HEAD). This directly addresses the unreachable-hash starvation and is sound. Add a helper `most_recent_reachable_snapshot(snapshots, head_hash)` — but doing the ancestor check requires running git... In the I/O-free core `replay_validate_core` we receive snapshot_content and git_log for a specific hash. The I/O wrapper does git. So the fallback should live in the I/O wrapper `replay_validate_last_snapshot`: iterate snapshots from last to first; for each, run `git merge-base --is-ancestor <hash> HEAD`; if ok, build git_log for that hash; if log non-empty, call core with that snapshot.
+
+Hmm but that changes the shape — `replay_validate_core` internally re-parses and takes `.last()`. Let me restructure minimally: pass the chosen snapshot's hash + content? Simpler: in the wrapper, filter which snapshot to validate and pass content trimmed to that snapshot? That would break parse (needs full content for... actually only uses `.last()`). Actually `replay_validate_core` only uses the last snapshot from the content. And dedup uses last.git_hash. So I can pass a content string consisting of just the chosen snapshot line, and it will treat it as the last. But that's hacky.
+
+Cleaner: make `replay_validate_core` take an explicit `snapshot: &ParsedSnapshot` parameter instead of parsing content. But it's called from two places (repl path via auto_validate_by_replay → replay
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+

@@ -1,0 +1,1074 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to:
+
+1. In `src/commands_risk_snapshots.rs`, add code to the `auto_risk_snapshot` / snapshot write path that also writes an entry to `.arc/risk_meter.json` with fields like `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174, "target_pairs": 5}` — computed from the two existing JSONL files by counting.
+
+2. Surface it: when `arc risk snapshot` runs (the harness path), print a one-line progress note like "risk meter: 2/5 pairs (88 snapshots, 2 validations)".
+
+3. Add a unit test: given fixture snapshot+validation JSONL content, the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots`).
+
+Let me first read the relevant files to understand the existing code.
+  ▶ read src/commands_risk_snapshots.rs  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status… ✓ (6ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 607ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the rest of the file to understand the full context, especially `auto_risk_snapshot`, `parse_validation_events`, `parse_all_snapshots`, and the existing tests.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:96..496 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the rest of the file to understand the full structure, particularly around `handle_risk`, `parse_validation_events`, `parse_all_snapshots`, and `ValidationEvent`.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:194..474 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `handle_risk` in `commands_risk.rs` to find where `arc risk snapshot` is dispatched, so I can add the progress print.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the `handle_risk` function to see where `arc risk snapshot` is dispatched:
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'fn handle_risk|\"snapshot\"|RISK_SUBCOMMANDS' in src/commands_risk.rs ✓ (2ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "snapshot" src/commands_ri… ✓ (3ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1040..1170 ✓ (1ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1360..1440 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the existing real JSONL files to understand the format, and check how pairs are counted. Let me check the real data:
+
+1. `.arc/risk_snapshots.jsonl` — 88 snapshots
+2. `.arc/risk_validations.jsonl` — 2 validations
+
+The task says: "pairs = validations whose hits include at least one scored-broke file, per existing semantics". Let me look at the actual validation events to understand what a "matched pair" looks like. Let me check the real validation file content and the `replay_validate_last_snapshot` function.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat .arc/risk_validations.jsonl &&…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate_last_snap… ✓ (3ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 822ms (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2341..2471 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check the re-exports in `commands_risk.rs` and understand the module structure. Let me look at lines 1-40 of commands_risk.rs, and also check existing code around the validation event parsing / scored files semantics. Let me also examine how the "pairs" concept should be computed.
+
+The task says:
+- pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing.
+
+Wait, let me re-read: "pairs = validations whose hits include at least one scored-broke file, per existing semantics". Hmm, actually the task says pairs = validations whose hits include at least one scored-broke file. Let me think about what that means.
+
+Looking at the validation events:
+1. `{"day":171,"hits":["src/commands_risk.rs"],...}` — hits = predicted files that broke
+2. `{"day":172,"hits":["src/commands_risk.rs","src/commands_risk_snapshots.rs"],"scored_broke":3,...}` — hits + scored_broke=3
+
+Actually the "matched prediction-outcome pair" — the dream milestone ≥5 matched prediction-outcome pairs. The existing semantics: pairs = validations whose hits include at least one scored-broke file. Hmm, let me look for any existing computed concept of "pairs".
+
+Let me search for "pairs" in the risk files.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "pairs\|pair_count\|match…  ▶ read src/commands_risk.rs:1..41 ✓ (0ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 809ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `compute_accuracy_stats` in `commands_risk_accuracy.rs` to understand the "paired" semantics — pairs = validations whose hits include at least one scored-broke file. Actually the task says "pairs = validations whose hits include at least one scored-broke file, per existing semantics".
+
+Let me check how accuracy counts "pairs" — look at `compute_accuracy_stats`.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pair\|Pair" src/commands_… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_accuracy.rs:200..320 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the "pairs" semantics. Let me look at `lift_events_used` and `compute_accuracy_stats` to see how pairs are actually counted.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_accuracy.rs:55..185 ✓ (0ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a good understanding. The task wants:
+
+1. In `src/commands_risk_snapshots.rs`, in the `auto_risk_snapshot` / snapshot write path, also write an entry to `.arc/risk_meter.json` with fields like:
+   `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}` — computed from the two existing JSONL files by counting. Include `target_pairs: 5`.
+
+2. Surface it: when `arc risk snapshot` runs (the harness path), print a one-line progress note, e.g. "risk meter: 2/5 pairs (88 snapshots, 2 validations)".
+
+3. Add a unit test: given fixture snapshot+validation JSONL content, the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing).
+
+Let me look at how "pairs" is defined per the existing semantics. Looking at `commands_risk_accuracy.rs`, `lift_events_used` IS the matched-pair count: each lift-carrying validation event is one matched prediction-outcome pair feeding the pooled lift. A lift-carrying event is one that has `predicted_count`, `total_scored`, AND `scored_broke` fields present. So "pairs = validations whose hits include at least one scored-broke file" — hmm, the task says "pairs = validations whose hits include at least one scored-broke file, per existing semantics". 
+
+Actually let me re-read: "pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing".
+
+Looking at the accuracy module, a "lift-carrying" event requires `predicted_count`, `total_scored`, `scored_broke` all present. The `scored_broke` is hits + scored surprises. So "validations whose hits include at least one scored-broke file" — events where `scored_broke` is Some and > 0. Let me check the current real data:
+
+Validation event 1 (day 171): `{"accuracy_pct":10.0,"day":171,"git_hash_from":"d76b695","git_hash_to":"c96395b","hits":["src/commands_risk.rs"],"predicted_count":10,"surprises":[...],"trigger":"replay"}` — no `scored_broke`/`total_scored`. So NOT lift-carrying.
+
+Validation event 2 (day 172): `{"accuracy_pct":66.7,"day":172,"git_hash_from":"c96395b","git_hash_to":"ff6b971","hits":["src/commands_risk.rs","src/commands_risk_snapshots.rs"],"predicted_count":10,"scored_broke":3,"surprises":["src/commands_risk_accuracy.rs"],"total_scored":77,"trigger":"replay"}` — has `scored_broke: 3`, `total_scored: 77`. So lift-carrying → 1 pair.
+
+So the expected meter: snapshots 88, validations 2, pairs 1, last_snapshot_day 174. That matches the example: `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}`.
+
+So the "pairs" count = number of validation events that are "lift-carrying" = have `scored_broke` present (and > 0?). The task says "validations whose hits include at least one scored-broke file". Hmm — the simplest sensible interpretation matching existing semantics: count events where `scored_broke` is `Some(n)` with n > 0 (i.e., the event carries a scored-broke population — a matched prediction-outcome pair feeding the lift). Looking at `compute_accuracy_stats`, `lift_events_used += 1` when `(predicted_count, total_scored, scored_broke)` are all Some. And `scored_broke` is only persisted when `hits.is_empty() && surprises.is_empty()` is false, so `scored_broke` is always ≥ 1 when present. So pairs = number of events with all three lift fields present.
+
+I'll implement `compute_risk_meter` in `commands_risk_snapshots.rs`:
+
+```rust
+pub(crate) struct RiskMeter {
+    pub(crate) snapshots: usize,
+    pub(crate) validations: usize,
+    pub(crate) pairs: usize,
+    pub(crate) last_snapshot_day: u64,
+    pub(crate) target_pairs: usize,
+}
+```
+
+And a function `compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter`.
+
+Then write to `.arc/risk_meter.json` from the snapshot write path. The task says "In the `auto_risk_snapshot` / snapshot write path, also write an entry to `.arc/risk_meter.json`". The two snapshot write paths are:
+- `auto_risk_snapshot()` in commands_risk_snapshots.rs
+- `handle_risk_snapshot()` in commands_risk.rs (the CLI path that evolve.sh calls via `arc risk snapshot`)
+
+The task point 1 says modify `auto_risk_snapshot` / snapshot write path. Point 2 says surface it when `arc risk snapshot` runs. The harness path is `arc risk snapshot` → `handle_risk_snapshot()` in commands_risk.rs. But the task says "Files: src/commands_risk_snapshots.rs" only — so the core meter computation and a helper to refresh/write the meter file should live in commands_risk_snapshots.rs. For the print in handle_risk_snapshot, I need to call a function that prints. Let me keep the print logic in commands_risk.rs (already there) but have it call into a function exported from commands_risk_snapshots.rs that computes and writes the meter, returning the meter so it can be printed.
+
+Plan:
+1. In `commands_risk_snapshots.rs`:
+   - Add `RISK_METER_PATH: &str = ".arc/risk_meter.json"`.
+   - Add `RiskMeter` struct with snapshots, validations, pairs, last_snapshot_day, target_pairs.
+   - Add `compute_risk_meter(snapshot_content, validation_content) -> RiskMeter` — counts snapshots via `parse_all_snapshots`, validations via `parse_validation_events`, pairs = number of events with all lift fields (`predicted_count`, `total_scored`, `scored_broke` present and scored_broke > 0), last_snapshot_day = last parsed snapshot's day (or last day in the file).
+   - Add `write_risk_meter(path, &RiskMeter) -> io::Result<()>` — writes JSON file (overwrite, not append).
+   - Add `refresh_risk_meter()` — reads the two JSONL files, computes, writes to `.arc/risk_meter.json`, returns the meter for printing. Called from `auto_risk_snapshot` (in the write path) and from `handle_risk_snapshot` (in commands_risk.rs).
+
+Actually, to keep commands_risk.rs having the print, I'll expose `refresh_risk_meter() -> Option<RiskMeter>` (None if files unreadable) and `format_risk_meter_line(&RiskMeter) -> String`. Then:
+- `auto_risk_snapshot()`: after writing snapshot successfully, call `refresh_risk_meter()`.
+- `handle_risk_snapshot()`: after writing snapshot, call `refresh_risk_meter()` and print the one-line progress note: "risk meter: 1/5 pairs (88 snapshots, 2 validations)".
+
+Wait — but the task says files: `src/commands_risk_snapshots.rs` only. But handle_risk_snapshot is in commands_risk.rs. Hmm — "Files:" in the task probably indicates the primary file; the evaluator feedback says "the only HEAD commits are Task 2... there is no diff touching src/commands_risk_snapshots.rs (or anything else)". The print statement in handle_risk_snapshot would require touching commands_risk.rs. Since the task explicitly says "Surface it: when `arc risk snapshot` runs (the harness path), print a one-line progress note" — that's in `handle_risk_snapshot` in commands_risk.rs. So I do need to touch commands_risk.rs too. That's fine and necessary.
+
+Let me check what `last_snapshot_day` should be: "last_snapshot_day": 174. The example shows 174 which is the latest day. Snapshots have day fields; last snapshot's day. Let me verify from the real files: last line of risk_snapshots.jsonl.
+
+Let me check.
+
+Also, should the meter write happen in auto_risk_snapshot too? The task: "In `src/commands_risk_snapshots.rs`, in the `auto_risk_snapshot` / snapshot write path, also write an entry to `.arc/risk_meter.json`". So yes — both paths, or at least the snapshot write path in this file. I'll wire it into both `auto_risk_snapshot()` (in this file) and `handle_risk_snapshot()` (in commands_risk.rs).
+
+Let me check the day of the last snapshot.
+
+Also need to double check formatting — `X/5 pairs (88 snapshots, 2 validations)`. The example note: "risk meter: 2/5 pairs (88 snapshots, 2 validations)". So format: `risk meter: {pairs}/{target} pairs ({snapshots} snapshots, {validations} validations)`.
+
+Now let me check the existing mock/fixture style in tests. Let me look at test functions in commands_risk_snapshots.rs tests module, especially where fixtures with snapshots are built, and how they test. Let me read the full test module.
+────────────────────────────────────────────────────────────────────────────────
+Now I have a clear picture. Let me check the existing test fixtures and the last snapshot's day
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:495..555  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -1 .arc/risk_snapshots.jsonl … ✓ (1ms)
+ ✓ (3ms)
+  2 tools completed in 1.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have everything I need. Let me plan the implementation:
+
+1. **Meter computation function** in `src/commands_risk_snapshots.rs`:
+   - `compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter` — counts:
+     - `snapshots`: number of parsed snapshots (via `parse_all_snapshots`)
+     - `validations`: number of parsed validation events (via `parse_validation_events`)
+     - `pairs`: number of validation events whose hits include at least one scored-broke file... wait, let me re-read the task.
+
+   Task says: "pairs = validations whose hits include at least one scored-broke file, per existing semantics"
+
+   Hmm. Let me re-read: "Add a unit test: given fixture snapshot+validation JSONL content, the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing)."
+
+   Hmm, "validations whose hits include at least one scored-broke file". That phrasing is a bit confusing. Let me think about the "existing semantics" from `commands_risk_accuracy.rs`:
+   
+   From the accuracy code: "each lift-carrying validation event is one matched prediction-outcome pair feeding the pooled lift" — `lift_events_used` counts events that carry `predicted_count`, `total_scored`, AND `scored_broke` (all three Some).
+
+   Wait, but the task says "validations whose hits include at least one scored-broke file". Hmm. `scored_broke` in the accuracy code is a count (`Some(hits.len() + surprises.len())` = scored source files that broke). So "hits include at least one scored-broke file" would mean... hmm.
+
+   Actually let me re-read the actual meaning in `replay_validate_core`:
+   - `predicted_broke = hits` (how many flagged files broke)
+   - `total_scored = all_ranked.len()` (whole scored population)
+   - `scored_broke = hits + scored surprises` (scored source files that broke)
+
+   So a "matched prediction-outcome pair" is a validation event where at least one predicted/broke file matched — i.e., `hits` non-empty. The accuracy code's `lift_events_used` requires all three fields. But the task's phrasing "validations whose hits include at least one scored-broke file" is a bit odd.
+
+   Actually I think the intent is: pairs = count of validation events where the prediction actually matched an outcome — i.e., events with hits (a predicted file broke). That's the "matched prediction-outcome pair". Let me look at the existing test in accuracy: `test_lift_none_but_pairs_present_shows_cold_start` at line 854-875 mentions "When overall_lift is None (no usable lift) but lift-carrying pairs exist" — shows "Pairs: 1/5".
+
+   Let me look at those accuracy tests to understand the exact fixtures.
+
+   Actually, the task says "per existing semantics — re-use parse_validation_events / parse_all_snapshots rather than duplicating parsing". The existing semantics that counts "pairs" is `lift_events_used` in `compute_accuracy_stats`: events with all three lift fields (predicted_count, total_scored, scored_broke) present. But the task phrase "validations whose hits include at least one scored-broke file" suggests... hmm.
+
+   Wait — maybe "scored-broke file" refers to files in `hits` (predicted files that broke). So "validations whose hits include at least one ... file" = validations with non-empty hits. Hmm, but "scored-broke" is a specific term.
+
+   Let me check the real data: there are 2 validation events. Event 1 (day 171) has hits=[src/commands_risk.rs], predicted_count=10, no total_scored/scored_broke. Event 2 (day 172) has hits=[src/commands_risk.rs, src/commands_risk_snapshots.rs], predicted_count=10, total_scored=77, scored_broke=3.
+
+   So with "lift_events_used" semantics, pairs=1. With "hits non-empty" semantics, pairs=2.
+
+   The evaluator feedback says: "The real JSONL files confirm the counts (88 snapshots, 2 validations) that the meter was supposed to surface". It doesn't say the pair count. The task example says `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}` — pairs: 1 with 88 snapshots and 2 validations. That matches the `lift_events_used` semantics (only 1 of the 2 validations carries the lift fields).
+
+   Hmm wait, but the example is illustrative. Let me reconsider: "pairs = validations whose hits include at least one scored-broke file". 
+
+   Hmm, re-reading again: "validations whose hits include at least one scored-broke file". Maybe it means: each validation's hits are files; "scored-broke" = scored files that broke; so count validations where at least one hit file is a scored-broke file. Given the JSONL only stores `scored_broke` as a count, not as a list of files, we can't literally check membership of hit files in scored-broke files. So the nearest implementable semantic is:
+
+   - A validation "carries lift data" when it has `total_scored` and `scored_broke` present (matching `lift_events_used`).
+   - AND it has at least one hit (a predicted file that broke) — i.e., "hits include at least one scored-broke file" = the event has ≥1 hit.
+
+   Actually let me think more carefully. In `replay_validate_core`:
+   ```
+   let scored_broke = if hits.is_empty() && surprises.is_empty() {
+       None
+   } else {
+       Some(hits.len() + surprises.len())
+   };
+   ```
+   So `scored_broke` is only present when there are hits or surprises. An event with hits non-empty always has scored_broke Some (unless all_ranked is None — but total_scored is also None then).
+
+   So "validations whose hits include at least one scored-broke file" ≈ events with hits.len() >= 1 AND scored_broke is Some. That's precisely the `lift_events_used` semantics (needs predicted_count, total_scored, scored_broke all Some — and scored_broke Some implies hits+surprises > 0).
+
+   Given the task's example explicitly shows pairs: 1 for 88 snapshots / 2 validations, and the real data has exactly 88 snapshots / 2 validations with exactly 1 lift-carrying event, the example pairs=1 matches `lift_events_used` semantics: each event with (predicted_count, total_scored, scored_broke) all present counts as one pair.
+
+   So I'll implement `pairs` to count events that carry the lift fields (predicted_count.is_some() && total_scored.is_some() && scored_broke.is_some()) — exactly matching `lift_events_used`. But wait — the task says "validations whose hits include at least one scored-broke file". Let me just be safe and count events where hits is non-empty AND scored_broke is Some — that requires hit_count > 0 and scored_broke present. Hmm, but with lift_events_used, an event can have hits=0 but still carry lift data (e.g., scored_broke from surprises only). In the real data event 2 has hits=2.
+
+   Let me look at the actual accuracy test fixtures to see what "pairs" counts in tests.
+
+   Actually, let me reconsider from the goal: "pairs = matched prediction-outcome pairs". A matched pair means a prediction that was validated against an outcome. From the accuracy module's own documentation: "lift_events_used IS the matched-pair count: each lift-carrying validation event is one matched prediction-outcome pair feeding the pooled lift."
+
+   So the existing, canonical semantics is `lift_events_used` — events with all three lift fields. I'll implement that, and the test fixture example (88/2/1) will match.
+
+   But the task phrase "validations whose hits include at least one scored-broke file" — maybe add the constraint hits > 0. In practice, for events with scored_broke present and total_scored present, hits could be 0 (only surprises scored). Does that still count as a "matched prediction-outcome pair"? The accuracy code counts it (lift_events_used += 1 regardless of hits). I'll follow the canonical semantics (lift_events_used) since it's what the accuracy report calls "Pairs: N/5". The task says "per existing semantics" — pointing at the accuracy module's semantics.
+
+   Hmm, but let me be really careful. The task literally says "pairs = validations whose hits include at least one scored-broke file". Let me parse this grammatically:
+   - "validations whose hits include at least one scored-broke file"
+   - Each validation has `hits` (list of predicted files that broke = scored-broke files). A "scored-broke file" = a scored source file that broke. The hits ARE scored-broke files.
+   - So: validations whose hits include at least one scored-broke file = validations with hits.len() ≥ 1.
+
+   That's simpler! It's just "validations with at least one hit". Under that semantics, with the real data both events have hits, so pairs would be 2, not 1. But the task's example shows pairs: 1...
+
+   Hmm, the example `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}` is stated right after "with fields like" — it's illustrative ("like"). The evaluator's feedback doesn't confirm pairs=1 either.
+
+   OK here's the tension. Let me look at the accuracy module's tests for exact "Pairs" counts to determine which semantics the codebase uses. Let me read a couple of accuracy tests.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_accuracy.rs:720..840 ✓ (0ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the semantics. The "pairs" count = `lift_events_used` — the count of validations that carry the lift fields (predicted_count, total_scored, scored_broke). Let me look at what that means in terms of "validations whose hits include at least one scored-broke file, per existing semantics".
+
+From `replay_validate_core`: total_scored = all_ranked.len() (some). scored_broke = Some(hits.len() + surprises.len()) if hits or surprises non-empty, else None.
+
+So a validation event "carries the lift" (counts as a matched pair) when: predicted_count is Some AND total_scored is Some AND scored_broke is Some.
+
+The task says: "pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots`".
+
+The existing semantics in `compute_accuracy_stats` is: `lift_events_used` counts events where `predicted_count`, `total_scored`, and `scored_broke` are all Some.
+
+Actually, let me re-read the task description:
+"pairs = validations whose hits include at least one scored-broke file, per existing semantics"
+
+Hmm. The word "hits include at least one scored-broke file" — the scored_broke count = hits + scored surprises. So a validation "includes at least one scored-broke file" means scored_broke >= 1, i.e. Some(n) where n >= 1? Actually per replay_validate_core, scored_broke is Some when hits or surprises are non-empty. And the "matched prediction-outcome pair" per the accuracy module: `lift_events_used` = events with all three lift fields Some.
+
+Given "re-use `parse_validation_events` rather than duplicating parsing", the cleanest approach is to compute pairs by counting events where `predicted_count`, `total_scored`, `scored_broke` are all `Some` (matching `lift_events_used` semantics exactly). That's the existing semantics, and it matches what the accuracy report shows as "Pairs: N/5".
+
+Actually the most robust and DRY way: use `compute_accuracy_stats(&events).lift_events_used` — the accuracy module already computes exactly this count! That re-uses existing semantics precisely. And `parse_validation_events` gives us the events. So:
+
+pairs = compute_accuracy_stats(&events).lift_events_used
+
+But wait — the accuracy module is in `commands_risk_accuracy.rs`, and it's re-exported via commands_risk. commands_risk_snapshots.rs currently imports from `crate::commands_risk::{compute_file_risk_scores, learn_weights_from_history, FileRisk}`. Is there a circular dependency concern? commands_risk re-exports from commands_risk_snapshots, and commands_risk_accuracy is a separate module. commands_risk_snapshots → commands_risk → commands_risk_accuracy. There's no cycle because commands_risk_accuracy doesn't import commands_risk_snapshots... let me check.
+
+Actually let me check imports of commands_risk_accuracy.rs.
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -20 src/commands_risk_accurac… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. Let me plan the implementation:
+
+1. **Meter computation** (`compute_risk_meter` in `src/commands_risk_snapshots.rs`):
+   - Count snapshots (from `parse_all_snapshots`)
+   - Count validations (from `parse_validation_events`)
+   - Count pairs = number of lift-carrying validation events (those with `predicted_count`, `total_scored`, `scored_broke` all present) — this matches `lift_events_used` semantics per existing code.
+   - `last_snapshot_day` from the last snapshot's day.
+   - `target_pairs: 5`.
+   - Also count `scored_broke`-bearing events? The task says "pairs = validations whose hits include at least one scored-broke file, per existing semantics". Hmm, let me re-read.
+
+The task says: "Add a unit test: given fixture snapshot+validation JSONL content, the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing)."
+
+Hmm, "validations whose hits include at least one scored-broke file" — that phrasing is a bit odd. The existing semantics in `compute_accuracy_stats` is that `lift_events_used` counts events with all three lift fields (`predicted_count`, `total_scored`, `scored_broke`) present. That's the "matched prediction-outcome pair" count.
+
+Actually, let me reconsider: the "existing semantics" for pairs is `lift_events_used` — each lift-carrying validation event is one matched prediction-outcome pair. That's clearly documented in the accuracy module:
+
+```
+// milestone is to accumulate ≥5 matched prediction-outcome pairs (events
+// that actually feed the lift). Below
+// that threshold the lift is noise — a single event presented as a firm
+// "2.5×" is exactly the cold-start problem the dream names. `lift_events_used`
+// IS the matched-pair count: each lift-carrying validation event is one
+// matched prediction-outcome pair feeding the pooled lift.
+```
+
+So `pairs = count of validation events carrying (predicted_count, total_scored, scored_broke)`.
+
+But the task's phrasing "validations whose hits include at least one scored-broke file" is a bit confusing. Wait — actually there's a subtlety. `scored_broke` is `Some(hits.len() + surprises.len())` when hits or surprises non-empty, `None` when nothing broke. So a lift-carrying event MUST have at least one scored-broke file (since scored_broke is only Some when there were hits/surprises, and scored_broke >= 1 when present... wait no, scored_broke could be 0 if hits is empty but surprises has scored surprises? No — `scored_broke = if hits.is_empty() && surprises.is_empty() { None } else { Some(hits.len() + surprises.len()) }`. When present, it's >= 1 because hits or surprises is non-empty).
+
+So "validations whose hits include at least one scored-broke file" ≈ "validations carrying a scored_broke field" — which is equivalent to lift-carrying events in practice. The cleanest implementation re-using existing parsing: count validation events where all of `predicted_count`, `total_scored`, `scored_broke` are `Some`. That matches `lift_events_used` exactly and matches `pairs` in the accuracy report.
+
+Actually let me double check the current real data:
+- Validation 1 (day 171): no lift fields (only `accuracy_pct`, `day`, `git_hash_from`, `git_hash_to`, `hits`, `predicted_count`, `surprises`, `trigger`, `ts`) — wait, it has `predicted_count` but not `total_scored`/`scored_broke`. So lift_events_used counts only event 2 (day 172) which has all three.
+- So pairs = 1. Which matches the evaluator's note: "The real JSONL files confirm the counts (88 snapshots, 2 validations)" and the expected meter `{"snapshots": 88, "validations": 2, "pairs": 1, ...}`.
+
+So pairs = 1 for the current data. 
+
+Now the implementation plan:
+
+### In `src/commands_risk_snapshots.rs`:
+
+1. Add `RISK_METER_PATH: &str = ".arc/risk_meter.json"`.
+2. Add `const TARGET_PAIRS: usize = 5` (referencing the dream milestone).
+3. Add a struct `RiskMeter` with fields: snapshots, validations, pairs, last_snapshot_day, target_pairs.
+4. Add `compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter` — pure function, reuses `parse_all_snapshots` and `parse_validation_events`.
+5. Add `write_risk_meter_to(path, &meter) -> io::Result<()>` — writes JSON.
+6. Add `write_risk_meter()` public function that reads the real files and writes to `.arc/risk_meter.json`.
+7. Add `format_risk_meter_progress(&meter) -> String` — one-line "risk meter: 2/5 pairs (88 snapshots, 2 validations)".
+8. Wire into `auto_risk_snapshot` (after successful write) and `handle_risk_snapshot` (after write) and also in `auto_risk_snapshot` dedup path? The task says "in the `auto_risk_snapshot` / snapshot write path, also write an entry". I'll wire it into both:
+   - `auto_risk_snapshot`: after write succeeds → write meter + maybe print? auto_risk_snapshot prints dim messages. I'll write the meter file but not print (it's the /commit path). Actually the task says "Surface it: when `arc risk snapshot` runs (the harness path), print a one-line progress note". So the print is only for the CLI `arc risk snapshot` path.
+   - `handle_risk_snapshot` in commands_risk.rs: after `write_risk_snapshot_to` succeeds, call `write_risk_meter()` and print "risk meter: N/5 pairs (X snapshots, Y validations)".
+
+Wait, where should `handle_risk_snapshot` live? It's `fn handle_risk_snapshot()` (private) in commands_risk.rs. Task files: `src/commands_risk_snapshots.rs`. I should keep changes to commands_risk_snapshots.rs, and maybe the tiny call in commands_risk.rs (one line). The task says Files: src/commands_risk_snapshots.rs — so the main work goes there; a one-line invocation in handle_risk_snapshot is necessary to surface it. Actually the task says the print should happen "when `arc risk snapshot` runs". handle_risk_snapshot is where that runs. I'll add the meter write + print there. But is that within the "Files" scope? The evaluator complained no diff touching commands_risk_snapshots.rs. Adding a call in commands_risk.rs is a minor necessary change to surface the print. I think it's acceptable — the task explicitly asks for the progress note at `arc risk snapshot`. Alternatively, I could put the print inside `write_risk_meter` called from handle_risk_snapshot... but the print needs to happen at the CLI path. Let me think about how to minimize the commands_risk.rs change: one line after the snapshot write success: `print_risk_meter_progress();` where `print_risk_meter_progress()` is a pub(crate) function in commands_risk_snapshots.rs that reads real files, writes meter, and prints the one line. That keeps commands_risk.rs change to a single line and all logic in commands_risk_snapshots.rs.
+
+Also wire into `auto_risk_snapshot` (the /commit auto path) — write the meter file (no print needed there, or a dim print? The task says the print is for the harness `arc risk snapshot` path). I'll write meter file silently in auto_risk_snapshot.
+
+Also consider `handle_risk_validate` — the /risk validate CLI path also writes validation events. Should the meter be updated there too? The task says "in the `auto_risk_snapshot` / snapshot write path, also write an entry". The validation path writes to risk_validations.jsonl, and the meter reads both files at write time, so as long as the meter is written after any snapshot write, the validations count will be current. But if a validation is written without a snapshot (e.g., watch_failure), the meter would be stale. To be robust, I could also write the meter in `write_validation_event`... but the task scope is the snapshot path. However, since the meter is computed from both files whenever written, and it's written on every snapshot write which happens at least once per evolve session (evolve.sh calls `risk snapshot` once per session), the meter file will be reasonably fresh. Keep scope tight: write in snapshot paths only (auto_risk_snapshot + handle_risk_snapshot CLI).
+
+Hmm, but actually there's a subtle issue: `handle_risk_snapshot` in the harness runs replay_validate FIRST (which may append a validation event), then writes the snapshot. So writing the meter after the snapshot write captures both the new snapshot AND the new validation. 
+
+Now for `auto_risk_snapshot` in commands_risk_snapshots.rs — after write succeeds, write the meter.
+
+Let me also check: does the task want the meter written even when the dedup skips? Probably fine to write it anyway (it updates last_snapshot_day etc.) but not necessary. I'll write it after a successful new snapshot write, and also in the dedup-skip path? The dedup path returns early. For simplicity and matching "cadence stamp", write after successful write. Actually, to make the meter reflect current state even when deduped, I could write it in the skip branch too — but the task says "in the auto_risk_snapshot / snapshot write path, also write an entry". I'll write it after the write succeeds, and on dedup-skip I'll leave it. Hmm, but then if the loop runs `risk snapshot` (CLI path) which writes and then auto_commit runs... it's fine — every session's CLI snapshot writes the meter.
+
+Let me now also double-check what fields the meter should have: 
+`{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174, "target_pairs": 5}`
+
+Task says "fields like: {"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174} — computed from the two existing JSONL files by counting. Include a target_pairs: 5 field referencing the dream milestone".
+
+So the meter JSON: snapshots, validations, pairs, last_snapshot_day, target_pairs.
+
+`last_snapshot_day` = day of last snapshot in snapshot file. Note `parse_all_snapshots` filters out snapshots with empty predicted (`!predicted.is_empty()`). Hmm — for counting snapshots, should I count ALL lines or only parsed ones with top_10? The real file has 88 lines. The task says "computed from the two existing JSONL files by counting" — 88 snapshots. `parse_all_snapshots` would only count snapshots with non-empty top_10, which may differ slightly if any snapshot has empty top_10. Let me check: does the real file have any snapshot with empty top_10?
+
+Let me check. Actually simpler and more robust: count *lines* that parse. But the task says "re-use parse_validation_events / parse_all_snapshots rather than duplicating parsing". Hmm. For the snapshot count, using `parse_all_snapshots(&content).len()` is the re-use. But it filters empty predicted. Let me check the real file for empty top_10 snapshots. Also `parse_all_snapshots` day type is u64.
+
+Actually, wait. To get the exact 88 count, let me check whether any of the 88 lines has empty top_10. Let me verify with a quick script. Also note: the count could differ from wc -l if there are malformed lines. Let me check.
+
+For the validation count: `parse_validation_events(&content).len()` counts all parseable lines = 2. Good.
+
+For pairs: count events where predicted_count, total_scored, scored_broke are all Some. With real data: event 2 only → 1. Good.
+
+For last_snapshot_day: day of the last snapshot. With parse_all_snapshots, last element's day = 174. Good. But if the last snapshot had empty top_10, it'd be filtered and we'd get an earlier day. Real data has non-empty. Fine.
+
+Let me write a quick check for empty top_10 lines in the real file.
+
+Now let me design the code:
+
+```rust
+/// Default path for the risk meter cadence stamp.
+pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
+
+/// The dream milestone: ≥5 matched prediction-outcome pairs before the risk
+/// lift is judged. Mirrored here so the meter file carries the goal inline.
+pub(crate) const TARGET_PAIRS: usize = 5;
+
+/// Snapshot of the risk prediction-meter accumulation state.
+///
+/// `pairs` follows the same semantics as the accuracy report's
+/// `lift_events_used`: each validation event that carries the lift fields
+/// (`predicted_count`, `total_scored`, `scored_broke`) is one matched
+/// prediction-outcome pair feeding the pooled lift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RiskMeter {
+    pub(crate) snapshots: usize,
+    pub(crate) validations: usize,
+    pub(crate) pairs: usize,
+    pub(crate) last_snapshot_day: u64,
+    pub(crate) target_pairs: usize,
+}
+
+impl RiskMeter {
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "snapshots": self.snapshots,
+            "validations": self.validations,
+            "pairs": self.pairs,
+            "last_snapshot_day": self.last_snapshot_day,
+            "target_pairs": self.target_pairs,
+        })
+        .to_string()
+    }
+}
+```
+
+Wait — should pairs count events with all three lift fields, or just scored_broke? Task says "pairs = validations whose hits include at least one scored-broke file, per existing semantics". Hmm. Let me re-read once more:
+
+"Add a unit test: given fixture snapshot+validation JSONL content, the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use `parse_validation_events` / `parse_all_snapshots` rather than duplicating parsing)."
+
+"validations whose hits include at least one scored-broke file" — hmm, this is confusingly worded. "hits include at least one scored-broke file" — I think they mean: validations where a scored file broke (i.e. `scored_broke` is present/≥1). This is exactly the lift-carrying events. The existing semantics in `compute_accuracy_stats` uses presence of all three fields. Since `scored_broke` is `Some(≥1)` whenever present, presence of `scored_broke` alone implies ≥1 scored-broke file. But `lift_events_used` requires all three. To be consistent with "per existing semantics", I should count events where all three lift fields are present (identical to lift_events_used). That gives pairs=1 for real data. 
+
+Hmm, but strictly the phrasing "validations whose hits include at least one scored-broke file" could be read as: events with `scored_broke` field present (≥1 implied). Since real data: event 2 has scored_broke: 3 → counts; event 1 lacks it → doesn't count. Result pairs=1 either way. I'll implement using all-three-fields present to exactly mirror `lift_events_used` (the documented "matched-pair count"), and note it in the doc comment. Actually wait — let me reconsider. In `lift_events_used`, ALL of predicted_count, total_scored, scored_broke must be Some. If an event had scored_broke but not total_scored, lift_events_used wouldn't count it. Using all three keeps pairs == lift_events_used exactly, guaranteeing the meter's "pairs" matches the accuracy report's "Pairs: N/5". That's the most consistent choice.
+
+Now the pure computation function:
+
+```rust
+/// Compute the risk meter from snapshot + validation JSONL content.
+///
+/// Reuses the existing parsers (`parse_all_snapshots`, `parse_validation_events`).
+/// `pairs` = lift-carrying validation events (all three lift fields present),
+/// the same events the accuracy report counts as matched prediction-outcome pairs.
+pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let validations = parse_validation_events(validation_content);
+    let pairs = validations
+        .iter()
+        .filter(|e| {
+            e.predicted_count.is_some() && e.total_scored.is_some() && e.scored_broke.is_some()
+        })
+        .count();
+    let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+    RiskMeter {
+        snapshots: snapshots.len(),
+        validations: validations.len(),
+        pairs,
+        last_snapshot_day,
+        target_pairs: TARGET_PAIRS,
+    }
+}
+```
+
+Wait — there's a subtlety with counting snapshots. `parse_all_snapshots` filters out snapshots with empty `top_10`. The task's verification says "correct counts against the real 88-snapshot / 2-validation files". If any of the 88 lines has empty top_10, snapshots count would be < 88. Let me verify the real file.
+
+Also, should I count raw lines that parse instead? The task says re-use parse_all_snapshots. Let me check the real file first.
+
+Writing function:
+
+```rust
+/// Write a risk meter stamp to the given path as a single JSON object.
+pub(crate) fn write_risk_meter_to(path: &std::path::Path, meter: &RiskMeter) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, meter.to_json() + "\n")
+}
+```
+
+The task example shows `{"snapshots": 88, ...}` single line; trailing newline is fine (JSONL-ish, and matches the "stamp" theme). Actually .arc/risk_meter.json — a single JSON object. I'll write with trailing newline for POSIX friendliness.
+
+Read + write real files:
+
+```rust
+/// Compute + persist the meter from the real JSONL files, returning the meter.
+pub(crate) fn refresh_risk_meter() -> Option<RiskMeter> {
+    let snapshots = std::fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+    let validations = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+    let meter = compute_risk_meter(&snapshots, &validations);
+    if write_risk_meter_to(std::path::Path::new(RISK_METER_PATH), &meter).is_err() {
+        return None;
+    }
+    Some(meter)
+}
+```
+
+Hmm, but if snapshot file missing → None → don't write. If validation file missing → default "". OK.
+
+Progress line:
+
+```rust
+/// One-line progress note for the harness path, e.g.
+/// "risk meter: 1/5 pairs (88 snapshots, 2 validations)".
+pub(crate) fn format_risk_meter_progress(meter: &RiskMeter) -> String {
+    format!(
+        "risk meter: {}/{} pairs ({} snapshots, {} validations)",
+        meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
+    )
+}
+```
+
+The task says print e.g. "risk meter: 2/5 pairs (88 snapshots, 2 validations)". Also maybe include day? The task's example progress line: "risk meter: 2/5 pairs (88 snapshots, 2 validations)". Keep it exactly.
+
+Now wire into `auto_risk_snapshot`:
+
+```rust
+    let json_line = build_risk_snapshot_json(&risks, day, &git_hash);
+    if let Err(e) = write_risk_snapshot_to(std::path::Path::new(RISK_SNAPSHOT_PATH), &json_line) {
+        eprintln!("  {DIM}(risk snapshot skipped: {e}){RESET}");
+        return;
+    }
+    // Cadence stamp: keep `.arc/risk_meter.json` current after each snapshot
+    // write so the accumulation state stays legible. Silent on failure.
+    let _ = refresh_risk_meter();
+```
+
+And in `handle_risk_snapshot` (commands_risk.rs), after the write success:
+
+```rust
+    match write_risk_snapshot_to(path, &json) {
+        Ok(()) => {
+            let count = risks.len().min(10);
+            println!("  📸 Snapshot saved — {count} files scored, git HEAD {git_hash}");
+            // Cadence stamp: surface accumulation toward the ≥5-pair milestone.
+            if let Some(meter) = refresh_risk_meter() {
+                println!("  {DIM}{}{RESET}", format_risk_meter_progress(&meter));
+            }
+        }
+        Err(e) => {
+            eprintln!("  {RED}Error saving risk snapshot: {e}{RESET}");
+        }
+    }
+```
+
+I need to re-export `refresh_risk_meter` and `format_risk_meter_progress` (and maybe `RISK_METER_PATH`) from commands_risk.rs, OR call them via full path `crate::commands_risk_snapshots::...`. Since commands_risk.rs re-exports the snapshots module items, I'll add them to the re-export list. That's cleaner.
+
+Also, should `handle_risk_snapshot` still print the meter note when snapshot write failed? No.
+
+Also, what about the auto-validate `replay_validate_last_snapshot` path in handle_risk_snapshot — the validation event is written BEFORE the snapshot write, so refresh_risk_meter() after the snapshot write picks up the new validation event. 
+
+Now tests. Add unit tests in commands_risk_snapshots.rs tests module:
+
+1. `test_compute_risk_meter_counts` — fixture snapshot content with e.g. 3 snapshots (different days), validation content with 2 events, one lift-carrying. Assert snapshots=3, validations=2, pairs=1, last_snapshot_day=last day, target_pairs=5.
+
+2. `test_compute_risk_meter_real_counts` — maybe a regression fixture matching the real 88/2/1 data? That'd be a big fixture. Better: a small one. But the task says "given fixture snapshot+validation JSONL content, the meter computation returns the right pair count". One test is required; I'll add a focused one and maybe a second for edge cases (empty content → zeros).
+
+Let me design fixture:
+
+```rust
+#[test]
+fn test_compute_risk_meter_counts_fixture() {
+    let snapshots = concat!(
+        "{\"day\":134,\"git_hash\":\"aaa\",\"top_10\":[{\"path\":\"src/a.rs\"}]}\n",
+        "{\"day\":171,\"git_hash\":\"bbb\",\"top_10\":[{\"path\":\"src/b.rs\"}]}\n",
+        "{\"day\":174,\"git_hash\":\"ccc\",\"top_10\":[{\"path\":\"src/c.rs\"}]}\n",
+    );
+    let validations = concat!(
+        "{\"day\":171,\"hits\":[],\"surprises\":[],\"predicted_count\":10}\n",
+        "{\"day\":172,\"hits\":[\"src/b.rs\"],\"surprises\":[],\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":1}\n",
+    );
+    let meter = compute_risk_meter(snapshots, validations);
+    assert_eq!(meter.snapshots, 3);
+    assert_eq!(meter.validations, 2);
+    assert_eq!(meter.pairs, 1, "only the lift-carrying event counts as a pair");
+    assert_eq!(meter.last_snapshot_day, 174);
+    assert_eq!(meter.target_pairs, 5);
+}
+```
+
+3. `test_compute_risk_meter_empty` — empty strings → 0/0/0/0/5.
+
+4. Also test the JSON writing: `test_write_risk_meter_stamp` — write to temp path, read back, assert parsed fields. This also verifies the verification criterion ".arc/risk_meter.json exists with correct counts".
+
+Let me also verify: does `parse_all_snapshots` require no empty top_10? Real file check needed. Let me run a quick python check on the real file.
+
+Edge: `parse_validation_events` day type u32, `parse_all_snapshots` day u64. RiskMeter.last_snapshot_day: u64. OK.
+
+Now about the print format — DIM/RESET already imported in commands_risk_snapshots.rs. In commands_risk.rs `use crate::format::*` also has them.
+
+Let me now check the real file for empty top_10:
+
+Actually, let me also think about whether "snapshots" should count all 88 lines or only non-empty-top_10. With wc -l = 88, if parse_all_snapshots returns 88 too, great. Let me verify quickly.
+
+Also one more design consideration: the task says "Include a target_pairs: 5 field referencing the dream milestone". I'll use a named const TARGET_PAIRS = 5.
+
+Let me check real file top_10 empties now.
+────────────────────────────────────────────────────────────────────────────────
+Let me verify the real data counts match what `parse_all_snapshots`/`parse_validation_events
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (12 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "tempfile::tempdir" src/co… ✓ (3ms)
+ ✓ (20ms)
+  2 tools completed in 1.4s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Confirmed: 88 snapshots, 2 validations, 1 lift-carrying event (pair). This matches the task description (`{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}`).
+
+Now let me write the implementation:
+
+1. `RISK_METER_PATH` const: `.arc/risk_meter.json`
+2. `RISK_METER_TARGET_PAIRS: u64 = 5`
+3. `RiskMeter` struct with `snapshots`, `validations`, `pairs`, `last_snapshot_day`, `target_pairs`
+4. `compute_risk_meter(snapshot_content, validation_content) -> RiskMeter`
+5. `write_risk_meter_to(path, snapshots_path, validations_path)` — writes JSON
+6. `write_risk_meter()` — the real-path wrapper
+7. `format_risk_meter_line(&RiskMeter) -> String` — "risk meter: 2/5 pairs (88 snapshots, 2 validations)"
+8. In `auto_risk_snapshot`, call `write_risk_meter()` after successful write
+9. In `handle_risk_snapshot` in commands_risk.rs, call `write_risk_meter()` and print the progress line after the snapshot write
+10. Unit test with fixture JSONL
+
+Wait — the task says "in the auto_risk_snapshot / snapshot write path, also write an entry". And "Surface it: when arc risk snapshot runs (the harness path), print a one-line progress note".
+
+The harness path is `arc risk snapshot` → handled by `handle_risk` → `handle_risk_snapshot` in commands_risk.rs. So the print goes there. And the meter write — "also write an entry to .arc/risk_meter.json (or extend the snapshot write)" — computed from the two existing JSONL files by counting.
+
+For counting pairs: "pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use parse_validation_events / parse_all_snapshots".
+
+Hmm. Let me re-read: "pairs = validations whose hits include at least one scored-broke file". But `parse_validation_events` gives `ValidationEvent` with `hit_count`, `total_changed`, `scored_broke`, etc. It doesn't give the hit file paths... but `scored_broke > 0` indicates a scored-broke file exists. Existing semantics in `compute_accuracy_stats`: a "lift-carrying" event = one with `predicted_count`, `total_scored`, `scored_broke` all Some. And pairs = `lift_events_used`.
+
+The task's phrase "validations whose hits include at least one scored-broke file, per existing semantics" — the existing semantics (from compute_accuracy_stats) count lift-carrying events. Since `scored_broke` is `hits + surprises` (scored files that broke), "hits include at least one scored-broke file" ≈ scored_broke > 0 (there was at least one scored file that broke, and hits is part of that). 
+
+Actually let me think about what's most consistent. In compute_accuracy_stats, `lift_events_used` requires all three Some fields. A validation event with `scored_broke: Some(0)` and `hit_count: 0` — scored_broke = 0 means no scored file broke. But "hits include at least one scored-broke file" — hits are files that were predicted AND broke. A hit file is by definition a scored-broke file (it broke and was in the prediction). So "validations whose hits include at least one scored-broke file" = `hit_count > 0` AND `scored_broke.is_some()`? 
+
+Hmm, but let me check the existing semantics the task refers to. In compute_accuracy_stats:
+```rust
+if let (Some(pred), Some(total_scored), Some(scored_broke)) = (e.predicted_count, e.total_scored, e.scored_broke) { ... lift_events_used += 1; }
+```
+
+This is the "existing semantics". It counts events carrying all three lift fields, regardless of hit_count. But the task literally says "validations whose hits include at least one scored-broke file". Since `scored_broke` counts scored files that broke (hits + scored surprises), and hits are a subset of scored files that broke... when `hit_count > 0`, hits include at least one scored-broke file. When hit_count == 0 but scored_broke > 0, hits include zero scored-broke files (all breakage was surprises).
+
+Actually, look at `scored_broke` computation in replay_validate_core:
+```rust
+let scored_broke = if hits.is_empty() && surprises.is_empty() {
+    None
+} else {
+    Some(hits.len() + surprises.len())
+};
+```
+So scored_broke = hits + surprises (the scored subset). A "hit" is a predicted file that broke — definitely scored. A "surprise" that's in scored files — scored too.
+
+"validations whose hits include at least one scored-broke file" — the direct reading: `hit_count > 0 && scored_broke.is_some()`. But actually if `scored_broke.is_some()` then either hits or surprises is non-empty. And "hits include at least one scored-broke file" — a hit IS a scored-broke file (it broke, it's scored). So the condition is `hit_count > 0`. But also, does it need `scored_broke` to be a valid measurement? 
+
+Let me check the real data: validation 1 (day 171) has hits=["src/commands_risk.rs"] and no scored_broke field (None). Validation 2 (day 172) has hits=2, scored_broke=3. So under "hit_count > 0" both would count → pairs=2. Under lift-carrying semantics, only validation 2 → pairs=1.
+
+The task explicitly says pairs: 1 for the real files: `{"snapshots": 88, "validations": 2, "pairs": 1, "last_snapshot_day": 174}`. So the expected pairs count for the real data is 1, which matches "lift-carrying" (scored_broke present) semantics — the first validation lacks scored_broke (older format, no all_ranked at the time).
+
+So the semantics: a "pair" = validation event that carries the `scored_broke` field (i.e., has the lift measurement) with... "hits include at least one scored-broke file". With scored_broke present, hits is a subset of scored-broke files. If hit_count > 0, hits include at least one scored-broke file. If hit_count == 0 but scored_broke == Some(3), all broke files were surprises — hits include ZERO scored-broke files... but the "scored-broke" concept covers all breaks among scored files.
+
+Hmm. The most faithful reading combining the task example (pairs=1 for real data) with the literal text: pair = validation with `scored_broke: Some(n)` where `n > 0` (at least one scored file broke) AND... hmm wait, "hits include at least one scored-broke file".
+
+Let me re-read the task spec once more: "the meter computation returns the right pair count (pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use parse_validation_events / parse_all_snapshots rather than duplicating parsing)."
+
+"per existing semantics" — the existing semantics in `compute_accuracy_stats` counts `lift_events_used` = events with all three fields Some. The phrase "hits include at least one scored-broke file" describes why: an event carries the lift measurement when scored files broke (hits + scored surprises). The scoring caught at least one break.
+
+Given the example wants pairs=1 for the real data (where event 1 has no scored_broke and event 2 has scored_broke=3, hit_count=2), the simplest consistent rule is: count events where `scored_broke == Some(n) && n > 0`. Event 1: scored_broke=None → not counted. Event 2: scored_broke=Some(3) → counted. pairs=1. ✓
+
+But what about hit_count? "hits include at least one scored-broke file" — a hit file IS a scored-broke file. If scored_broke=Some(3) and hit_count=0, hits include NO scored-broke files (they were all surprises). Under the strict reading that wouldn't count. But under a looser reading ("the validation measured scored files breaking"), it counts since surprises are scored files that broke.
+
+Hmm, let me look at exactly how the dream tracks pairs. From the accuracy module: "lift_events_used IS the matched-pair count: each lift-carrying validation event is one matched prediction-outcome pair feeding the pooled lift." And lift-carrying = all three Some. There's no hit requirement there.
+
+To be safe and consistent with the existing accuracy semantics (which the task says to follow — "per existing semantics"), I'll count events where `scored_broke` is `Some(n)` with n > 0. Actually wait — should I require n > 0? In compute_accuracy_stats, an event with scored_broke: Some(0) would still count toward lift_events_used but then `lift_scored_broke_sum > 0` check means overall_lift = None. Hmm, so lift_events_used counts it but the lift itself is None.
+
+For the meter, "validations whose hits include at least one scored-broke file" — if scored_broke=Some(0), no scored file broke; there's no match at all. That shouldn't count as a pair. So I'll require `scored_broke.is_some_and(|n| n > 0)`.
+
+Actually, hold on. Let me reconsider: "hits include at least one scored-broke file". Parse strictly: the hits list includes at least one file that is scored-broke. A file is "scored-broke" if it's a scored file that broke. Hits are predicted files that broke — they're scored AND broke. So a hit file is always scored-broke. "hits include at least one scored-broke file" ⟺ hit_count ≥ 1. BUT the first real validation (day 171) has hits=["src/commands_risk.rs"] → hit_count=1, so under this rule pairs would be 2, contradicting the task example of pairs=1.
+
+Unless... the task example was written speculatively (they estimated pairs=1 based on what they thought). The evaluator feedback says "The real JSONL files confirm the counts (88 snapshots, 2 validations) that the meter was supposed to surface". They only confirmed snapshots and validations counts, not pairs. Hmm.
+
+But the task itself says the meter's purpose is to make "the ≥5-pair milestone" accumulation legible. And the accuracy module's `Pairs: {pairs}/5` uses lift_events_used. For consistency between the meter and the accuracy report, pairs should equal lift_events_used. Given real data: lift_events_used = 1 (only the day-172 event has all three fields).
+
+I'll define pairs = count of validation events with `scored_broke.is_some()` AND `scored_broke > 0`, which for real data = 1, and equals lift_events_used for events where scored_broke > 0 (compute_accuracy_stats would count scored_broke=Some(0) too, but that represents "no scored file broke", so "hits include at least one scored-broke file" is false there → correctly excluded).
+
+This is consistent with both the task example (pairs=1) and, in practice, the accuracy module's pair count (they agree unless an event has scored_broke=Some(0), which no real event does — replay_validate_core only sets Some when hits+surprises > 0).
+
+Now, where do I wire it:
+
+1. `auto_risk_snapshot` (in commands_risk_snapshots.rs) — after write_risk_snapshot_to succeeds, write the meter. Also on the dedup-skip path? The task says "in the auto_risk_snapshot / snapshot write path, also write an entry". The auto path fires on `/commit` — but wait, per CLAUDE.md: `auto_risk_snapshot` fires ONLY from arc's own `/commit` handler and opt-in REPL exit. It does NOT fire in the evolve loop (which commits with raw git). The harness path is `arc risk snapshot` per session.
+
+To be robust, write the meter in both `auto_risk_snapshot` (after write) and `handle_risk_snapshot` (after write + print progress line).
+
+Let me design the functions:
+
+```rust
+/// Default path for the risk meter cadence stamp.
+pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
+
+/// The dream milestone: ≥5 matched prediction-outcome pairs before the lift is
+/// trusted. Referenced in the meter file so readers see the goal.
+pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+
+/// Computed cadence stamp for the risk prediction meter.
+pub(crate) struct RiskMeter {
+    pub(crate) snapshots: u64,
+    pub(crate) validations: u64,
+    pub(crate) pairs: u64,
+    pub(crate) last_snapshot_day: u64,
+    pub(crate) target_pairs: u64,
+}
+
+/// Compute the risk meter from snapshot + validation JSONL content.
+pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &str, last_snapshot_day: u64) -> RiskMeter {
+    let snapshots = parse_all_snapshots(snapshot_content).len() as u64;
+    let validations = parse_validation_events(validation_content).len() as u64;
+    let pairs = parse_validation_events(validation_content)
+        .iter()
+        .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+        .count() as u64;
+    RiskMeter { snapshots, validations, pairs, last_snapshot_day, target_pairs: RISK_METER_TARGET_PAIRS }
+}
+```
+
+Where does last_snapshot_day come from? The last valid snapshot's day. `parse_all_snapshots` gives `ParsedSnapshot { day, git_hash, predicted }`. Last one's day. If none, 0.
+
+Let me make compute_risk_meter compute last_snapshot_day itself from parse_all_snapshots. That's cleaner and "re-uses parse_all_snapshots".
+
+```rust
+pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let validations = parse_validation_events(validation_content);
+    let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+    let pairs = validations.iter().filter(|e| e.scored_broke.is_some_and(|n| n > 0)).count() as u64;
+    RiskMeter {
+        snapshots: snapshots.len() as u64,
+        validations: validations.len() as u64,
+        pairs,
+        last_snapshot_day,
+        target_pairs: RISK_METER_TARGET_PAIRS,
+    }
+}
+```
+
+Then a writer:
+
+```rust
+/// Write the risk meter stamp to the given path, computed from the two JSONL
+/// files. Returns Ok(()) even if the JSONL files are missing (counts of zero).
+pub(crate) fn write_risk_meter_to(
+    meter_path: &std::path::Path,
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+) -> std::io::Result<RiskMeter> {
+    let snapshot_content = std::fs::read_to_string(snapshot_path).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(validation_path).unwrap_or_default();
+    let meter = compute_risk_meter(&snapshot_content, &validation_content);
+    if let Some(parent) = meter_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&meter).map_err(std::io::Error::other)?;
+    std::fs::write(meter_path, json)?;
+    Ok(meter)
+}
+
+/// Write the risk meter stamp to the default `.arc/risk_meter.json` path.
+pub(crate) fn write_risk_meter() -> Option<RiskMeter> {
+    write_risk_meter_to(
+        std::path::Path::new(RISK_METER_PATH),
+        std::path::Path::new(RISK_SNAPSHOT_PATH),
+        std::path::Path::new(RISK_VALIDATION_PATH),
+    )
+    .ok()
+}
+```
+
+Hmm, does RiskMeter need Serialize? Using serde_json::json! to build the object manually avoids adding derives:
+
+```rust
+let json = serde_json::json!({
+    "snapshots": meter.snapshots,
+    "validations": meter.validations,
+    "pairs": meter.pairs,
+    "last_snapshot_day": meter.last_snapshot_day,
+    "target_pairs": meter.target_pairs,
+});
+let json_str = serde_json::to_string_pretty(&json).map_err(std::io::Error::other)?;
+```
+
+Check whether serde derive is available — the file already uses serde_json. Adding `#[derive(Serialize)]` would need `serde::Serialize` import; serde is in Cargo.toml almost surely. Simpler to use json! macro, no new imports.
+
+Format line:
+
+```rust
+/// One-line progress note for the harness path: "risk meter: N/5 pairs (...)".
+pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+    format!(
+        "risk meter: {}/{} pairs ({} snapshots, {} validations)",
+        meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
+    )
+}
+```
+
+The task example: "e.g. 'risk meter: 2/5 pairs (88 snapshots, 2 validations)'". So exactly this format.
+
+Now wiring:
+
+In `auto_risk_snapshot` — after successful write:
+```rust
+if let Err(e) = write_risk_snapshot_to(...) {
+    eprintln!(...);
+} else {
+    if let Some(meter) = write_risk_meter() {
+        eprintln!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));
+    }
+}
+```
+
+Hmm, should auto path print? The task says "when arc risk snapshot runs (the harness path), print a one-line progress note". The auto path (from /commit) — printing a dim line is fine and helpful. But the main requirement is the `arc risk snapshot` handler. Let me print in `handle_risk_snapshot` (commands_risk.rs) as a normal println after the snapshot saved message.
+
+In `handle_risk_snapshot`:
+```rust
+match write_risk_snapshot_to(path, &json) {
+    Ok(()) => {
+        let count = risks.len().min(10);
+        println!("  📸 Snapshot saved — {count} files scored, git HEAD {git_hash}");
+        // Cadence stamp: surface accumulation progress toward the ≥5-pair dream milestone.
+        if let Some(meter) = write_risk_meter() {
+            println!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));
+        }
+    }
+    ...
+}
+```
+
+Need to re-export `write_risk_meter` and `format_risk_meter_line` (and maybe `compute_risk_meter`, `RiskMeter`, `RISK_METER_PATH`) from commands_risk.rs so handle_risk_snapshot can use them. The re-export block at top of commands_risk.rs:
+
+```rust
+pub(crate) use crate::commands_risk_snapshots::{
+    auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+    last_validation_association, load_validation_history_from, parse_all_snapshots,
+    parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+    write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+};
+```
+
+Add `format_risk_meter_line, write_risk_meter, RiskMeter` (compute_risk_meter also useful for tests but may not be needed at call sites — but the unit test lives in commands_risk_snapshots so it can use it directly).
+
+Now the unit test: "given fixture snapshot+validation JSONL content, the meter computation returns the right pair count". Use fixture content with some snapshots (with top_10) and validations where one has scored_broke and one doesn't.
+
+Let me write:
+
+```rust
+#[test]
+fn test_compute_risk_meter_pair_count() {
+    let snapshot_content = "{\"day\":170,\"git_hash\":\"aaa\",\"top_10\":[{\"path\":\"src/a.rs\"}]}\n\
+        {\"day\":171,\"git_hash\":\"bbb\",\"top_10\":[{\"path\":\"src/b.rs\"}]}";
+    let validation_content = "\
+        {\"day\":170,\"hits\":[\"src/a.rs\"],\"surprises\":[],\"predicted_count\":1,\"total_scored\":5,\"scored_broke\":1,\"accuracy_pct\":100.0}\n\
+        {\"day\":171,\"hits\":[],\"surprises\":[\"src/c.rs\"],\"predicted_count\":1,\"total_scored\":5,\"scored_broke\":1,\"accuracy_pct\":0.0}\n\
+        {\"day\":172,\"hits\":[],\"surprises\":[],\"predicted_count\":1,\"accuracy_pct\":0.0}";
+    let meter = compute_risk_meter(snapshot_content, validation_content);
+    assert_eq!(meter.snapshots, 2);
+    assert_eq!(meter.validations, 3);
+    assert_eq!(meter.pairs, 2); // two events carry scored_broke > 0
+    assert_eq!(meter.last_snapshot_day, 171);
+    assert_eq!(meter.target_pairs, 5);
+}
+```
+
+Hmm wait — for event 2, hits=[], surprises=[src/c.rs], scored_broke=1. Is that a "pair"? hits include at least one scored-broke file → hits is empty → no. Hmm. But per the semantics that scored_broke>0... 
+
+Let me re-read the task text one more time very carefully:
+
+"pairs = validations whose hits include at least one scored-broke file, per existing semantics — re-use parse_validation_events / parse_all_snapshots rather than duplicating parsing"
+
+OK here's my interpretation challenge. The existing semantics for a "matched prediction-outcome pair" in the accuracy module is `lift_events_used`: events with (predicted_count, total_scored, scored_broke) all Some. There's no hit requirement there — event with hits=[] but scored_broke=Some(1) would still be lift-carrying and counted in lift_events_used.
+
+"validations whose hits include at least one scored-broke file" — maybe this is a loose description of "validations that observed a scored file breaking" — i.e., scored_broke > 0. Under this reading, both event 1 and event 2 count → pairs=2 in my fixture.
+
+And with the real data: event 1 (day 171) has NO scored_broke field → not counted; event 2 (day 172) scored_broke=3 → counted → pairs=1. ✓ Consistent with the task's example of pairs=1 for the real files.
+
+I'll go with `scored_broke.is_some_and(|n| n > 0)`. The phrase "hits include at least one scored-broke file" is loose prose; "per existing semantics" is the authoritative pointer, and existing semantics = lift-carrying events (all three fields present). The scored_broke>0 refinement excludes degenerate Some(0) events which no real writer produces anyway.
+
+Now, `write_risk_meter_to` returns the meter so the writer can print. Good.
+
+Also should `auto_risk_snapshot` write meter? It's in the snapshot write path, and the task says "in the auto_risk_snapshot / snapshot write path, also write an entry". Yes — add it there too, with the dim line.
+
+Also the test `auto_risk_snapshot_to` — leave as is (tests don't need meter).
+
+Now let me also double-check `ParsedSnapshot.day` type: u64. `last_snapshot_day` u64. Fine.
+
+One more consideration: `parse_validation_events` returns Vec<ValidationEvent>; ValidationEvent derives Default. scored_broke field is `pub(crate) scored_broke: Option<usize>`. Good.
+
+Also — should the meter be written even when the snapshot write fails in auto path? No — only after successful write, consistent with "recording when the meter STARTS" (cadence stamp on snapshot events).
+
+Edge: in handle_risk_snapshot, the dedup doesn't exist there (it always writes). Fine.
+
+Now write the code. Let me also check the `format` imports in commands_risk_snapshots.rs: `use crate::format::{DIM, RESET};`. Good — format_risk_meter_line produces plain text (no color), and call sites add DIM/RESET.
+
+Let me now write the implementation into the file. I'll insert after `write_risk_snapshot_to` (line ~86) — actually better placed near the validation parsing (after parse_all_snapshots, since it uses those). But auto_risk_snapshot (line 106) calls write_risk_meter — function order doesn't matter in Rust. I'll add the meter code after `parse_all_snapshots` (line 475), right before the tests module. And add the calls in auto_risk_snapshot + the re-export + handle_risk_snapshot print.
+
+Let me write.
+────────────────────────────────────────────────────────────────────────────────
+All data confirmed: 88 snapshots, 2 validations, 1 lift-carrying (pair) event, last snapshot day 174 — matching the task example. Now let me implement. First, the meter computation + writer in `commands_risk_snapshots.rs, after parse_all_s
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (6 → 103 lines)
+  + /// Default path for the risk meter cadence stamp.
+  + pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
+  + 
+  + /// The dream's milestone: accumulate ≥5 matched prediction-outcome pairs
+  + /// before the lift measurement is trusted. Referenced in the meter file so
+  + /// humans/agents reading it see the goal.
+  + pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+  + 
+  + /// Computed cadence stamp for the risk prediction meter — a run-counted
+  + /// summary of the two JSONL ledger files, written alongside each snapshot so
+  + /// the accumulation state stays legible session-to-session (and we can tell
+  + /// whether the harness feed is still firing).
+  + pub(crate) struct RiskMeter {
+  +     /// Snapshot lines in `.arc/risk_snapshots.jsonl`.
+  +     pub(crate) snapshots: u64,
+  +     /// Validation lines in `.arc/risk_validations.jsonl`.
+  +     pub(crate) validations: u64,
+  +     /// Matched prediction-outcome pairs: validations whose `scored_broke` is
+  +     /// present and > 0 (the loop observed at least one scored file breaking),
+  +     /// per the existing lift-carrying semantics in `compute_accuracy_stats`.
+  ... (80 more lines)
+ ✓ (216ms)
+  + /// Default path for the risk meter cadence stamp.
+  + pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
+  + 
+  + /// The dream's milestone: accumulate ≥5 matched prediction-outcome pairs
+  + /// before the lift measurement is trusted. Referenced in the meter file so
+  + /// humans/agents reading it see the goal.
+  + pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+  + 
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait, I placed the `#[cfg(test)] mod tests` right after the new code but that's inside the file where the tests module was originally at line 477. Let me check the structure — I replaced the `#[cfg(test)] mod tests {` opening which was originally at line 477. The edit inserted my new code before the tests module. Good.
+
+But wait — the tests module was after `parse_all_snapshots` (line 477). My new functions reference `parse_validation_events` and `parse_all_snapshots` which are defined... hmm, `parse_validation_events` is at line 404 and `parse_all_snapshots` at 445 — before my insertion point (which was at line 477). Good, they're defined before.
+
+Also `RISK_SNAPSHOT_PATH` is at line 13, `RISK_VALIDATION_PATH` at 155. Good.
+
+Now let me add the test for the meter computation. Let me add it inside the tests module.
+────────────────────────────────────────────────────────────────────────────────
+Now let me add the unit test inside the tests module. Let me look at the end of the tests module to add
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:1128..1168 ✓ (0ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:1167..1177 ✓ (0ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (5 → 87 lines)
+    assert_eq!(events.len(), 2, "appending twice yields two lines");
+            assert_eq!(events[0].day, 1);
+            assert_eq!(events[1].day, 2);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_risk_meter_counts_from_fixtures() {
+  +         // Fixture: 3 snapshots (last on day 174), 4 validations — two of which
+  +         // carry a positive scored_broke (matched pairs), one old-format event
+  +         // with no lift fields, and one with scored_broke absent/None (no scored
+  +         // file broke → not a matched pair).
+  +         let snapshot_content = "\
+  + {\"day\":170,\"git_hash\":\"aaa111\",\"top_10\":[{\"path\":\"src/a.rs\"}]}\n\
+  + {\"day\":172,\"git_hash\":\"bbb222\",\"top_10\":[{\"path\":\"src/b.rs\"}]}\n\
+  + {\"day\":174,\"git_hash\":\"ccc333\",\"top_10\":[{\"path\":\"src/c.rs\"}]}\n";
+  +         let validation_content = "\
+  + {\"day\":171,\"hits\":[],\"surprises\":[\"src/x.rs\"],\"accuracy_pct\":0.0,\"predicted_count\":10}\n\
+  + {\"day\":172,\"hits\":[\"src/b.rs\"],\"surprises\":[],\"accuracy_pct\":100.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":1}\n\
+  + {\"day\":173,\"hits\":[\"src/c.rs\"],\"surprises\":[\"src/z.rs\"],\"accuracy_pct\":50.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":2}\n\
+  + {\"day\":174,\"hits\":[],\"surprises\":[],\"accuracy_pct\":0.0,\"predicted_count\":10,\"total_scored\":77,\"scored_broke\":0}\n";
+  ... (67 more lines)
+ ✓ (211ms)
+    assert_eq!(events.len(), 2, "appending twice yields two lines");
+            assert_eq!(events[0].day, 1);
+            assert_eq!(events[1].day, 2);
+  +     }
+  + 
+  +     #[test]
+  +     fn test_compute_risk_meter_counts_from_fixtures() {
+  +         // Fixture: 3 snapshots (last on day 174), 4 validations — two of which
+  ... (13 more lines)
+
+Now update `handle_risk_snapshot` in `commands_risk.rs` to write the meter and print the
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk.rs (9 → 17 lines)
+            Ok(()) => {
+                let count = risks.len().min(10);
+                println!("  📸 Snapshot saved — {count} files scored, git HEAD {git_hash}");
+  +             // Cadence stamp: record WHERE the prediction meter STARTS (snapshot
+  +             // count, validation count, matched pairs toward the ≥5-pair dream
+  +             // milestone) and surface the cold-start progress one-line.
+  +             if let Some(meter) = write_risk_meter() {
+  +                 println!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));
+  +             } else {
+  +                 eprintln!("  {DIM}(risk meter: could not write {RISK_METER_PATH}){RESET}");
+  +             }
+            }
+            Err(e) => {
+                eprintln!("  {RED}Error saving risk snapshot: {e}{RESET}");
+ ✓ (213ms)
+            Ok(()) => {
+                let count = risks.len().min(10);
+                println!("  📸 Snapshot saved — {count} files scored, git HEAD {git_hash}");
+  +             // Cadence stamp: record WHERE the prediction meter STARTS (snapshot
+  +             // count, validation count, matched pairs toward the ≥5-pair dream
+  +             // milestone) and surface the cold-start progress one-line.
+  +             if let Some(meter) = write_risk_meter() {
+  +                 println!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));
+  ... (6 more lines)
+
+Now re-export the new symbols from `commands_risk.rs so handle_risk_snapshot` can use
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk.rs (6 → 7 lines)
+    pub(crate) use crate::commands_risk_snapshots::{
+        auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  -     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  -     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     format_risk_meter_line, last_validation_association, load_validation_history_from,
+  +     parse_all_snapshots, parse_validation_events, risk_autosnapshot_enabled,
+  +     write_risk_meter, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  +     RISK_METER_PATH, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    };
+ ✓ (212ms)
+    pub(crate) use crate::commands_risk_snapshots::{
+        auto_risk_snapshot, auto_validate_after_failure, build_risk_snapshot_json,
+  -     last_validation_association, load_validation_history_from, parse_all_snapshots,
+  -     parse_validation_events, risk_autosnapshot_enabled, write_risk_snapshot_to,
+  -     write_validation_event, ValidationEvent, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+  +     format_risk_meter_line, last_validation_association, load_validation_history_from,
+  +     parse_all_snapshots, parse_validation_events, risk_autosnapshot_enabled,
+  +     write_risk_meter, write_risk_snapshot_to, write_validation_event, ValidationEvent,
+  +     RISK_METER_PATH, RISK_SNAPSHOT_PATH, RISK_VALIDATION_PATH,
+    };
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -20 ✓ (5.6s)
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test risk_meter 2>&1 | tail … ✓ (13.2s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The risk_meter tests pass. Let me run the full commands_risk_snapshots module tests to confirm all pass.
+  ╭─ Turn 26 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --lib commands_risk_sna… ✓ (72ms)
+
+

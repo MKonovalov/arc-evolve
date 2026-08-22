@@ -1,0 +1,2877 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to add dotenv-style API key loading to arc. The task is:
+
+1. Add dotenv-style loading in `src/agent_builder.rs` or `src/cli.rs`:
+   - If the target key's env var is unset, look for `.env` in the CWD
+   - Read `KEY=value` lines (ignore comments `#`, trim whitespace, support optional `export ` prefix and quoted values)
+   - Apply to any provider key (ANTHROPIC_API_KEY and known providers in `src/providers.rs`)
+   - Precedence: process env > .env file > built-in defaults
+   - No dotenv crate dependency (hand-rolled parser ~40 lines preferred)
+2. Add a unit test for the .env parser
+3. Update docs if behavior changes
+
+Let me start by looking at the key files: `src/providers.rs` and `src/agent_builder.rs` to understand how API keys are resolved.
+
+Let me act early. First, let me look at the relevant code.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/providers.rs ✓ (2ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 900ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how API keys are resolved in agent_builder.rs and cli.rs. Let me search for where keys are read.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'env::var|var_os|api_key' in /home/runner/work/arc-evolve/arc-evolve/src/agent_builder.rs  ▶ search 'provider_api_key_env' in /home/runner/work/arc-evolve/arc-evolve/src ✓ (2ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.3s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how API keys are resolved in agent_builder.rs and main.rs.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "env::var\|std::env\|api_k…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "env::var\|api_key\|provid… ✓ (3ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 934ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how the API key is resolved. Let me look at `src/main.rs` around line 590-610 and how the provider config resolution works — where does `result.api_key` come from? Let me find where the api_key is resolved from env/config.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "provider_api_key_env" sr… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:420..560 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. The API key resolution happens in `parse_model_config` in `src/cli.rs`. The key chain is:
+
+1. `--api-key` flag
+2. provider-specific env var (e.g. `ANTHROPIC_API_KEY`)
+3. provider-specific `.arc.toml` config key
+4. `ANTHROPIC_API_KEY` / `API_KEY` env vars
+5. config file `api_key`
+6. "not-needed" / empty / error
+
+The task wants: dotenv-style loading — if the key's env var is unset, look for `.env` in CWD and read `KEY=value` lines.
+
+Best place: add a helper `read_env_file` in cli.rs (or agent_builder.rs per task description, but cli.rs is where provider resolution happens — task says "in src/agent_builder.rs (where provider API keys are resolved) or src/cli.rs (arg parsing, near provider resolution)". cli.rs parse_model_config is the provider resolution point, so I'll put it there).
+
+Wait — the task says "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)." The known providers are in providers.rs but `provider_api_key_env` is re-exported via cli (line 16: `use crate::... provider_api_key_env` — actually cli.rs imports them from providers and re-exports).
+
+Let me check where the fallback chain uses env vars: line 489 `std::env::var("ANTHROPIC_API_KEY")` and line 474 `std::env::var(var)`.
+
+The cleanest approach: create a helper function `env_var_or_dotenv(name) -> Option<String>` that:
+1. Checks `std::env::var(name)` — if set and non-empty, return it.
+2. Otherwise reads `.env` from CWD, parses lines, looks for `name=value`.
+
+Then replace the `std::env::var(var).ok()` calls with the helper. This applies to:
+- line 474: `provider_env_var.and_then(|var| std::env::var(var).ok())`
+- line 489: fallback chain `std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))`
+
+Also setup.rs, agent_builder.rs fallback (line 912-914), prompt_retry.rs, dispatch_sub.rs, commands_spawn.rs, commands_dev.rs etc. use these env vars. But the task says scope is src/agent_builder.rs and src/cli.rs. The primary entry is cli.rs parse_model_config. Let me focus there, and also the agent_builder fallback (line 912) for completeness since it's in the task's file list.
+
+Actually, let me keep it surgical: put the helper in cli.rs (since that's where resolution happens), and apply it in the two spots in parse_model_config. Also apply in agent_builder.rs's `try_fallback_prompt`/`try_switch_to_fallback` (line 912). And setup.rs uses `std::env::var` for checks but that's outside the listed files... task says files: src/agent_builder.rs, src/cli.rs. I'll stick to those two but make the helper pub(crate) so it could be reused.
+
+Let me design the parser:
+
+```rust
+/// Read a `KEY=value` assignment for `key` from a `.env` file in the current
+/// working directory (if present). Used as a fallback when the process
+/// environment doesn't set the variable. Only the CWD is checked — no upward
+/// walk, no system dirs. Comments (`#`), blank lines, and an optional `export `
+/// prefix are supported; values may be unquoted or wrapped in single/double
+/// quotes.
+pub(crate) fn dotenv_value_from_cwd(key: &str) -> Option<String> {
+    let path = std::env::current_dir().ok()?.join(".env");
+    let content = std::fs::read_to_string(path).ok()?;
+    dotenv_value(&content, key)
+}
+
+/// Parse a dotenv-formatted string and return the value for `key`,
+/// or `None` if absent. See [`dotenv_value_from_cwd`] for the syntax.
+fn dotenv_value(content: &str, key: &str) -> Option<String> {
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let (name, value) = line.split_once('=')?;  // hmm, need to continue on malformed lines
+        ...
+    }
+}
+```
+
+Wait — `split_once('=')` returning None should skip to next line, not return None overall. Let me write carefully:
+
+```rust
+fn dotenv_value(content: &str, key: &str) -> Option<String> {
+    for raw_line in content.lines() {
+        let mut line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("export ") {
+            line = rest.trim();
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if name.trim() != key {
+            continue;
+        }
+        let value = value.trim();
+        // Strip surrounding quotes
+        if value.len() >= 2 {
+            let first = value.as_bytes()[0] as char;
+            let last = value.chars().last().unwrap();
+            if (first == '"' || first == '\'') && first == last {
+                return Some(value[1..value.len() - 1].to_string());
+            }
+        }
+        return Some(value.to_string());
+    }
+    None
+}
+```
+
+Wait, careful with `value[1..value.len() - 1]` — need char-boundary safety. Since first and last are quotes (ASCII, 1 byte) at the start/end, if first byte is `'` or `"` then index 1 is a char boundary. And value.len()-1: the last byte is the quote, so len-1 is a boundary. Actually value could have multi-byte content but the last byte is the closing quote which is ASCII, so value.len()-1 points at the quote byte, which is a char boundary. And index 1 after opening ASCII quote is also a boundary. Safe. But the CLAUDE.md rule says never use byte indexing without is_char_boundary. To be safe, I could use chars-based extraction:
+
+```rust
+let trimmed = value.trim();
+let mut chars = trimmed.chars();
+let first = chars.next();
+let last = if trimmed.len() >= 2 { trimmed.chars().last() } else { None };
+```
+
+Hmm, let me write it cleanly with is_char_boundary checks to comply with the rule:
+
+```rust
+fn strip_quotes(value: &str) -> &str {
+    if value.len() >= 2 {
+        let first = value.as_bytes()[0];
+        let last = value.as_bytes()[value.len() - 1];
+        if (first == b'"' || first == b'\'') && first == last {
+            // Both quotes are ASCII so the boundaries are safe.
+            return &value[1..value.len() - 1];
+        }
+    }
+    value
+}
+```
+
+The byte indexing here is safe because both endpoints are ASCII quote bytes — the CLAUDE.md rule is about panicking on multi-byte chars, and I'm only indexing at ASCII quote positions. I can add a comment explaining. Or just use is_char_boundary checks. Let me add them for strict compliance:
+
+```rust
+fn strip_quotes(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    if value.len() >= 2 && bytes[0] == bytes[value.len() - 1]
+        && (bytes[0] == b'"' || bytes[0] == b'\'')
+        && value.is_char_boundary(1)
+        && value.is_char_boundary(value.len() - 1)
+    {
+        return &value[1..value.len() - 1];
+    }
+    value
+}
+```
+
+That's belt-and-braces. Fine.
+
+Now the helper to resolve env-or-dotenv:
+
+```rust
+/// Resolve a provider env var with dotenv fallback: process environment wins;
+/// if unset (or empty), fall back to a `KEY=value` line in the CWD's `.env`.
+pub(crate) fn env_or_dotenv(key: &str) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => dotenv_value_from_cwd(key),
+    }
+}
+```
+
+Then in parse_model_config:
+- line 473-475: `.and_then(|var| std::env::var(var).ok())` → `.and_then(|var| env_or_dotenv(var))`
+- line 489: `std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))` → `env_or_dotenv("ANTHROPIC_API_KEY").or_else(|| env_or_dotenv("API_KEY"))`
+
+The fallback chain returns `Ok(key)` — need to adjust. The current code:
+
+```rust
+match std::env::var("ANTHROPIC_API_KEY")
+    .or_else(|_| std::env::var("API_KEY"))
+{
+    Ok(key) if !key.is_empty() => key,
+    _ => ...
+}
+```
+
+Change to:
+
+```rust
+match env_or_dotenv("ANTHROPIC_API_KEY").or_else(|| env_or_dotenv("API_KEY")) {
+    Some(key) if !key.is_empty() => key,
+    _ => ...
+}
+```
+
+Also agent_builder.rs line 912-914:
+
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+
+This is in `try_switch_to_fallback` — resolve key from env at runtime. Should also honor dotenv. Change to use a shared helper. I'll make `env_or_dotenv` pub(crate) in cli.rs and call `crate::cli::env_or_dotenv(env_var)`.
+
+Let me check what cli.rs's module path is used in agent_builder.rs — line 912 uses `cli::provider_api_key_env`, and agent_builder likely has `use crate::cli;`. Let me check imports.
+
+Also there's setup.rs line 344, 364, 593, dispatch_sub.rs, prompt_retry.rs, commands_spawn.rs, commands_dev.rs — all use `std::env::var(env_var)`. Task scope says files: src/agent_builder.rs, src/cli.rs. I'll keep the change focused there. Actually, for real product value, setup.rs is where the interactive wizard checks whether the user "needs setup" — but scope discipline says stick to the two files. The helpers being pub(crate) means future wiring is trivial.
+
+Hmm, but actually let me reconsider: the verification step says "with a temp dir containing .env with a fake ANTHROPIC_API_KEY=dummy, arc --version style invocation doesn't emit a missing-key error at parse time". `arc --version` goes through parse_args → parse_model_config? Let me check. Actually model config parsing probably happens in main() after arg parsing, only when running the agent. `--version` likely short-circuits. Let me not worry; the test will be a unit test for the parser.
+
+Let me also make sure CWD .env reading — the task explicitly says "only the CWD — no upward walk, no system dirs". Good.
+
+Now write the tests. Add a tests module in cli.rs (there's already `#[cfg(test)] mod tests` — line 1605+). Let me find the tests module location and add tests there, or the helpers can be tested in a new module. Let me check the end of cli.rs for the tests module.
+
+Let me look at Cargo.toml for dotenv dep — task says check first.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "dotenv" Cargo.toml; echo …  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '900,920p' src/agent_builde… ✓ (4ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+No dotenv crate in Cargo.toml, so hand-rolled parser it is. 
+
+Now let me design the implementation:
+
+1. A `load_dotenv_key(key)` function that:
+   - Checks process env first (precedence)
+   - If unset, looks for `.env` in CWD, parses `KEY=value` lines, returns the value
+
+2. Wire it into `parse_model_config` in `src/cli.rs` for the env var lookups (ANTHROPIC_API_KEY, API_KEY fallback, provider-specific env).
+
+Wait, but there's a subtlety — the task says "Apply to any provider key the code supports". The lookup happens in several places:
+- `src/cli.rs` `parse_model_config` — provider env, ANTHROPIC_API_KEY/API_KEY fallback
+- `src/agent_builder.rs` line 912-914 — fallback retry
+- `src/setup.rs` etc.
+
+The task says add it in `src/agent_builder.rs` or `src/cli.rs`, near provider resolution. The cleanest approach: create a helper function (e.g., in `src/cli.rs` or a new location) `get_api_key_from_env_or_dotenv(var_name) -> Option<String>` that:
+1. Checks `std::env::var(var_name)` 
+2. If missing/empty, reads `./.env` and parses it
+
+Then replace the direct `std::env::var(...)` calls for keys with this helper. But careful: there are other places using `std::env::var` for keys (setup.rs, dispatch_sub.rs, etc.). The task says "Apply to any provider key the code supports" — but the minimum required per the task files is `src/agent_builder.rs` and `src/cli.rs`. Let me focus on where the actual key resolution happens at runtime (parse_model_config in cli.rs, fallback in agent_builder.rs), and add a shared parser.
+
+The task explicitly says files: `src/agent_builder.rs`, `src/cli.rs`. Let me put the parser in cli.rs (or a small shared spot) and use it in both.
+
+Actually the cleanest: add `load_dotenv` parser + `key_from_env_or_dotenv(key)` helper in `src/cli.rs` (pub), use in `parse_model_config`, and use in `agent_builder.rs` fallback. But setup.rs and dispatch_sub.rs also resolve keys... The task's scope is the two files. But "Apply to any provider key the code supports" suggests coverage broadly. Let me be pragmatic: put the helper in cli.rs, wire it into the main resolution point (parse_model_config) which covers all providers at startup, and into agent_builder fallback. That's the core. 
+
+However — the simplest and most robust centralization: create a small module function `load_api_key_env(var_name)` in `src/providers.rs`? The task said agent_builder.rs or cli.rs. providers.rs is a natural home but the task restricts files to those two. Hmm, the task says "Files: src/agent_builder.rs, src/cli.rs" — I should stick to those two files to be safe. I can put the parser in cli.rs and re-use from agent_builder.rs via `cli::`.
+
+Wait, but there's a Rust module dependency: agent_builder already uses `crate::cli`. Good.
+
+Let me now write the parser:
+
+```rust
+/// Load dotenv-style key/value pairs from a `.env` file in the current working
+/// directory, if present. Only the CWD is consulted (no upward walk). Returns
+/// the parsed map: KEY -> value.
+pub(crate) fn parse_dotenv_file(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return map;
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Optional `export ` prefix
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = line[eq + 1..].trim().to_string();
+        // Strip surrounding quotes (single or double)
+        if value.len() >= 2 {
+            let first = value.as_bytes()[0];
+            let last = value.as_bytes()[value.len() - 1];
+            if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                value = value[1..value.len() - 1].to_string();
+            }
+        }
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+
+/// Look up an API key env var with dotenv fallback: process environment wins,
+/// then `.env` in the current working directory, then nothing.
+pub(crate) fn api_key_from_env_or_dotenv(var_name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(var_name) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    let env_path = std::path::Path::new(".env");
+    if env_path.is_file() {
+        parse_dotenv_file(env_path).get(var_name).cloned().filter(|k| !k.is_empty())
+    } else {
+        None
+    }
+}
+```
+
+Wait — reading `.env` in CWD could be a bit slow but fine (one small file read per key lookup). Better: read once. But to keep precedence simple and stateless, a per-call read is fine for ~3 key lookups at startup. Actually, to be clean, I could load once and cache in a LazyLock. But minimal-dependency and simple is better. Actually reading the file per lookup is fine — it's tiny and only happens when the env var is unset.
+
+Hmm, actually let me reconsider — the dotenv load only needs to happen at startup for provider key resolution. Per-call read of ~a few KB is negligible. Keep it simple.
+
+Now wire into `parse_model_config`:
+
+Current code:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty());
+```
+
+Change to:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| api_key_from_env_or_dotenv(var))
+    .filter(|k| !k.is_empty());
+```
+
+And the fallback chain:
+```rust
+match std::env::var("ANTHROPIC_API_KEY")
+    .or_else(|_| std::env::var("API_KEY"))
+{
+    Ok(key) if !key.is_empty() => key,
+    ...
+}
+```
+Change to:
+```rust
+match api_key_from_env_or_dotenv("ANTHROPIC_API_KEY")
+    .or_else(|| api_key_from_env_or_dotenv("API_KEY"))
+{
+    Some(key) if !key.is_empty() => key,
+    ...
+}
+```
+
+And agent_builder.rs line 912-914:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+Change to:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::api_key_from_env_or_dotenv(env_var) {
+        self.api_key = key;
+    }
+}
+```
+
+Then tests. Write tests in cli.rs tests module for the parser:
+- comments, blank lines, export prefix
+- quotes (single/double)
+- precedence: process env wins over .env
+- .env missing → None
+- CWD only
+
+For tests that need a temp `.env` file, I need to change CWD, which is process-global — risky in parallel tests. There's `serial_test` with `#[serial]` used already. Also, changing current_dir in a test is dangerous for other parallel tests. Better approach: test `parse_dotenv_file` directly with a temp file path (that's deterministic and safe), and test `api_key_from_env_or_dotenv` precedence by... hmm.
+
+For precedence test, I could make the helper accept an optional path/override for testing. Cleaner: `api_key_from_env_or_dotenv` uses a function `dotenv_path()` returning `.env` in CWD. For tests, test parse_dotenv_file directly with tempfile. For precedence: temporarily set env var, ensure it wins over a fabricated .env... but writing .env in CWD of the test process is messy and affects other tests.
+
+Alternative strategy: make the precedence test spawn... no, simpler. Let me structure:
+
+```rust
+pub(crate) fn api_key_from_env_or_dotenv(var_name: &str) -> Option<String> {
+    api_key_from_env_or_dotenv_in(var_name, dotenv_in_cwd_path())
+}
+```
+
+Hmm, over-engineering. Let me write:
+
+```rust
+fn dotenv_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(".env")
+}
+
+pub(crate) fn api_key_from_env_or_dotenv(var_name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(var_name) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    let path = dotenv_path();
+    if path.is_file() {
+        parse_dotenv_file(&path)
+            .get(var_name)
+            .cloned()
+            .filter(|k| !k.is_empty())
+    } else {
+        None
+    }
+}
+```
+
+For tests:
+1. `test_parse_dotenv_file_basic` — tempfile with content, check parsed map (comments, export, quotes, blank).
+2. `test_parse_dotenv_file_missing` — nonexistent path → empty map.
+3. Precedence: write a `.env` in a tempdir, `std::env::set_current_dir(tempdir)`, set env var, check env wins; unset env var, check .env used. This is process-global (CWD + env). Must be `#[serial]`. There's `serial_test` dev-dependency. Also must restore CWD after. Tests already mutate env vars with `#[serial]` (e.g. test_fallback_switch_resolves_api_key sets GOOGLE_API_KEY). And they restore with remove_var. For CWD, I need to save `std::env::current_dir()` and restore. Let me check if any test already changes CWD... Let me grep.
+
+Actually, changing CWD in a test is risky even with serial because other non-serial tests may run concurrently (cargo test runs tests in threads by default). `#[serial]` only serializes among other `#[serial]` tests. Rust tests run in parallel threads by default, so a CWD change could race with any other test doing file I/O with relative paths. That's the classic danger.
+
+Safer: avoid changing CWD. Instead, test precedence via a helper that takes the path. Let me refactor:
+
+```rust
+pub(crate) fn api_key_from_env_or_dotenv(var_name: &str) -> Option<String> {
+    api_key_from_env_or_dotenv_at(var_name, &dotenv_path())
+}
+
+fn api_key_from_env_or_dotenv_at(var_name: &str, dotenv: &std::path::Path) -> Option<String> {
+    if let Ok(key) = std::env::var(var_name) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    if dotenv.is_file() {
+        parse_dotenv_file(dotenv).get(var_name).cloned().filter(|k| !k.is_empty())
+    } else {
+        None
+    }
+}
+```
+
+Then the precedence test uses `api_key_from_env_or_dotenv_at` with a tempfile path — no CWD mutation. Set the env var → env wins; remove env var → .env wins. With `#[serial]` for env var safety (and restore in a guard). But env var mutation races with other tests reading ANTHROPIC_API_KEY etc. Tests already do this with #[serial], e.g. test at line 2093. But [serial] only protects against other #[serial] tests, not all tests. Existing practice in this codebase already accepts that (they set ANTHROPIC_API_KEY in many tests without serial even). I'll use a unique env var name for the test (e.g. "arc_TEST_DOTENV_KEY") to avoid colliding with any real provider key env, and not set it via the real names. That avoids races entirely for the env-wins case (nobody else touches arc_TEST_DOTENV_KEY).
+
+So:
+
+```rust
+#[test]
+fn test_dotenv_precedence_env_wins() {
+    std::env::set_var("arc_TEST_DOTENV_ENV", "from-env");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "arc_TEST_DOTENV_ENV=from-file\n").unwrap();
+    let got = api_key_from_env_or_dotenv_at("arc_TEST_DOTENV_ENV", &dir.path().join(".env"));
+    std::env::remove_var("arc_TEST_DOTENV_ENV");
+    assert_eq!(got.as_deref(), Some("from-env"));
+}
+
+#[test]
+fn test_dotenv_used_when_env_unset() {
+    std::env::remove_var("arc_TEST_DOTENV_ENV");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(".env");
+    std::fs::write(&path, "arc_TEST_DOTENV_ENV=from-file\n").unwrap();
+    let got = api_key_from_env_or_dotenv_at("arc_TEST_DOTENV_ENV", &path);
+    assert_eq!(got.as_deref(), Some("from-file"));
+}
+```
+
+Wait — but `tempfile` is a dev-dependency, good, already used.
+
+Also, tests that run `cargo test` in this repo — does the repo have a `.env` file? Let me check. If the repo root has no `.env`, `parse_model_config` in tests with no env set will just do a quick `Path::new(".env").is_file()` check → false → same as before. No behavior change for tests. Good.
+
+But wait — there IS a concern: tests that run `parse_args` with only `"test-key"` set for ANTHROPIC_API_KEY already pass. With dotenv check added, if CWD contains `.env` (from the repo... let me verify there's no `.env` file in repo root) — if there were one with ANTHROPIC_API_KEY, some tests could change behavior. Let me check.
+
+Also CLAUDE.md says "No dotenv crate" — confirmed, not in Cargo.toml. Good, hand-rolled.
+
+Now — where do I put the code? The task says `src/agent_builder.rs` or `src/cli.rs`. I'll put parser + helper in cli.rs near parse_model_config, re-export via cli for agent_builder. Both files get edits.
+
+Also the task says: "Update docs if behavior changes: docs/src/getting-started/quick-start.md or docs/src/configuration/models.md gets one short paragraph". Let me check those files for the right spot.
+
+Also — should the fallback key resolution in `main.rs` line 599-603 also use dotenv? It does `std::env::set_var(env_var, &result.api_key)` — that's setting the env var from the already-resolved api_key (which came from parse_model_config, already dotenv-aware). Fine as-is.
+
+What about setup.rs / dispatch_sub.rs / commands_spawn.rs / prompt_retry.rs / commands_dev.rs — those also look up provider keys via `std::env::var(env_var)`. The task's scope is the two files, and parse-time resolution covers the primary path. But for full "any provider key the code supports" coverage... The main resolution point where a real user's key is picked up is parse_model_config. The other spots are contextual (retry, setup wizard, doctor checks). Keeping the task surgical (two files) is per the task instruction. I'll also update agent_builder fallback since it's in the listed files.
+
+Actually, let me reconsider whether to make it more central. The task explicitly says Files: src/agent_builder.rs, src/cli.rs. Stick to that. But the parser needs to live somewhere — cli.rs is fine, it's already imported by agent_builder.
+
+Let me also double-check: `std::env::set_current_dir` isn't needed if I test via `_at` helper. Good.
+
+One more design point: the error message in parse_model_config: "Set {env_hint} env var, use --api-key <key>, or add api_key to .arc.toml." Should mention .env too since that's now a supported path. Update to: "Set {env_hint} env var, add it to a .env file in this directory, use --api-key <key>, or add api_key to .arc.toml." That's a product-facing nicety. And README/docs mention.
+
+Let me check where docs mention API keys. Grep docs/src for ANTHROPIC_API_KEY.
+
+Let me now look at what parse_args does with api_key → flows into Config. Fine.
+
+Also need to check: in cli.rs, are there existing imports for HashMap etc.? It uses `HashMap<String, String>` already in parse_model_config signature (file_config: &HashMap<String, String>). Yes.
+
+Also the helpers must be `pub(crate)` for agent_builder to use (cli module is `crate::cli`). Let me check if cli module is public... agent_builder uses `crate::cli::provider_api_key_env`. provider_api_key_env is defined in providers.rs but re-exported in cli.rs (line 16 imports it). So agent_builder calls `cli::provider_api_key_env`. Fine, `pub(crate)` items in cli are reachable via crate path. Actually if cli module is private (`mod cli;`), then `crate::cli::` works within the crate regardless. `pub(crate)` is right.
+
+Let me write tests in cli.rs's `mod tests`. Check tempfile usage in cli.rs tests... Let me grep. Also check the top-of-file imports in cli.rs.
+
+Let me look at more context: the tests module start at line 1151 and what's imported there.
+────────────────────────────────────────────────────────────────────────────────
+No dotenv crate in Cargo.toml — hand-rolled parser it is. Let me look at the cli.rs test setup and docs locations
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1151,1200p' src/cli.rs; ec… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me plan:
+
+1. Add a dotenv loader in `src/cli.rs` (near parse_model_config) — a pure function `load_dotenv_key(key: &str) -> Option<String>` that reads `.env` from CWD and parses it.
+2. Wire it into `parse_model_config` — in the fallback chain, after process env, before config-file/built-in defaults. Also for provider-specific env vars.
+3. Add unit test.
+4. Update docs.
+
+Let me think about precedence carefully per the task spec:
+- "If the target key's env var is unset, look for `.env` in the CWD"
+- "Keep precedence: process env > .env file > built-in defaults"
+- "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)"
+
+Current precedence in parse_model_config:
+1. `--api-key` flag
+2. provider-specific env var (`std::env::var`)
+3. provider-specific .arc.toml config key
+4. fallback: `ANTHROPIC_API_KEY` env > `API_KEY` env > config file `api_key` > "not-needed"/empty
+
+Wait — actually current precedence has provider env > .arc.toml config > ANTHROPIC_API_KEY env. The task says ".env > built-in defaults" — where do the config file values fit? The task spec says place .env after process env. The .arc.toml is a config file, not a built-in default. I'll insert .env lookup right where env vars are checked — i.e., provider-specific env var first, then fall back to .env file, then the rest of chain. That matches "process env > .env file > built-in defaults" — the .arc.toml config and "not-needed"/empty are the "built-in defaults" end of the chain? Actually the .arc.toml `api_key` is user-provided config. Hmm.
+
+Let me be careful: the semantics should be:
+- --api-key flag (explicit CLI) wins
+- process env (provider-specific) wins
+- .env file (provider-specific) next
+- .arc.toml config
+- ANTHROPIC_API_KEY / API_KEY process env
+- .env for those too?
+- config file api_key
+- not-needed / empty
+
+Actually the simplest, most useful and spec-compliant approach: create a helper that resolves an env var name with dotenv fallback: `resolve_key_from_env_or_dotenv(var_name) -> Option<String>` which checks process env first, then `.env` in CWD. Then replace all the `std::env::var(...)` calls in parse_model_config with this helper. That gives process env > .env > everything else, uniformly for provider key, ANTHROPIC_API_KEY, API_KEY.
+
+Where should the function live? Task says `src/agent_builder.rs` or `src/cli.rs`. `parse_model_config` is in cli.rs, and that's where keys are resolved at parse time. Also `agent_builder.rs` line 912-914 resolves fallback provider keys at runtime — that happens after parse. To be consistent, I could also update that. But the task scope files are agent_builder.rs and cli.rs. Let me put the dotenv parser + resolver in `src/cli.rs`, and also use it in `agent_builder.rs` fallback resolution for consistency (it's in scope). Actually, let me keep focus: the main fix is parse-time resolution in cli.rs. The fallback in agent_builder also uses `std::env::var` — a user with a .env would also expect the fallback to work. I'll make the helper `pub(crate)` in cli.rs and use it in agent_builder.rs too.
+
+Wait, but note: other places use `env::var` for keys (prompt_retry, dispatch_sub, setup, commands_spawn, commands_dev). Those are diagnostics/checks. For completeness I could replace them all with the dotenv-aware helper, but the task says "Apply to any provider key the code supports" with files src/agent_builder.rs and src/cli.rs. Let me keep the change surgical: put helper in cli.rs, use it in cli.rs's parse_model_config and agent_builder.rs's fallback. That covers the primary resolution paths.
+
+Actually — let me reconsider. There's a subtlety: `.env` file is read from CWD at parse time. But `parse_model_config` may be called from tests that change CWD? Tests use tempfile::TempDir — changing CWD in tests is risky since tests run in parallel. Better: make the parser a pure function operating on file contents + a resolver that takes a path. For the test, test the pure parser directly (comments, quoting, export prefix) and test precedence logic via a function that takes an `env_override` or by setting env vars.
+
+Let me design:
+
+```rust
+/// Parse dotenv-style `KEY=value` lines from `.env` file content.
+///
+/// Supports:
+/// - `#` comment lines (and inline comments? — spec says ignore comments `#`, trim whitespace)
+/// - `export KEY=value` prefix
+/// - unquoted and single/double-quoted values
+/// Returns a map of key -> value. Keys are trimmed.
+pub(crate) fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') { continue; }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start(); // support "export " prefix — hmm, need care: "exportKEY" shouldn't match.
+        ...
+    }
+    out
+}
+```
+
+Wait, "export " prefix: `strip_prefix("export ")` requires exactly "export " with the space, so "exportKEY=1" wouldn't match — good. But what about "export\tKEY"? dotenv spec usually has "export KEY". Keep it simple: strip "export " prefix.
+
+Actually let me handle trim properly: after stripping "export ", trim_start again.
+
+Then split on first '=':
+```rust
+let Some((k, v)) = line.split_once('=') else { continue };
+let key = k.trim();
+if key.is_empty() { continue; }
+let val = v.trim();
+// strip quotes
+let val = if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2) || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2) {
+    &val[1..val.len()-1]
+} else { val };
+```
+
+What about inline comments in values like `KEY=value # comment`? Spec says "ignore comments `#`, trim whitespace, support optional export prefix and simple unquoted/quoted values". Keep it simple — I'll just handle full-line comments and quoted values. Should I strip inline ` #` comments for unquoted values? The dotenv convention often supports that. "simple unquoted/quoted values" — I'll keep it minimal but also handle inline comments for unquoted values since that's standard dotenv behavior. Hmm, to be safe and simple: if unquoted and contains " #", strip from that point. Actually that could break values containing `#` legitimately. Standard dotenv crates do strip inline comments only when preceded by whitespace. I'll do: for unquoted values, if there's " #" (space-hash), truncate there. That's what dotenvy does.
+
+Return type: HashMap<String, String>.
+
+Then the loader:
+
+```rust
+/// Read the `.env` file in the current working directory (if present) and
+/// return the value for `key`, respecting process-env precedence: process env
+/// wins over `.env`.
+pub(crate) fn env_or_dotenv(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() { return Some(v); }
+    }
+    dotenv_value(key)
+}
+
+pub(crate) fn dotenv_value(key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(".env").ok()?;
+    parse_dotenv(&content).get(key).cloned().filter(|v| !v.is_empty())
+}
+```
+
+Hmm wait — if process env var is set but empty, should .env win? Task says "If the target key's env var is unset". Empty is effectively unset in most of this codebase (they filter !is_empty). I'll treat empty as unset (matches existing `.filter(|k| !k.is_empty())` behavior).
+
+Now precedence. The current chain in parse_model_config:
+- from_provider_env = `std::env::var(provider_env_var)`
+- from_config_key = .arc.toml key
+- fallback: ANTHROPIC_API_KEY env > API_KEY env > config api_key > defaults
+
+Desired: process env > .env > built-in defaults.
+
+The question is where .arc.toml config sits. Task states only "process env > .env file > built-in defaults". The `.arc.toml` config is neither process env nor a built-in default — it's explicit user config. Arguably explicit config file should rank above .env? Or below? The task doesn't mention it. Current behavior: provider env > .arc.toml provider key. I'll insert .env at the provider-env level: `env_or_dotenv(provider_env_var)` replaces `std::env::var(provider_env_var)`. So: process env > .env > .arc.toml > ANTHROPIC/API_KEY (now also dotenv-aware) > config api_key > defaults. That preserves existing relative ordering and satisfies "process env > .env > built-in defaults".
+
+Actually wait, hmm: should `.env` beat `.arc.toml`? The task said apply .env when "the environment variable is not set" — the .env file is env-like, so it fills in for the env var slot, which currently sits above .arc.toml. Yes, that's the natural reading.
+
+For the fallback ANTHROPIC_API_KEY / API_KEY chain, use env_or_dotenv too:
+```rust
+match env_or_dotenv("ANTHROPIC_API_KEY").or_else(|| env_or_dotenv("API_KEY"))
+```
+
+And in agent_builder.rs fallback:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::env_or_dotenv(env_var) {
+        self.api_key = key;
+    }
+}
+```
+
+Make `env_or_dotenv` `pub(crate)` in cli.rs. agent_builder already does `use crate::cli;` so `cli::env_or_dotenv(...)` works.
+
+Now tests. Add unit tests in cli.rs tests module:
+1. `parse_dotenv` parses comments, export prefix, quotes, whitespace.
+2. `env_or_dotenv` precedence: process env wins over .env. But env_or_dotenv reads `.env` relative to CWD — changing CWD in tests is dangerous (parallel tests). Instead, test `dotenv_value_from` — a function taking a directory? Let me restructure for testability:
+
+```rust
+pub(crate) fn dotenv_value_in(dir: &std::path::Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join(".env")).ok()?;
+    parse_dotenv(&content).get(key).cloned().filter(|v| !v.is_empty())
+}
+
+pub(crate) fn dotenv_value(key: &str) -> Option<String> {
+    dotenv_value_in(std::path::Path::new("."), key)
+}
+
+pub(crate) fn env_or_dotenv(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() { return Some(v); }
+    }
+    dotenv_value(key)
+}
+```
+
+Then tests can use tempfile + dotenv_value_in for the parser integration, and test the pure parse_dotenv for comments/quotes/export. For precedence "process env wins", I can test env_or_dotenv with a serial test using set_var and a tempdir... but env_or_dotenv reads "." — I can't point it at a tempdir without changing CWD. Hmm.
+
+Option: use `std::env::set_current_dir` in a `#[serial]` test and restore afterwards. Tests in cli.rs already use `serial_test::serial` and manipulate env vars. There's a risk: other tests run in parallel across the whole crate, and set_current_dir affects the whole process. That's actually dangerous because cargo test runs test binaries where all tests in one binary share the process. Changing CWD in one test while another test runs concurrently (different threads) could break file-relative operations in other tests. Many of those tests use tempfile (absolute paths) so probably fine, but test_parse... some tests read files relative to CWD? E.g. context loading tests might use CWD.
+
+Safer: test precedence without changing CWD. Write the .env parser test (pure) + dotenv_value_in with tempdir + a test that env_or_dotenv prefers process env when .env has the key too... but that needs a .env in CWD. 
+
+Alternative: factor env_or_dotenv to take a dir:
+```rust
+pub(crate) fn env_or_dotenv_in(dir: &Path, key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() { return Some(v); }
+    }
+    dotenv_value_in(dir, key)
+}
+pub(crate) fn env_or_dotenv(key: &str) -> Option<String> {
+    env_or_dotenv_in(Path::new("."), key)
+}
+```
+
+Then the precedence test: set `MYKINDAKEY` env var to "process", create tempdir with .env containing the same key = "dotenv", assert env_or_dotenv_in(&tmpdir, "MYKINDAKEY") == process value. Use `#[serial]` and remove_var after. Setting env vars in a parallel test suite: existing tests already do `std::env::set_var("ANTHROPIC_API_KEY", ...)` with serial. Since we use a unique test key, collisions are unlikely. And since env_or_dotenv is pure w.r.t. that key. Use serial anyway.
+
+Actually wait — existing tests call set_var on ANTHROPIC_API_KEY with `#[serial]` but parallel tests may also touch ANTHROPIC_API_KEY... The existing suite seems to manage. I'll use a unique key like "ARC_TEST_DOTENV_KEY".
+
+Test list:
+1. `test_parse_dotenv_basics` — comments, blank lines, whitespace trim, export prefix, unquoted value.
+2. `test_parse_dotenv_quotes` — double/single quotes, quoted with interior spaces.
+3. `test_dotenv_value_from_file` (tempdir) — reads from tmpdir/.env, missing file → None. Also inline comment handling.
+4. `test_env_or_dotenv_precedence` — process env wins over .env (serial, unique key).
+
+Also I should double check `parse_dotenv` return — use `std::collections::HashMap`. cli.rs likely already imports HashMap? Let me check imports. parse_model_config takes `file_config: &HashMap<String, String>`, so HashMap is imported.
+
+Now documentation: add a paragraph to docs/src/getting-started/quick-start.md and/or docs/src/configuration/models.md. The task says "one short paragraph: 'arc reads provider API keys from a `.env` file in the current directory when the environment variable is not set.'" Let me look at quick-start.md around line 6.
+
+Also CLAUDE.md? The task files are only src/*, and docs. CLAUDE.md mentions nothing about .env keys, so no stale docs. I could add a note to CLAUDE.md but not required — task says update docs if behavior changes; the docs/src pages are the relevant ones. Keep it to the two docs pages (task says quick-start.md OR models.md gets one short paragraph; I'll add to models.md where the env-var table is, and maybe a line in quick-start).
+
+Let me look at the docs.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the docs and check `HashMap` usage in cli
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,30p' docs/src/getting-st… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check the top imports of cli.rs and plan. I'll:
+
+1. Add a `load_dotenv_values(dir)` helper (hand-rolled parser) in `src/cli.rs` — or better in `src/providers.rs`? The task says "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)". The key resolution happens in `parse_model_config` in cli.rs. Let me put the parser there, plus a helper that resolves a key from env with .env fallback.
+
+Actually, the cleanest approach: a function in cli.rs `dotenv_value(key) -> Option<String>` that:
+- checks std::env::var(key) first (process env wins)
+- if unset, reads `.env` in CWD, parses KEY=value lines, returns value
+
+But the precedence requirement: process env > .env file > built-in defaults. The current code already checks process env via `std::env::var(var)`. So I need to add a fallback: if `std::env::var(var)` fails/empty, try reading from `.env`.
+
+The parser needs to be testable in isolation (unit test with temp dir). So I'll write:
+- `parse_dotenv(content: &str) -> HashMap<String, String>` — pure parser (comments `#`, trim, optional `export ` prefix, unquoted/quoted values)
+- `dotenv_value_from_cwd(key: &str) -> Option<String>` — reads `.env` from CWD, parses, looks up key
+
+Then in parse_model_config, change:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty());
+```
+to add `.env` fallback:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok().or_else(|| dotenv_value_from_cwd(var)))
+    .filter(|k| !k.is_empty());
+```
+
+And the fallback chain `ANTHROPIC_API_KEY > API_KEY`:
+```rust
+match std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY")) {
+```
+could also use dotenv fallback. Let me add that too — that's the "built-in default" fallback chain.
+
+Also need to handle CWD: task says "only the CWD — no upward walk, no system dirs". How do I get CWD in a testable way? Reading `.env` relative to current_dir. But in parse_model_config during tests, CWD is the repo root. That's fine. For unit testing the parser itself, I'll test `parse_dotenv` directly with string content, and test dotenv_value with a temporary directory via changing current_dir... that's tricky in parallel tests. Better: write `load_dotenv(dir: &Path) -> HashMap<String, String>` that given a directory path reads `.env` in it. Then `dotenv_value_from_cwd(key)` = find in `load_dotenv(&std::env::current_dir().ok()?)`. The unit test can use tempfile::TempDir + write `.env` + `load_dotenv(tmp.path())`.
+
+For precedence test (process env wins vs .env), I can test `dotenv_value` semantics: the real precedence is at the call site — process env first via `std::env::var(var).ok()`, then `.env`. To test that end-to-end without touching global env (serial_test is available), I could write a helper `resolve_env_or_dotenv(var, from_dotenv: Option<&str>) -> Option<String>`... Hmm, simpler: write a pure helper:
+
+```rust
+/// Resolve a key with dotenv fallback: process env wins over CWD .env.
+fn resolve_key_with_dotenv(key: &str, dotenv_map: &HashMap<String, String>) -> Option<String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => dotenv_map.get(key).filter(|v| !v.is_empty()).cloned(),
+    }
+}
+```
+
+Hmm wait — but std::env::var reads global env in tests. With serial_test I can set/remove vars. Let me design the tests:
+
+1. `test_parse_dotenv_basic` — pure parser: comments, whitespace, export prefix, quoted values.
+2. `test_parse_dotenv_quoting` — single quotes, double quotes.
+3. `test_dotenv_precedence_process_env_wins` — serial test: set env var, build dotenv map with different value, call resolve helper, assert process env wins.
+4. `test_dotenv_load_from_dir` — temp dir with .env file, `load_dotenv` reads it.
+
+Let me write the parser carefully:
+
+```rust
+/// Minimal dotenv parser: reads `KEY=value` lines from a `.env` file in a
+/// single directory (CWD only — no upward walk). Process environment always
+/// wins over `.env` values; callers apply that precedence.
+fn load_dotenv(dir: &std::path::Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let content = match std::fs::read_to_string(dir.join(".env")) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Optional `export ` prefix (common in shell-exported .env files).
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            continue;
+        }
+        let raw_value = line[eq + 1..].trim();
+        let value = unquote_value(raw_value);
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+```
+
+Wait — the Safety rule: never use byte indexing on strings. `line[..eq]` — `eq` is from `line.find('=')` which returns a byte index at a char boundary (since `=` is ASCII, the position is at a byte boundary... actually `find` returns the byte index of the first occurrence of the pattern; since '=' is ASCII one byte, the index is at a char boundary — safe). `line[eq + 1..]` — eq+1 is right after '=', also a char boundary. So safe. But the rule says to use is_char_boundary to be safe. Since both `=` positions are ASCII boundaries, slicing is safe. I'll keep it but this is clean.
+
+unquote_value:
+```rust
+fn unquote_value(v: &str) -> String {
+    let v = v.trim();
+    if v.len() >= 2 {
+        if (v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')) {
+            return v[1..v.len() - 1].to_string();
+        }
+    }
+    v.to_string()
+}
+```
+
+`v[1..v.len()-1]` — v starts and ends with quote (ASCII), so 1 and len-1 are char boundaries (len-1 is the byte of the closing quote... if the closing quote is at position len-1, then len-1 is a char boundary since it's the start byte of the ' quote char which is 1 byte). Safe.
+
+Note: I won't handle inline comments (`KEY=value # comment`) — task says "ignore comments `#`" which means lines starting with #. Simple is fine.
+
+Now the resolution helper:
+
+```rust
+/// Load dotenv map from CWD's `.env` (empty map when absent).
+pub(crate) fn dotenv_map_from_cwd() -> HashMap<String, String> {
+    match std::env::current_dir() {
+        Ok(dir) => load_dotenv(&dir),
+        Err(_) => HashMap::new(),
+    }
+}
+```
+
+But calling this in parse_model_config for each env check — expensive-ish (file read). Better: read once at the top of parse_model_config. Let me check: parse_model_config is called once during arg parsing, so a single read is fine.
+
+Let me add:
+```rust
+// Load `.env` values from CWD once (process env > .env > defaults).
+let dotenv = dotenv_map_from_cwd();
+```
+
+Then:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok().or_else(|| dotenv.get(var).cloned()))
+    .filter(|k| !k.is_empty());
+```
+
+And fallback chain:
+```rust
+match std::env::var("ANTHROPIC_API_KEY")
+    .or_else(|_| std::env::var("API_KEY"))
+    .or_else(|_| dotenv.get("ANTHROPIC_API_KEY").cloned().ok_or(std::env::VarError::NotPresent))
+```
+
+Hmm, the or_else with VarError is awkward. Let me restructure:
+
+```rust
+let anthro_key = std::env::var("ANTHROPIC_API_KEY")
+    .ok()
+    .filter(|k| !k.is_empty())
+    .or_else(|| dotenv.get("ANTHROPIC_API_KEY").cloned());
+let api_key_fallback = std::env::var("API_KEY").ok().filter(|k| !k.is_empty());
+let resolved = anthro_key.or(api_key_fallback); // hmm, precedence: ANTHROPIC > API_KEY
+```
+
+Actually original precedence is `ANTHROPIC_API_KEY` (env) OR `API_KEY` (env). Now should dotenv apply to both? The task says "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)". The ANTHROPIC_API_KEY here is the generic fallback. I'll do:
+
+```rust
+let from_env_or_dotenv = |var: &str| -> Option<String> {
+    std::env::var(var).ok().filter(|k| !k.is_empty()).or_else(|| dotenv.get(var).cloned().filter(|k| !k.is_empty()))
+};
+```
+
+Then:
+```rust
+match from_env_or_dotenv("ANTHROPIC_API_KEY")
+    .or_else(|| from_env_or_dotenv("API_KEY"))
+{
+    Some(key) => key,
+    None => match file_config.get("api_key").cloned() { ... }
+}
+```
+
+Wait, closure capturing — from_env_or_dotenv is a closure, `.or_else(|| ...)` needs the closure to be usable twice. A closure that captures `dotenv` by reference... `let from_env_or_dotenv = |var: &str| ...` — borrow of dotenv; calling it twice is fine since it borrows immutably, but FnMut vs Fn — since it only reads, it's Fn, fine.
+
+Actually wait — there's a subtlety: `std::env::var(var).ok().filter(...).or_else(|| dotenv.get(var).cloned().filter(...))`. Fine.
+
+Hmm, but where does the closure capture dotenv — by reference since we only borrow. OK.
+
+Alternatively define a small helper function:
+```rust
+fn env_or_dotenv(key: &str, dotenv: &HashMap<String, String>) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| dotenv.get(key).cloned().filter(|k| !k.is_empty()))
+}
+```
+This is cleaner and directly testable for precedence! `test_dotenv_precedence_process_env_wins` can set env var, pass a dotenv map, and assert.
+
+Also agent_builder.rs line 912-914 (fallback switch resolves API key):
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+Should I add dotenv fallback here too? The task says files: src/agent_builder.rs, src/cli.rs. Yes — the fallback resolution should also check .env. Add:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    let key = cli::env_or_dotenv(env_var, &cli::dotenv_map_from_cwd());
+    if let Some(key) = key { self.api_key = key; }
+}
+```
+Hmm, reading .env again there. Or read once. It's a small file read; acceptable. Actually to keep it clean, I'll export `env_or_dotenv` and `dotenv_map_from_cwd` from cli and use them in agent_builder.
+
+Wait, also main.rs line 599-603:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&result.provider) {
+    ...std::env::set_var(env_var, &result.api_key);
+```
+That sets the env var from the resolved api_key — no change needed.
+
+Also setup.rs, dispatch_sub.rs, commands_spawn.rs, prompt_retry.rs check `std::env::var(env_var)` — should they also fall back to .env? The task scope is cli.rs and agent_builder.rs. The setup wizard is interactive for a human, fine. dispatch_sub checks for key presence before running subcommands — if someone runs `arc risk ...` variant with dotenv key... hmm. Let me check dispatch_sub.rs:459 context.
+
+Actually let's keep scope tight: cli.rs (parse_model_config — the main key resolution) + agent_builder.rs (fallback resolution). The task explicitly names those files. Other call sites check env for diagnostics/presence; the main key resolution path is parse_model_config. But wait — is parse_model_config the ONLY path that resolves keys? main.rs uses result.api_key which comes from parse_args → parse_model_config. And in main.rs line 599-603 it re-exports api_key to env var. So after parse, the env var IS set, so downstream `std::env::var` checks pass. 
+
+But what about `arc` invoked with subcommand dispatch before parse_model_config? Let me check where parse_model_config is called vs dispatch_sub. Let me look at main.rs around 540-620.
+
+Let me now write the code. First check that dotenv_map_from_cwd being called in parse_model_config won't break tests: tests in cli.rs that call parse_args with set env — CWD is repo root, no .env, returns empty map. Fine.
+
+One concern: tests calling `env_or_dotenv` with env var set (from serial tests) — dotenv map empty, fine.
+
+Let me also check main.rs to see where parse_model_config is called.
+────────────────────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me check main.rs's key resolution flow and dispatch_sub's usage:
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '540,615p' src/main.rs; ech… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the flow. The cleanest approach:
+
+1. Add a `.env` loading function (hand-rolled parser, ~40 lines) in `src/cli.rs` (or providers.rs). Since the task says "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)".
+
+The best spot: a shared helper that:
+- Reads `.env` in CWD (only CWD, no upward walk)
+- Parses `KEY=value` lines
+- Returns the value for a given key
+
+Where to wire it in:
+- `cli.rs` `parse_model_config` — the provider env var resolution
+- `main.rs` — where it sets result api_key (line 599-604, in run_setup_wizard_if_needed — not the main path)
+- `dispatch_sub.rs` `resolve_api_key` — for review subcommand
+
+The task says apply to any provider key the code supports. Precedence: process env > .env file > built-in defaults.
+
+Simplest robust approach: create a function `read_env_file_value(key: &str) -> Option<String>` in cli.rs (or a new small module). Wire it into:
+1. `parse_model_config` in cli.rs — after `std::env::var(var).ok()`, try .env
+2. `resolve_api_key` in dispatch_sub.rs — after env var check
+3. `agent_builder.rs` fallback switch (line 912-915) — try env var, then .env
+
+Also the ANTHROPIC_API_KEY / API_KEY fallback chain in parse_model_config — should .env also apply there? The task says: "If the target key's env var is unset, look for `.env`... Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers)".
+
+I think a clean, focused approach: a single helper `env_or_dotenv(key)` that returns `std::env::var(key).ok().filter(non-empty).or_else(|| dotenv_value(key))`. Then replace the direct `std::env::var` reads of provider keys with this helper. That keeps precedence naturally (process env wins).
+
+For the general `API_KEY` fallback, it's not a provider key per se — it's a generic fallback. I could include it too, but to keep scope tight, I'll include the provider-specific keys + ANTHROPIC_API_KEY. Actually the task explicitly says "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)". So provider keys.
+
+Let me design:
+
+```rust
+/// Read a `KEY=value` entry from a `.env` file in the current working
+/// directory. Returns `None` if the file is absent, the key is missing, or
+/// the value is empty. Only the CWD is consulted — no upward walk, no system
+/// dirs. Precedence is handled by callers: process env > .env > defaults.
+pub(crate) fn dotenv_value(key: &str, dir: &Path) -> Option<String> { ... }
+```
+
+Hmm, but for tests we want to be able to point at a temp dir. The task says "only the CWD — no upward walk". For the parser function itself, take a path (dir or file) parameter so it's pure and testable; the wiring uses `std::env::current_dir()`.
+
+Let me structure:
+
+```rust
+/// Parse a dotenv-style file and return the value for `key`, if present.
+/// Supports `KEY=value` lines, `#` comments, optional `export ` prefix,
+/// surrounding whitespace, and simple unquoted / double- or single-quoted
+/// values. Returns `None` when the file can't be read or the key is absent.
+pub(crate) fn dotenv_file_value(path: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    parse_dotenv(&content).get(key).cloned()
+}
+
+/// Parse dotenv-style content into a map. Pure function, unit-testable.
+fn parse_dotenv(content: &str) -> HashMap<String, String> { ... }
+
+/// Resolve a key with precedence: process env > `.env` in CWD > None.
+pub(crate) fn env_or_dotenv(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) { if !v.is_empty() { return Some(v); } }
+    let cwd = std::env::current_dir().ok()?;
+    dotenv_file_value(&cwd.join(".env"), key)
+}
+```
+
+The parser: for each line:
+- trim
+- skip empty and `#` comment lines
+- strip optional `export ` prefix
+- split at first `=`
+- key = trim of left side; if empty key skip
+- value = trim of right side
+- strip surrounding quotes: if starts and ends with `"` or `'`, strip them
+- Optionally handle inline comments? Standard dotenv doesn't strip inline comments in quoted values. Keep simple: only full-line comments (the task says "ignore comments `#`" — I'll interpret as full-line comments; but many dotenv implementations strip inline ` # comment` after a value too. To be safe and simple, follow the task literally: lines starting with # are ignored. Actually handling trailing comments for unquoted values is nice-to-have; keep it minimal but maybe strip inline comments for unquoted values. Hmm — risk: API keys can contain `#`? Usually not in keys. But base64 keys don't have #. Let me keep it simple: only full-line comments, matching the task text.)
+
+Wait — should I strip inline comments? The task says "ignore comments `#`, trim whitespace, support optional `export ` prefix and simple unquoted/quoted values". I'll do full-line comment skipping and quoted value handling. That's the core.
+
+Now where to wire:
+
+1. `cli.rs` `parse_model_config`:
+   - `from_provider_env` uses `provider_env_var.and_then(|var| std::env::var(var).ok())` → change to `env_or_dotenv(var)`
+   - The fallback chain `std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))` → for ANTHROPIC_API_KEY use env_or_dotenv. For API_KEY — it's a generic fallback, not provider key; task scope says provider keys. I'll apply env_or_dotenv to ANTHROPIC_API_KEY too (it's the canonical provider key) and leave API_KEY as pure env. Actually, apply to both? "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)" — ANTHROPIC_API_KEY is explicitly named. API_KEY is a generic alias, not a provider key. I'll use env_or_dotenv for ANTHROPIC_API_KEY and leave the API_KEY fallback as env-only. Hmm, but simpler to just apply env_or_dotenv to both. The precedence chain would then be: process API_KEY > .env API_KEY. That seems harmless and consistent. But to keep exactly to the task scope ("any provider key"), I'll do ANTHROPIC_API_KEY via env_or_dotenv and keep API_KEY plain. Actually, applying it to both is more consistent — a user's .env with `API_KEY=...` would also work. Let me be generous but safe: apply env_or_dotenv to both ANTHROPIC_API_KEY and API_KEY in the fallback chain.
+
+2. `dispatch_sub.rs` `resolve_api_key`: provider env var + ANTHROPIC_API_KEY/API_KEY fallbacks → use env_or_dotenv.
+
+3. `agent_builder.rs` fallback switch (line 912): `std::env::var(env_var)` → env_or_dotenv.
+
+4. `commands_spawn.rs` line 1389 and `prompt_retry.rs` line 396? Let me check those. The task says "Apply to any provider key the code supports". Those are diagnostic/messaging spots probably. Let me check what they do.
+
+Also `setup.rs` reads env vars for setup wizard defaults — those are pre-seeded wizard values; probably fine to leave, but for consistency maybe apply. Keep scope focused: main resolution paths (cli parse_model_config, dispatch_sub resolve_api_key, agent_builder fallback). Those are the three "provider key resolution" sites. Let me check the others quickly.
+
+Let me check commands_spawn.rs:1389 and prompt_retry.rs:396 and setup.rs:344.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the other provider-key resolution
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1380,1400p' src/commands_s… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I have a good picture now. The primary key-resolution path is:
+
+1. `cli.rs::parse_model_config` — used by `parse_args`, feeding main's `agent_config.api_key`.
+2. `dispatch_sub.rs::resolve_api_key` — same pattern for subcommands like `arc review`.
+
+The task says: "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)".
+
+The cleanest approach: create a small shared helper module (e.g., in `src/cli.rs` or a new function re-exported) that:
+- Reads a `.env` file in CWD
+- Handles parsing (comments, trim, `export ` prefix, unquoted/quoted values)
+- Precedence: process env > .env > defaults
+
+Then wire it into the key-resolution spots. The main spot is `parse_model_config` in cli.rs: where `from_provider_env` is read, if env is unset, fall back to .env lookup. Precedence requirement: process env > .env file > built-in defaults. Currently the chain is: flag > provider env > config key > ANTHROPIC_API_KEY/API_KEY env > config api_key. 
+
+Wait — the precedence requirement says process env > .env. So .env should slot in *below* process env but where relative to the config-file fallbacks? The task says "Keep precedence: process env > .env file > built-in defaults." The `.arc.toml` config key is arguably a higher-precedence explicit user config... but the task is specifically about env keys. Let me be careful not to reorder existing precedence — just add .env as a source when the env var is unset.
+
+Design: Add a helper in a new module or in cli.rs. Since cli.rs uses `std::env::var` directly in parse_model_config and dispatch_sub.rs has its own resolve_api_key, the cleanest is a tiny helper module that both can use. I'll add it to `src/providers.rs` (it's about provider API keys!) — providers.rs is a natural home, and it already has provider_api_key_env. Actually, the task says agent_builder.rs or cli.rs. But putting a pure parser in providers.rs is fine and reusable. Hmm, "Files: src/agent_builder.rs, src/cli.rs" — the task specifically names those files. Let me keep the change to those files to stay within scope. I could put the parser + helper in cli.rs and re-export for use anywhere.
+
+Actually, let me think about where it's most useful:
+
+1. `cli.rs::parse_model_config` — the primary parse path (dotenv fallback for provider env var AND for the ANTHROPIC_API_KEY/API_KEY fallback chain).
+2. `dispatch_sub.rs::resolve_api_key` — subcommands.
+
+But the task says files are agent_builder.rs and cli.rs. I'll implement in cli.rs and re-export from cli (like providers is re-exported). dispatch_sub.rs, setup.rs, commands_spawn.rs all use `std::env::var` directly for provider keys. To be thorough but stay in scope, I'll:
+
+1. Add `load_dotenv_values()` (parse CWD `.env` → HashMap or just a lookup fn) + a `get_env_or_dotenv(var)` helper in cli.rs.
+2. Wire into `parse_model_config` (the main path).
+3. Wire into the fallback switch in agent_builder.rs (line 912) and... maybe dispatch_sub.rs too since it's a product path (`arc review`).
+
+Let me focus on what the task asks: files src/agent_builder.rs, src/cli.rs. I'll do:
+
+- cli.rs: parser + helper `from_env_or_dotenv(var)` + wiring in parse_model_config (both provider_env_var lookup and the ANTHROPIC_API_KEY/API_KEY fallback).
+- agent_builder.rs: line 912 fallback switch — use the dotenv-aware lookup.
+
+And dispatch_sub.rs is a product-facing path too (`arc review`), but the task scope says cli.rs and agent_builder.rs. dispatch_sub.rs imports from cli.rs via `crate::cli::` — I could wire it too without violating "Files" too much, but let me keep it tight: the task names those two files. Actually adding a one-line change in dispatch_sub's resolve_api_key would make the feature consistent for subcommands. The task's verification is about `arc --version`-ish parse-time behavior. Let me check if dispatch_sub `resolve_api_key` is called during `--version`... no, version doesn't need a key. 
+
+Main risk: `parse_args` → `parse_model_config` is called even for `arc --version`? Let me check main.rs flow. If version exits before parse_model_config, then "arc --version doesn't emit a missing-key error" is trivially satisfied. Let me look.
+
+Let me now write the parser. Hand-rolled, ~40 lines:
+
+```rust
+/// Read `KEY=value` assignments from a `.env` file in the current working
+/// directory, if present. Process-environment values always win over these.
+///
+/// Supports `#` comments, blank lines, an optional `export ` prefix, and
+/// simple unquoted, single-quoted, or double-quoted values. The lookup is
+/// CWD-only (no upward walk, no system dirs) and never overrides a variable
+/// already set in the process environment — the file is parsed once per
+/// call; callers are expected to check `std::env::var` first.
+pub fn dotenv_value(key: &str) -> Option<String> {
+    let path = std::env::current_dir().ok()?.join(".env");
+    let content = std::fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else { continue };
+        let k = k.trim();
+        if k != key {
+            continue;
+        }
+        let v = v.trim();
+        // Strip matching quotes
+        let v = if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)
+            || (v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2) {
+            &v[1..v.len() - 1]
+        } else {
+            v
+        };
+        return Some(v.to_string());
+    }
+    None
+}
+
+/// Look up a provider key with dotenv support: process env > `.env` in CWD.
+pub fn env_key_or_dotenv(var: &str) -> Option<String> {
+    match std::env::var(var) {
+        Ok(key) if !key.is_empty() => Some(key),
+        _ => dotenv_value(var).filter(|k| !k.is_empty()),
+    }
+}
+```
+
+Wait — should dotenv only be consulted when the env var is *unset*? Yes. The helper `env_key_or_dotenv` does exactly that. But subtle: what if env var is set but empty? Treat as unset → fall to dotenv. That's reasonable.
+
+Then wire into parse_model_config:
+
+```rust
+let from_provider_env = provider_env_var.and_then(env_key_or_dotenv);
+```
+
+And the fallback chain:
+
+```rust
+match env_key_or_dotenv("ANTHROPIC_API_KEY")
+    .or_else(|| env_key_or_dotenv("API_KEY"))
+{
+```
+
+Hmm wait, careful — the existing chain uses `std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))`. I'll replace with dotenv-aware versions.
+
+For agent_builder.rs line 912-914:
+
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::env_key_or_dotenv(env_var) {
+        self.api_key = key;
+    }
+}
+```
+
+Also dispatch_sub.rs `resolve_api_key` — the task didn't list it, but it's the same product-facing gap (`arc review`). Since cli re-exports are already used there (`crate::cli::...`? it uses `crate::providers::` directly). Hmm — the task says "Files: src/agent_builder.rs, src/cli.rs". I'll keep to those two files to honor the task scope, plus the parse-time primary path. Actually, let me reconsider: leaving dispatch_sub's resolve_api_key unpatched means `arc review` in a dir with .env would error "No API key found." while `arc` works. That's an inconsistency the task's spirit ("real users run arc from directories that keep secrets in .env") would care about. But strict scope discipline says stick to the named files. The task explicitly says "or src/cli.rs (arg parsing, near provider resolution)" and "Apply to any provider key the code supports". I think wiring the primary path in cli.rs (parse_model_config) + agent_builder fallback is the core. I can also wire dispatch_sub cheaply since it already uses `crate::providers::provider_api_key_env`... but that's a third file. 
+
+Let me check the guidance: "Make narrow, surgical edits." The task names two files. I'll implement the helper in cli.rs, wire parse_model_config (main path) and agent_builder.rs. I'll also wire dispatch_sub.rs — actually no, let me stay scoped. Hmm.
+
+Actually wait — the verification smoke test: "with a temp dir containing .env with a fake ANTHROPIC_API_KEY=dummy, arc --version style invocation doesn't emit a missing-key error at parse time". Let me check whether parse_model_config is even called for --version. If it is, then before this change it would emit "No API key found." error (piped mode exit 1). Let me check main.rs flow for version.
+
+Let me check how parse_args handles --version and whether parse_model_config is invoked eagerly.
+────────────────────────────────────────────────────────────────────────────────
+Let me check whether --version triggers key resolution, and look at how parse_args uses parse_model_config:
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "parse_model_config\|versi… ✓ (4ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '730,760p' src/cli.rs; sed … ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the flow. The best place for dotenv loading is `parse_model_config` in `src/cli.rs` (arg parsing, near provider resolution). The task says: "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)".
+
+The cleanest approach:
+1. Create a hand-rolled `.env` parser function, e.g., `load_dotenv_file(path)` returning a `HashMap<String, String>`, in cli.rs (or a new small module).
+2. In `parse_model_config`, when checking env vars: check process env first; if not set, look up in `.env` in CWD.
+3. Also apply in the fallback chain `ANTHROPIC_API_KEY` / `API_KEY`.
+4. Also apply in `dispatch_sub.rs::resolve_api_key` since subcommands like `arc review` use it. And `main.rs` setup needs `needs_setup` to be aware — actually needs_setup checks `std::env::var(env_var)` — if we want the setup wizard to not trigger when .env has a key, we should also apply there. But the task scope is agent_builder.rs/cli.rs. Let me keep the change focused but consistent: put a central helper in cli.rs (re-exported) that resolves an env var with dotenv fallback, and use it in the key resolution spots.
+
+Let me design:
+
+```rust
+/// Parse a dotenv-style file into a map of KEY -> value.
+/// Lines: ignore blank lines and comments (starting with `#`, optional leading whitespace).
+/// Support optional `export ` prefix. Values may be quoted with single or double
+/// quotes; otherwise trimmed. Inline comments after values are not stripped
+/// except... keep it simple per task: "ignore comments `#`, trim whitespace,
+/// support optional `export ` prefix and simple unquoted/quoted values."
+pub(crate) fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() { continue; }
+        let value = value.trim();
+        let value = if value.len() >= 2 {
+            let first = value.chars().next().unwrap();
+            let last = value.chars().last().unwrap();
+            if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+                value[first.len_utf8()..value.len() - last.len_utf8()].to_string()
+            } else {
+                value.to_string()
+            }
+        } else {
+            value.to_string()
+        };
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+```
+
+Wait — the quoting: `value[first.len_utf8()..value.len()-last.len_utf8()]` — that's slicing, safe since first/last are chars at boundaries. Actually simpler: strip prefix/suffix via `strip_prefix`/`strip_suffix`.
+
+```rust
+let value = match (value.strip_prefix('"').and_then(|v| v.strip_suffix('"')), value.strip_prefix('\'').and_then(|v| v.strip_suffix('\''))) {
+    (Some(unquoted), _) | (_, Some(unquoted)) => unquoted.to_string(),
+    _ => value.to_string(),
+};
+```
+
+But careful: `v.strip_suffix('"')` on a value like `"abc"` where the last char could be anything — strip_suffix just checks the last char is a quote. That's fine for simple cases. Actually a value like `abc"` would have no leading quote, so first tuple is None... wait `strip_prefix('"')` on `abc"` returns None. Good. A value `"abc` → strip_prefix gives `abc`, strip_suffix('"') gives None → None. Good.
+
+Now for reading the file:
+
+```rust
+/// Load `.env` from the current working directory (no upward walk).
+/// Returns the parsed map, or an empty map if the file doesn't exist.
+pub(crate) fn load_dotenv_cwd() -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(".env") else {
+        return HashMap::new();
+    };
+    parse_dotenv(&content)
+}
+```
+
+Hmm, but repeated reads in parse_model_config... only called once per startup, fine. But also dispatch_sub::resolve_api_key calls it. Let me create a cached loader to avoid re-reading? Not strictly necessary; files ≤ KBs. But a OnceLock cache would be a nice touch and consistent — actually caching could give stale values in tests across different CWDs. Better not to cache globally; just read each time (parse_model_config is called once per process run).
+
+Now the central env resolution helper:
+
+```rust
+/// Resolve an env var, falling back to the CWD `.env` file when unset.
+/// Process env always wins over the .env file (dotenv convention).
+pub(crate) fn resolve_env_with_dotenv(var: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(var) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    load_dotenv_cwd().get(var).cloned().filter(|v| !v.is_empty())
+}
+```
+
+Then in `parse_model_config`, replace:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty());
+```
+with
+```rust
+let from_provider_env = provider_env_var.and_then(resolve_env_with_dotenv);
+```
+
+And the ANTHROPIC_API_KEY/API_KEY fallback:
+```rust
+match std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY")) {
+```
+→
+```rust
+match resolve_env_with_dotenv("ANTHROPIC_API_KEY").or_else(|| resolve_env_with_dotenv("API_KEY")) {
+```
+
+Also in `dispatch_sub.rs::resolve_api_key`, apply `resolve_env_with_dotenv` for provider env var + fallbacks. And in `agent_builder.rs` fallback switch (line 912) — use resolve_env_with_dotenv too. And `commands_spawn.rs` apply_model_override. And `setup.rs::needs_setup` — so the setup wizard doesn't fire when .env has a key. Hmm — but the task says Files: src/agent_builder.rs, src/cli.rs. Changing setup.rs would be beyond scope but is necessary for consistency: "if the target key's env var is unset, look for .env". needs_setup checks env var — with .env providing the key, needs_setup would wrongly fire the wizard.
+
+The task says "Files: src/agent_builder.rs, src/cli.rs" — but also says "Apply to any provider key the code supports". The minimal, coherent implementation: central helper in cli.rs + use it in parse_model_config (cli.rs), agent_builder fallback switch, and dispatch_sub resolve_api_key (subcommand path). For setup.rs needs_setup — the wizard firing when a .env key exists would be a product-visible bug ("real users run arc from directories that keep secrets in .env"). Let me check main.rs flow: `needs_setup(&agent_config.provider)` is only called `if !is_interactive`. In non-interactive (piped) mode, needs_setup... wait:
+
+```rust
+fn run_setup_wizard_if_needed(is_interactive: bool, agent_config: &mut AgentConfig) -> bool {
+    if !is_interactive || !setup::needs_setup(&agent_config.provider) {
+        return true;
+    }
+```
+
+So if non-interactive, wizard never runs regardless. In interactive mode with .env key set, needs_setup would return true and run the wizard, which is annoying but the wizard is interactive and the user would see their key in the .env prompt... Actually the wizard's Step 2 says "or set {env_var} in your shell and press Enter to skip" and checks the env — with `.env` key available it would show "(or set ANTHROPIC_API_KEY in your shell...)" and if user presses Enter it checks `std::env::var(env_key)` — which won't see the .env value → user has to type it. Suboptimal.
+
+Given "Apply to any provider key the code supports" and product-safety, I'll update `needs_setup` in setup.rs to consult the dotenv fallback too. That's a small, surgical 2-line change and keeps the setup wizard honest. But it expands scope beyond listed files... The listed files are guidance; making the feature coherent for product users justifies it. However, "Do NOT work on anything else" — this IS the same task (dotenv loading), just wiring it into a related resolution point. I think it's correct to wire all key-resolution paths so the feature is coherent. But I should be careful about scope creep. Let me weigh: the essential resolution points for a *product user* running `arc`:
+
+1. `parse_model_config` (cli.rs) — main path ✓ (required)
+2. `dispatch_sub::resolve_api_key` — `arc review` etc. subcommands → these run as subcommands; the api key error shows "No API key found" — with .env set the user would get errors. Must wire for coherence.
+3. `agent_builder.rs` fallback switch — secondary, when fallback provider used. Wire it.
+4. `setup.rs needs_setup` + wizard env check — wizard behavior. Wire needs_setup so wizard doesn't wrongly fire.
+5. `commands_spawn.rs` apply_model_override — uses env var for provider switch model override. This is a runtime switch; .env fallback less critical but coherent. Hmm.
+
+To keep scope tight but coherent, I'll wire 1-4 and leave 5 (commands_spawn apply_model_override) — actually no, let me check: it's the same pattern, and if I don't wire it, the feature is inconsistent. But the task explicitly lists Files: src/agent_builder.rs, src/cli.rs. Let me add the helper to cli.rs and re-export through providers? No — the helper is in cli.rs, and setup.rs already imports from cli (`provider_api_key_env`). dispatch_sub uses `crate::providers::`. I can make the helper `pub(crate)` in cli.rs and re-export from providers.rs? That's confusing. 
+
+Alternative clean design: put the dotenv parser + resolver in `src/providers.rs` (module about provider keys), re-export from cli.rs like the other provider functions. That keeps cli.rs imports working and puts it in a natural location. But task says Files: src/agent_builder.rs, src/cli.rs. Hmm, providers.rs is a natural home but the task designates cli.rs. Adding to providers.rs might be seen as beyond scope.
+
+Let me just put it in cli.rs (as the task allows) and re-export from cli so existing `use crate::cli::` imports work, and use `crate::cli::` in dispatch_sub (it already does for some things? dispatch_sub uses `crate::providers::provider_api_key_env`). Actually dispatch_sub.rs line 459 uses `crate::providers::provider_api_key_env`. I'll use `crate::cli::resolve_env_with_dotenv` there.
+
+For setup.rs needs_setup — it imports `use crate::cli::{...provider_api_key_env...}` so I can add `resolve_env_with_dotenv` to that import.
+
+Let me be decisive: implement in cli.rs:
+
+- `pub(crate) fn parse_dotenv(content: &str) -> HashMap<String, String>`
+- `pub(crate) fn load_dotenv_map() -> HashMap<String, String>` (reads `.env` in CWD)
+- `pub(crate) fn resolve_env_with_dotenv(var: &str) -> Option<String>`
+- `pub(crate) fn dotenv_value(var: &str) -> Option<String>` — just fetch from .env without process env (used for... actually not needed separately; resolve covers everything).
+
+Wire:
+1. `parse_model_config` (cli.rs) — provider env + ANTHROPIC/API_KEY fallback.
+2. `dispatch_sub::resolve_api_key` — provider env + fallbacks.
+3. `agent_builder.rs` fallback switch (line 912-914).
+4. `setup.rs needs_setup` + the wizard's empty-key env check at line ~364/593.
+5. `commands_spawn.rs` apply_model_override — wire it too (same pattern, one line). Actually it's `std::env::var(env_var)` → `crate::cli::resolve_env_with_dotenv(env_var)`. Cheap. I'll do it for coherence.
+
+Tests (in cli.rs mod tests):
+- parse_dotenv: comments, export prefix, quotes (double/single), whitespace trimming, blank lines, precedence handled by the resolver (process env wins).
+- resolve_env_with_dotenv precedence: set env var, .env file has different value → process env wins. Since env vars are process-global and tests run in parallel... cli.rs tests use `serial_test::serial` for env-mutating tests. I'll use serial + a tempdir and change CWD? Changing CWD in a test is risky (process-global, parallel tests). Better: test `parse_dotenv` purely (no CWD reliance) and test precedence via an explicit function that takes the map: e.g. `fn env_value_precedence(var, env: Option<String>, dotenv: Option<String>)`. Hmm.
+
+Simpler: design `resolve_env_with_dotenv` to take the already-loaded map? Let me make the core precedence pure:
+
+```rust
+pub(crate) fn resolve_key(var: &str, process_value: Option<String>, dotenv_map: &HashMap<String, String>) -> Option<String>
+```
+
+That's over-engineering. Let me structure:
+
+```rust
+/// Resolve `var`: process env wins, then `.env` in CWD.
+pub(crate) fn resolve_env_with_dotenv(var: &str) -> Option<String> {
+    let from_env = std::env::var(var).ok().filter(|v| !v.is_empty());
+    from_env.or_else(|| dotenv_value(var))
+}
+
+/// Read `var` from the CWD `.env` file, if present.
+pub(crate) fn dotenv_value(var: &str) -> Option<String> {
+    load_dotenv_map().get(var).cloned().filter(|v| !v.is_empty())
+}
+
+/// Parse dotenv-style content.
+pub(crate) fn parse_dotenv(content: &str) -> HashMap<String, String> { ... }
+
+/// Read `.env` from the current working directory (no upward walk).
+pub(crate) fn load_dotenv_map() -> HashMap<String, String> {
+    let Ok(content) = std::fs::read_to_string(".env") else {
+        return HashMap::new();
+    };
+    parse_dotenv(&content)
+}
+```
+
+For precedence test without parallel hazards: use serial + tempdir + change current_dir? Changing CWD process-global in tests is risky — but only for `resolve_env_with_dotenv`'s `read_to_string(".env")` relative path. The cli.rs tests already use tempdir for config file tests (they pass path explicitly). Changing CWD would affect other tests running concurrently (tests run in threads). With `serial` it serializes *within this test module's serial tests* but not against all other tests in the crate. Hmm, `#[serial]` uses a global mutex per serial_test... `serial_test::serial` without args uses a common lock for all serial tests across the crate I believe. Actually `serial_test::serial` (bare) uses a global lock shared by all bare serial tests. So a CWD change in a bare-serial test is safe against other bare-serial tests but NOT against non-serial tests. Risky.
+
+Better precedence test approach: test that `resolve_env_with_dotenv` prefers process env by setting an env var and creating a `.env` in CWD... same CWD problem.
+
+Alternative: make precedence logic pure and test it:
+
+```rust
+/// Core precedence: process env > dotenv map > none.
+fn pick_key(var: &str, dotenv_map: &HashMap<String, String>) -> Option<String> {
+    std::env::var(var).ok().filter(|v| !v.is_empty())
+        .or_else(|| dotenv_map.get(var).cloned().filter(|v| !v.is_empty()))
+}
+
+pub(crate) fn resolve_env_with_dotenv(var: &str) -> Option<String> {
+    pick_key(var, &load_dotenv_map())
+}
+```
+
+Then test `pick_key` with serial + set_var for the env side — but set_var is process-global too; cli.rs already uses `std::env::set_var` in serial tests (line ~900: `std::env::set_var("ANTHROPIC_API_KEY", "test-key")`), so that's the established pattern — with `#[serial]`. I'll do the same: `#[serial]` tests that set/remove env var.
+
+For the .env-map side, `pick_key` takes the map as a parameter — no CWD needed. 
+
+So tests:
+1. `test_parse_dotenv_basic` — pure parse: comments, blanks, export prefix, quotes, whitespace, multiple keys.
+2. `test_parse_dotenv_quotes` — double/single quotes, embedded.
+3. `#[serial] test_resolve_env_prefers_process_env` — set ANTHROPIC_API_KEY=proc-key, map has .env-key, pick_key returns proc-key. Remove var after.
+4. `#[serial] test_resolve_env_falls_back_to_dotenv` — remove var, map has .env-key, pick_key returns dotenv value.
+
+Also maybe a test that resolve_env_with_dotenv actually reads `.env` from CWD — skip (CWD hazard) or do it carefully with serial? I'll skip; the parse + pick tests cover the logic, and load_dotenv_map is a thin read wrapper.
+
+Wait — but `load_dotenv_map()` reads ".env" relative to CWD at call time. In `parse_model_config` this works because arc is invoked from the user's project dir. Good.
+
+Now let me also double check: `std::env::var` for HashMap import — cli.rs needs `HashMap`. Check its imports. `file_config: &HashMap<String, String>` already used in parse_model_config, so HashMap is imported somewhere. Let me check the imports.
+
+Also, is there any existing `.env` handling in the repo? grep found nothing. Good.
+
+One more: does the "Manual smoke" require `arc --version` to not error without key? --version dispatches via try_dispatch_subcommand before parse_model_config, so it exits early regardless. Fine — the verification is "or however the code surfaces it"; parse path is where keys resolve.
+
+Also should I update `setup.rs::needs_setup` so the wizard doesn't fire when `.env` provides a key? Let me look at needs_setup fully.
+
+Let me now write the code. First check imports in cli.rs.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check cli.rs imports and setup.rs needs_setup fully
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,15p' src/cli.rs; echo "=… ✓ (4ms)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '605,625p' src/setup.rs; ec… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a full picture. The design:
+
+**Central approach**: Add a `.env` loading helper + a `resolve_env_var(key)` function that:
+1. Checks process env first — if set, return it.
+2. Otherwise loads `.env` from CWD (once, cached) and looks up the key.
+
+Where to put it? The task says `src/agent_builder.rs` or `src/cli.rs`. The cleanest central place is `src/cli.rs` since `provider_api_key_env` is re-exported there and used everywhere via `crate::cli::`. Let me add:
+
+1. `pub fn load_dotenv_from(path: &Path) -> HashMap<String, String>` — pure parser (testable).
+2. `pub fn resolve_env_value(key: &str) -> Option<String>` — process env first, then `.env` in CWD.
+3. `pub fn resolve_api_key_env(provider: &str) -> Option<String>` — returns the resolved key for a provider's env var (from process env or .env).
+
+Then update the key call sites:
+- `src/cli.rs::parse_model_config` (the main path) — replace `std::env::var(var)` / `std::env::var("ANTHROPIC_API_KEY")` / `std::env::var("API_KEY")` with the resolver.
+- `src/setup.rs::needs_setup` — check `.env` too so the wizard doesn't fire when `.env` has a key.
+- `src/dispatch_sub.rs::resolve_api_key` — subcommands path.
+- `src/agent_builder.rs` fallback switch (line 912) and `src/commands_spawn.rs` apply_model_override, `src/prompt_retry.rs` (that's diagnostics message, might not matter but the status "is set" check could use resolver — it's just a diagnostic; leave or use resolver; it's fine to update for correctness).
+
+Actually the task says: "Add dotenv-style loading in src/agent_builder.rs (where provider API keys are resolved) or src/cli.rs (arg parsing, near provider resolution)". Minimal scope: main API key resolution is in cli.rs `parse_model_config`. The task says "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)".
+
+I'll put the core helper + parser in cli.rs (near provider resolution), and use `resolve_env_var` in:
+1. `parse_model_config` — provider env var, ANTHROPIC_API_KEY, API_KEY fallbacks.
+2. `setup.rs::needs_setup` — so `.env` key counts as "set".
+3. `dispatch_sub.rs::resolve_api_key` — for subcommands.
+4. `agent_builder.rs` fallback switch.
+5. `commands_spawn.rs` apply_model_override.
+
+For the .env loading: only CWD, no upward walk, `.env` file. Cache it? To be safe for tests (which set process env vars and change CWD via tempdir... actually tests don't change CWD), a cache could cause cross-test pollution. Better not to cache globally — reading a small `.env` per look-up is fine (it's tiny), and avoids static state issues with `serial` tests. Actually `parse_model_config` reads the file up to 3 times potentially. It's fine — a ~40 line file read 3 times is nothing. But to keep it clean, I'll load once per `resolve_env_var` call. Actually let me do a once-per-call load which reads the file at most once per call.
+
+Wait, but there's a subtlety: `std::env::current_dir()` in tests changes... tests run in the repo root. The repo has no `.env`, so fine.
+
+Let me design the parser:
+
+```rust
+/// Parse a dotenv-style file into key-value pairs.
+///
+/// Supported syntax (matching the common dotenv dialect):
+/// - `KEY=value` lines; blank lines and lines starting with `#` are ignored.
+/// - Optional `export ` prefix.
+/// - Optional surrounding quotes (single or double); double-quoted values
+///   support `\n`, `\t`, `\\`, `\"` escapes; single-quoted values are literal.
+/// - Inline `#` comments after unquoted values are stripped.
+/// - Duplicate keys: last one wins.
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> { ... }
+```
+
+And the resolver:
+
+```rust
+/// Resolve an environment variable, falling back to a `.env` file in the
+/// current working directory (process env > `.env`; no upward walk).
+pub fn resolve_env_var(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() { return Some(v); }
+    }
+    let entries = load_dotenv_from_current_dir();
+    entries.get(key).filter(|v| !v.is_empty()).cloned()
+}
+```
+
+Hmm, wait — should empty process env var fall through to .env? Standard dotenv behavior: process env wins entirely (even empty). Actually most dotenv implementations: if var is already set in process env, .env doesn't override. An empty-but-set var... the dotenv crate default doesn't override existing vars regardless of value. But this codebase already filters out empty keys everywhere (`filter(|k| !k.is_empty())`). To be consistent with existing behavior where empty keys don't count, I'll treat empty as unset and fall back to .env. That matches `filter(|k| !k.is_empty())` conventions. Task says "precedence: process env > .env file > built-in defaults" — empty process env counting as unset is consistent with the codebase's existing treatment of empty keys.
+
+Should I load .env from CWD only, and cache per call — read the file each time resolve_env_var is called? Each call reads the file once. parse_model_config calls resolve up to 3 times (provider var, ANTHROPIC, API_KEY) = 3 file reads of a tiny file. Fine. Actually let me be a bit cleaner: `load_dotenv_from_current_dir()` returns `HashMap` (empty if no file / unreadable). ~15 lines.
+
+Edge: `std::env::current_dir()` — in weird cases could fail; return empty map.
+
+Now tests: parser tests in cli.rs test module using tempfile for the .env file:
+- comments & blank lines ignored
+- export prefix
+- quoted values (double with escapes, single literal)
+- inline comment stripping for unquoted values
+- inline `#` inside quotes preserved
+- precedence: process env wins over .env (use serial_test::serial since it sets env vars)
+
+Let me check how other tests set env vars and whether serial_test is needed — yes, tests use `serial_test::serial` and `tempfile`. `tempfile` is a dev-dependency, good.
+
+One more consideration: the task says "Do NOT pull in a dotenv crate dependency" — confirmed no dotenv in Cargo.toml. Hand-rolled it is.
+
+Where exactly to add in cli.rs: near `provider_api_key_env` re-export or near parse_model_config. I'll add after the `collect_repeatable_flag` function (before `ModelConfig`), around line 428.
+
+Also need `use std::collections::HashMap;` and `use std::path::Path;` in cli.rs. Let me check current imports.
+
+Let me check what dispatch_sub uses — `resolve_api_key` in dispatch_sub.rs. I'll update that too for the subcommand path.
+
+And `setup.rs::needs_setup` — important: if `.env` has the key, don't run wizard. Also the setup wizard "Enter your API key, or set env var" — the .env would need process env set, but that's the wizard interactive flow; leave.
+
+Let me now write the parser. Also need to double-check `use std::collections::HashMap` — cli.rs is 3475 lines, probably uses HashMap already. Grep.
+────────────────────────────────────────────────────────────────────────────────
+I have the full picture now. Let me check cli.rs imports for HashMap/
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "use std::collections\|Has… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now, the best design. I'll add a `.env` loading helper in `src/agent_builder.rs` (as the task says: "Add dotenv-style loading in `src/agent_builder.rs` ... or `src/cli.rs`"). Let me think about where to put it.
+
+The cleanest approach:
+1. Create a small module (e.g. `src/dotenv.rs`) with a pure parser `parse_dotenv(content: &str) -> HashMap<String, String>` and a loader `load_env_file_from_cwd() -> Option<HashMap>` or `get_env_value(key) -> Option<String>` that:
+   - checks process env first (caller does that)
+   - reads `.env` in CWD
+   - parses KEY=value lines
+   - returns the value for the key
+
+Actually, a simpler helper: `fn env_or_dotenv(key: &str) -> Option<String>` — returns process env if set, else .env file value. But the precedence the task wants: "process env > .env file > built-in defaults". And "If the target key's env var is unset, look for `.env` in the current working directory".
+
+The cleanest, most surgical approach: add a helper function that the key-resolution sites call. The primary resolution site is `parse_model_config` in cli.rs (lines 469-521). Also `resolve_api_key` in dispatch_sub.rs, `needs_setup` in setup.rs, `commands_dev`, `commands_spawn`, agent_builder fallback, prompt_retry diagnosis.
+
+To have the change be coherent and product-facing, the semantics should be: "arc reads provider API keys from a `.env` file in the current directory when the environment variable is not set." The key behavior users care about: `arc` run from a dir with `.env` containing `ANTHROPIC_API_KEY=sk-...` should just work — no setup wizard, no missing-key error.
+
+The architecture: I'll add a single helper module `src/dotenv.rs`:
+
+```rust
+//! Minimal dotenv-style `.env` parsing (no external crate).
+//!
+//! Reads `KEY=value` lines from a `.env` file in the current working
+//! directory. Used as a fallback for provider API keys when the
+//! corresponding environment variable is not set.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+/// Parse dotenv-style file content into a key->value map.
+///
+/// Supports:
+/// - `KEY=value` lines
+/// - comments (`#` or `;` in dotenv convention; task says `#`) — task says ignore comments `#`
+/// - whitespace trimming around key and value
+/// - optional `export ` prefix
+/// - simple unquoted values and quoted values (`"..."` or `'...'`), with
+///   surrounding quotes stripped (and no escape processing beyond that)
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        // hmm, strip_prefix("export ") — but "export " might have different spacing. Use trim.
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = unquote(value);
+        map.insert(key.to_string(), value);
+    }
+    map
+}
+
+fn unquote(value: &str) -> String {
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        let first = bytes[0];
+        let last = bytes[value.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return value[1..value.len() - 1].to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// Load `.env` from the current working directory, if present.
+pub fn load_env_file() -> Option<HashMap<String, String>> {
+    let path = Path::new(".env");
+    if !path.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(path).ok()?;
+    Some(parse_dotenv(&content))
+}
+
+/// Look up `key` in the process environment first, then `.env` in the CWD.
+pub fn env_value(key: &str) -> Option<String> {
+    if let Ok(v) = std::env::var(key) {
+        if !v.is_empty() {
+            return Some(v);
+        }
+    }
+    load_env_file().and_then(|m| m.get(key).map(|v| v.clone())).filter(|v| !v.is_empty())
+}
+```
+
+Wait — the task says: "If the target key's env var is unset, look for `.env` in the current working directory (and only the CWD — no upward walk, no system dirs)". So the loader reads `.env` once. But calling `load_env_file()` for each key lookup means reading the file repeatedly. For a CLI that's fine (parse_model_config is called once at startup), but let me be careful: `env_value` might be called in a loop? For key resolution it's once. But to be safe and clean, I could make it simple — read the file each time is fine for CLI startup, but there could be a concern in `prompt_retry` which runs during retries. Still cheap (small file).
+
+Hmm, but there's a subtlety: should `env_value` filter empty? If process env has the key set to empty string — treat as unset? The existing code treats empty as "no key" (`filter(|k| !k.is_empty())`). Yes, keep consistent.
+
+Now, where to wire it in:
+
+1. **cli.rs `parse_model_config`** — the main resolution. Lines 469-521:
+   - `from_provider_env` currently: `provider_env_var.and_then(|var| std::env::var(var).ok()).filter(|k| !k.is_empty());`
+   - Change to `provider_env_var.and_then(|var| dotenv::env_value(var)).filter(|k| !k.is_empty());` — this handles process env AND .env fallback in one call. Wait but "process env > .env file" — `env_value` already does process-env-first, so precedence holds.
+   - Similarly the fallback chain `std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))` → `dotenv::env_value("ANTHROPIC_API_KEY").or_else(|| dotenv::env_value("API_KEY"))`.
+
+2. **dispatch_sub.rs `resolve_api_key`** — same pattern for `arc review` etc.
+
+3. **setup.rs `needs_setup`** — so the wizard doesn't pop up when the key is in .env. Change the three checks (`provider_api_key_env(provider)`, `ANTHROPIC_API_KEY`, `API_KEY`) to use the dotenv-aware lookup. Also in setup.rs line 364 (wizard key input: "or set {env_var} in your shell and press Enter to skip") — that's the interactive wizard; it checks env to skip. Could also check .env. Let me look at that more; line 364 area: if the user enters empty key, check env. I can add dotenv there too but it's secondary. Actually for consistency of "it just works," if .env has the key, needs_setup should return false so the wizard never appears. That's the main one.
+
+4. **agent_builder.rs fallback switch (line 912)** — uses `std::env::var(env_var)`. Could use dotenv lookup too. This is edge-case (fallback provider key from .env). Good for consistency, cheap.
+
+5. **commands_spawn.rs apply_model_override** — same, provider switch key loading. Cheap to add.
+
+6. **commands_dev.rs doctor check** — reports "API key set?" — nice to reflect .env. Hmm, doctor passes if env var is set. If key is in .env, doctor would say missing. For correctness let me wire it too — it's the health check. But careful — this changes doctor behavior; it would be *more* accurate. I'll add it.
+
+Hmm — wait. Let me be careful about scope. The task says "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)". And "Apply to any provider key the code supports (ANTHROPIC_API_KEY and the known providers in `src/providers.rs`)." The key surface is cli.rs's parse_model_config. The other sites are nice-to-have for consistency. I should wire the core ones and keep it surgical. Let me decide: primary wiring in `parse_model_config` (cli.rs) + `needs_setup` (setup.rs, so the wizard doesn't appear) + `resolve_api_key` (dispatch_sub.rs) + agent_builder fallback (it's the named file). commands_spawn/commands_dev/prompt_retry are diagnostics/edge paths — prompt_retry message says "is not set" which could be wrong if in .env, but that's diagnosis text. I'll wire the main resolution paths and leave diagnostics.
+
+Actually, let me reconsider: to keep it minimal and reviewable, wire:
+- cli.rs parse_model_config (primary — ANTHROPIC_API_KEY + provider keys)
+- setup.rs needs_setup (wizard gate)
+- dispatch_sub.rs resolve_api_key (arc review/subcommands path)
+- agent_builder.rs fallback switch (task-named file)
+
+That's 4 call sites + the module. Reasonable.
+
+Where to put the module? The task mentions either agent_builder.rs or cli.rs. I'll create a dedicated `src/dotenv.rs` module — clean, testable, ~70 lines incl. tests. The task says "a hand-rolled parser of ~40 lines is preferred". Module + wiring. And I need to register `mod dotenv;` — check main.rs module declarations. Also `src/lib.rs`? Let me check whether there's a lib. The project has main.rs as binary. Let me check.
+
+Also unit test: the task requires "Add a unit test for the .env parser (comments, quoting, precedence with process env wins)." I'll add tests in dotenv.rs test module. For precedence-with-process-env-wins test — that mutates process env, needs `serial_test` (already a dev-dependency) and `#[serial]`. Modifying env vars in tests — the existing code does `std::env::set_var` with `#[serial]` and unsafe? In newer Rust (2024 edition), `set_var` is unsafe. Let me check what edition and how existing tests handle it. In cli.rs test at line ~900: `std::env::set_var("ANTHROPIC_API_KEY", "test-key");` — that's probably in an `unsafe` block or edition 2021 where it's still safe. Let me check Cargo.toml edition.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the module structure, edition, and how existing tests handle
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "^edition\|^mod \|^pub mod… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good. Now I have a clear picture. The cleanest approach that satisfies all the requirements:
+
+1. **Add a shared dotenv-style loading helper** that reads `.env` from the CWD and returns the parsed keys as a `HashMap<String, String>`.
+2. **Wire it into the key-resolution paths**: The critical requirement is that if a target key's env var is unset, arc should consult `.env` in CWD. Precedence: process env > .env file > built-in defaults.
+
+The most central path is `parse_model_config` in `src/cli.rs` (lines 463-521), plus `resolve_api_key` in `dispatch_sub.rs`, plus `needs_setup` in `setup.rs`, plus the fallback in `agent_builder.rs` (line 912), plus commands_spawn's `apply_model_override`.
+
+Actually, the cleanest design: add a helper `load_env_keys()` in a new small module (or in cli.rs / providers.rs) that reads `.env` from CWD once (memoized via OnceLock) and returns a `HashMap<String, String>`. Then add a helper:
+
+```rust
+pub fn env_or_dotenv(var: &str) -> Option<String>
+```
+
+which returns `std::env::var(var).ok().filter(!empty).or_else(|| dotenv_map.get(var))`.
+
+Then replace the key resolution sites:
+- `parse_model_config` in cli.rs: replace `std::env::var(var)` with the env_or_dotenv helper at line 474, 489-490.
+- `resolve_api_key` in dispatch_sub.rs: lines 465-478.
+- `needs_setup` in setup.rs: lines 590-615.
+- `agent_builder.rs` fallback: line 912-914.
+- commands_spawn.rs `apply_model_override`.
+
+The task says: "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)". Files: src/agent_builder.rs, src/cli.rs. So I should keep the parser + loading in those two files. Simplest: put the parser + `load_env_file` + `env_or_dotenv` in `src/cli.rs` (near provider resolution, which is exactly where parse_model_config is), then re-export from cli so dispatch_sub/setup/agent_builder can use `crate::cli::env_or_dotenv`.
+
+Wait — the task says files: src/agent_builder.rs, src/cli.rs. But to make the feature actually work, `needs_setup` and `dispatch_sub` also need it. The instruction is about where the loading lives; using the helper from other modules is fine — I'll re-export via cli like other things.
+
+Design of parser (~40 lines):
+```rust
+/// Parse dotenv-style `KEY=value` lines from a string.
+/// Ignores comments (#...), trims whitespace, supports optional `export ` prefix,
+/// and simple unquoted/quoted values.
+pub fn parse_env_file(content: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // drop inline comment? The task says "ignore comments `#`" — I'll treat full-line comments; inline comments after values are ambiguous in dotenv. Actually dotenv files commonly have inline comments too. But values like `https://...` don't contain #. Many dotenv implementations strip inline comments only when preceded by whitespace. Keep it simple & safe: only full-line comments, plus strip inline ` #` when unquoted? The spec says "ignore comments `#`" — minimal interpretation: lines starting with #. I'll handle inline comments for unquoted values by splitting at ' #' — hmm, that could break keys with # in values (rare for API keys). Keep simple: full-line only. Actually let me support trailing comments after whitespace for robustness but document it.
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (key, rest) = match line.split_once('=') {
+            Some((k, v)) => (k.trim(), v),
+            None => continue,
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let value = rest.trim();
+        // quote handling
+        let value = if (value.starts_with('"') && value.ends_with('"') && value.len() >= 2)
+            || (value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2)
+        {
+            value[1..value.len()-1].to_string()
+        } else {
+            value.to_string()
+        };
+        // skip inline comments for unquoted values: strip from " #" 
+        out.insert(key.to_string(), value);
+    }
+    out
+}
+```
+
+Wait — for inline comment handling, `.trim()` already removes leading/trailing whitespace, so a trailing ` # comment` would remain. Let me handle: if unquoted, split at " #"? Common dotenv libs (python-dotenv) strip inline comments. But a value like `sk-ant-abc#def` unlikely. But keys could have a `#` in password... For API keys it's fine. I'll support inline comments only when the `#` is preceded by whitespace, which python-dotenv does:
+
+```rust
+let value = match rest.trim() {
+    v if v.starts_with('"') && v.ends_with('"') && v.len() >= 2 => v[1..v.len()-1].to_string(),
+    v if v.starts_with('\'') && v.ends_with('\'') && v.len() >= 2 => v[1..v.len()-1].to_string(),
+    v => {
+        // strip inline comment (whitespace + #)
+        match v.find(" #") {
+            Some(i) => v[..i].trim().to_string(),
+            None => v.trim().to_string(),
+        }
+    }
+};
+```
+
+Also handle quoted with trailing comment after the quote: `KEY="value" # comment`. My quoted branch requires ends_with quote — `"value" # comment` doesn't end with quote. Let me handle: if starts with quote, find the closing quote:
+
+```rust
+fn parse_env_value(raw: &str) -> String {
+    let v = raw.trim();
+    if v.is_empty() { return String::new(); }
+    if let Some(rest) = v.strip_prefix('"') {
+        // find closing quote, allowing trailing comment after it
+        if let Some(end) = rest.find('"') {
+            return rest[..end].to_string();
+        }
+        return rest.to_string(); // unterminated — take rest
+    }
+    if let Some(rest) = v.strip_prefix('\'') {
+        if let Some(end) = rest.find('\'') {
+            return rest[..end].to_string();
+        }
+        return rest.to_string();
+    }
+    // unquoted: strip inline comment
+    match v.find(" #") {
+        Some(i) => v[..i].trim().to_string(),
+        None => v.to_string(),
+    }
+}
+```
+
+Good enough — small, hand-rolled, no escaping beyond simple quotes (dotenv spec has more, but simple is fine).
+
+Now the loading: read `.env` in CWD only, once (OnceLock), return HashMap:
+
+```rust
+static DOTENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// Load `.env` from the current working directory (only the CWD, no upward
+/// walk). Parsed once per process and memoized.
+pub fn dotenv_keys() -> &'static HashMap<String, String> {
+    DOTENV.get_or_init(|| {
+        std::fs::read_to_string(".env")
+            .map(|content| parse_env_file(&content))
+            .unwrap_or_default()
+    })
+}
+
+/// Read an env var, falling back to `.env` in the CWD.
+/// Precedence: process env > .env file.
+pub fn env_or_dotenv(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| dotenv_keys().get(key).cloned().filter(|k| !k.is_empty()))
+}
+```
+
+Hmm, one issue with memoizing via OnceLock: tests that change CWD... Actually tests use tempdir but don't chdir typically. The memoization reads `.env` relative to CWD at first call. In tests, if a test creates `.env` in a tempdir and calls env_or_dotenv, the CWD is still the repo root, so it won't see it — unless tests chdir. Using a CWD-based test is tricky with OnceLock memoization since the repo's own CWD is fixed in tests.
+
+Better: make the loader function take a directory, and have a CWD wrapper. For tests, test `parse_env_file` (pure) and `load_env_file_from(dir)`. And the memoized CWD version is used at runtime.
+
+Actually wait — there's a subtle danger with a global memoized OnceLock in tests: the repo root doesn't have a `.env`, so `dotenv_keys()` will be empty in tests. Tests that need `.env` values should test `parse_env_file` and `load_env_file_from(dir)` directly. Good.
+
+But also: in production the `.env` read happens once at first access. If user's `.env` is created after process start, we won't see it — fine.
+
+There's also a potential issue: `std::env::set_var` in tests — tests run in parallel; the cli tests already use `serial_test::serial`. I'll use serial for my precedence test too.
+
+Now where to place these functions? Task says files: src/agent_builder.rs, src/cli.rs. `parse_model_config` is in cli.rs and is the main resolution site. I'll put the parser + loading in cli.rs, then re-export from cli (it's already a hub). Actually the task named both files, but putting everything in cli.rs is fine — agent_builder.rs also needs updating (fallback at line 912). Let me also wire dispatch_sub (resolve_api_key), setup (needs_setup), commands_spawn (apply_model_override) — these are all "provider key resolution" sites.
+
+Wait, task says "Files: src/agent_builder.rs, src/cli.rs" — but it's fine to touch dispatch_sub.rs/setup.rs/commands_spawn.rs to wire the same helper, since those are genuinely key-resolution sites and the task's core requirement is "arc should find keys in .env files". However, to keep the diff minimal and focused... Hmm. The task's "What to do" says apply to "any provider key the code supports (ANTHROPIC_API_KEY and the known providers in src/providers.rs)". The main parse path in parse_model_config covers startup. resolve_api_key in dispatch_sub covers subcommands like `arc review`. needs_setup covers the wizard gate. For the feature to "just work" everywhere a key is resolved, wiring all sites is right. It's a small, surgical change at each site — consistent with the task intent. I'll wire: cli.rs (parser + main path), dispatch_sub.rs, setup.rs, agent_builder.rs, commands_spawn.rs.
+
+Let me be careful about setup.rs: it needs `use crate::cli::env_or_dotenv` — setup already uses `provider_api_key_env` from cli. Also needs_setup is called from main.rs `run_setup_wizard_if_needed` — with env_or_dotenv wired, a `.env` key will suppress the wizard. Good.
+
+Now let me also think about smoke test: "with a temp dir containing .env with a fake ANTHROPIC_API_KEY=dummy, arc --version style invocation doesn't emit a missing-key error at parse time". Since I memoize by CWD at first call, running `arc` from a temp dir with a `.env` would pick it up. But how does main use the key? parse_model_config would find the key and not exit(1). Good.
+
+However, one subtlety: cargo test runs from repo root — no `.env` there, so nothing breaks. But if there IS a `.env` in the repo root during test... there isn't.
+
+Now let me also double check: is there any `.env` reading that should be done early, before parse_args? The precedence requirement: process env > .env > defaults. parse_model_config consults env at line 474/489 — replacing with env_or_dotenv does exactly that. The api_key resolution in dispatch_sub: same replacement. In setup.rs needs_setup: replace `std::env::var(env_var)` with `env_or_dotenv(env_var).is_some()`.
+
+Edge: `apply_model_override` in commands_spawn and `resolve_api_key` fallback in agent_builder — replace with env_or_dotenv.
+
+Also there's `prompt_retry.rs` at line ~396 which *diagnoses* auth failures and checks whether the env var is set — that's diagnostic, could use env_or_dotenv so the message is accurate ("set but rejected" vs "not set"). It's product-facing (the message shows when auth fails!). If a user has the key in `.env` and gets a 401, the current code would say "ANTHROPIC_API_KEY is not set" — a lie. Let me check that code.
+
+Let me look at prompt_retry.rs around 390-410.
+────────────────────────────────────────────────────────────────────────────────
+Let me look at the prompt_retry diagnostic site and commands_dev (
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '385,415p' src/prompt_retry… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a complete picture. Let me design the implementation:
+
+**Core plan:** Add a hand-rolled dotenv parser in `src/cli.rs` (or `src/providers.rs` — but the task says agent_builder.rs or cli.rs). Since the resolution happens in cli.rs `parse_model_config`, and providers are defined in providers.rs, the cleanest place for the parser is `src/providers.rs` (next to provider_api_key_env) or cli.rs.
+
+Actually the task says: "Add dotenv-style loading in `src/agent_builder.rs` (where provider API keys are resolved) or `src/cli.rs` (arg parsing, near provider resolution)". The clearest place is `src/cli.rs` near `parse_model_config` since that's where the primary resolution happens. The parser itself is generic (parse any .env file into a map). Let me put:
+
+1. `pub fn parse_dotenv(content: &str) -> HashMap<String, String>` — pure parser (testable).
+2. `pub fn load_dotenv_key(key: &str) -> Option<String>` — reads `./.env` from CWD, returns parsed value.
+3. In `parse_model_config`, change `from_provider_env` to fall back to `.env`, and the generic `ANTHROPIC_API_KEY`/`API_KEY` fallback to also check `.env`.
+
+**Precedence:** process env > .env file > built-in defaults. So in `from_provider_env`:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty())
+    .or_else(|| {
+        provider_env_var.and_then(|var| load_dotenv_key(var))
+    });
+```
+
+And for the generic fallback chain:
+```rust
+match std::env::var("ANTHROPIC_API_KEY")
+    .or_else(|_| std::env::var("API_KEY"))
+{
+    Ok(key) if !key.is_empty() => key,
+    _ => match load_dotenv_key("ANTHROPIC_API_KEY")
+        .or_else(|| load_dotenv_key("API_KEY")) {
+        Some(key) => key,
+        _ => match file_config...
+    }
+}
+```
+
+Also `dispatch_sub.rs::resolve_api_key` (used for `arc review` subcommand) — should honor .env too. And setup.rs `needs_setup` should treat .env-provided keys as set so the wizard doesn't trigger. Hmm, but needs_setup is also used by agent_builder fallback. Let me be careful — needs_setup is called in main.rs only after parse succeeded, so if parse_model_config picked up the .env key, the wizard only runs for interactive REPL. Actually needs_setup returns true when no key from any source. If .env has the key but needs_setup doesn't check .env, the wizard would run — but parse_model_config already filled api_key, and run_setup_wizard_if_needed calls setup::needs_setup which returns true → runs wizard. That would be bad UX — wizard prompts even though .env has a key. Let me update needs_setup to also check `load_dotenv_key(env_var)`.
+
+Similarly `setup.rs:364` — when user presses Enter in the wizard with empty key, checks env var — should also check .env.
+
+`agent_builder.rs` fallback (line 912) — fallback provider key resolution reads env only; should check .env too. And `commands_spawn.rs:1389` and `dispatch_sub.rs:508`, `commands_dev.rs:91`, `prompt_retry.rs:397` — these are diagnostics. To keep the scope tight but correct, the most important ones are:
+- cli.rs parse_model_config (primary path) ✓
+- dispatch_sub.rs resolve_api_key (subcommand path like `arc review`, `arc run`?) ✓
+- setup.rs needs_setup (so wizard doesn't fire when .env has key) ✓
+- agent_builder.rs fallback switch (fallback provider key from .env) ✓
+
+For diagnostics (commands_dev doctor, prompt_retry), the message would say "not set" even if it's in .env — minor. But prompt_retry's message says "{env_var} is not set" — if the key is in .env, that's a false negative. Checking .env there is nice-to-have; let me update prompt_retry too since it's cheap: `std::env::var(env_var).is_ok() || load_dotenv_key(env_var).is_some()`. Actually let me keep focus — the task scope is agent_builder.rs and cli.rs. I'll implement the parser in cli.rs, use it in cli.rs parse_model_config, dispatch_sub resolve_api_key, setup needs_setup, agent_builder fallback. Also spawn's apply_model_override. These all use `provider_api_key_env` + `std::env::var` — a shared helper would be ideal.
+
+Actually the cleanest: put a helper in providers.rs or cli.rs:
+```rust
+/// Resolve a provider API key with dotenv fallback: process env wins, then ./.env.
+pub fn resolve_provider_api_key(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty())
+        .or_else(|| load_dotenv_key(env_var))
+}
+```
+
+But existing code uses `std::env::var(var)` directly at ~7 sites. I'll change the task-scope files (cli.rs, agent_builder.rs) plus dispatch_sub.rs, setup.rs, commands_spawn.rs, commands_dev.rs, prompt_retry.rs — all are small edits using a shared helper. That keeps behavior consistent everywhere.
+
+Let me design the parser:
+
+```rust
+/// Parse dotenv-style `KEY=value` lines from a `.env` file.
+///
+/// Supports:
+/// - comments (`# ...` full-line and trailing? — spec says ignore comments `#`; simplest: full-line and inline after value? Let's do: lines starting with `#` after trim are ignored; trailing comments only if preceded by whitespace... to keep simple and predictable, only full-line comments, plus optional `export ` prefix, quotes stripped, inline comments NOT stripped).
+```
+
+Hmm, the task says "ignore comments `#`, trim whitespace, support optional `export ` prefix and simple unquoted/quoted values". Safest minimal: full-line comments only (lines whose trimmed form starts with `#`). Inline comments are ambiguous with keys containing `#` (there are no such keys, but values could legitimately contain `#` like URLs with fragments). I'll skip inline comments — full-line only, documented. That satisfies "ignore comments `#`".
+
+```rust
+/// Parse a dotenv-style file's contents into a key→value map.
+///
+/// Rules (deliberately minimal — no shell expansion, no interpolation):
+/// - `KEY=value` lines; blank lines and full-line `#` comments are ignored.
+/// - An optional `export ` prefix is stripped.
+/// - Surrounding whitespace on the key and value is trimmed.
+/// - Values may be single- or double-quoted; quotes are stripped.
+/// - Later duplicate keys override earlier ones.
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else { continue };
+        let key = key.trim().to_string();
+        if key.is_empty() { continue; }
+        let value = value.trim();
+        let value = if value.len() >= 2 {
+            let first = value.as_bytes()[0];
+            let last = value.as_bytes()[value.len() - 1];
+            if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                &value[1..value.len() - 1]
+            } else {
+                value
+            }
+        } else { value };
+        map.insert(key, value.to_string());
+    }
+    map
+}
+```
+
+Wait, need byte-safety: `value.len() >= 2` then indexing bytes for quotes — that's safe since `1..len-1` is a char boundary if both ends are ASCII quote bytes (quotes are single-byte, and slicing at 1 is safe if byte 0 is an ASCII quote because ASCII bytes never appear inside a multi-byte char — actually if byte 0 is `"` (0x22), then it IS a char boundary since 0x22 is a valid standalone ASCII char. And len-1: if last byte is `"` it's also a boundary. Safe.)
+
+```rust
+/// Read `key` from a `.env` file in the current working directory, if present.
+///
+/// Only the CWD is consulted (no upward walk, no system dirs). The process
+/// environment always wins over this file — callers check `env::var` first.
+pub fn load_dotenv_key(key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(".env").ok()?;
+    parse_dotenv(&content).get(key).cloned()
+}
+```
+
+Note: `read_to_string(".env")` — relative path resolves against CWD at call time. Tests that change CWD... tests can't easily chdir within the same process (well they can with `std::env::set_current_dir`, which affects the whole process — risky with parallel tests). Better to make the CWD lookup injectable for testing: 
+
+```rust
+pub fn load_dotenv_key_in(dir: &Path, key: &str) -> Option<String>
+pub fn load_dotenv_key(key: &str) -> Option<String> { load_dotenv_key_in(Path::new("."), key) }
+```
+
+Hmm, but for the unit test, I can test `parse_dotenv` purely + test `load_dotenv_key_in` with a tempdir. But integration in parse_model_config uses `load_dotenv_key` (CWD-based). For a true end-to-end test of precedence I'd need to chdir, which is process-global and conflicts with parallel tests. serial_test crate is available! I can use `#[serial]` and `std::env::set_current_dir(tmp)` guarded... but restoring CWD after. Risky but doable with serial. Actually a cleaner approach: since parse_model_config resolves keys at parse time and reads CWD .env, I could test `load_dotenv_key_in` directly with tempdir paths — that covers the file-reading path. And parse_dotenv covers parsing. Precedence (process env wins) — I can test by setting the env var and checking load_dotenv_key still returns process env first... but load_dotenv_key only reads .env.
+
+Let me think about what the manual smoke test wants: "with a temp dir containing .env with a fake ANTHROPIC_API_KEY=dummy, arc --version style invocation doesn't emit a missing-key error at parse time". Wait — `--version` exits before parse_model_config (line 736: early-exit subcommands handled before). Hmm, so `arc --version` with no key doesn't even hit key resolution. The smoke test would be more like running `arc` non-interactively in a pipeline... Actually in piped mode with no key, parse_model_config exits with error. With .env providing the key, it wouldn't.
+
+Let me verify: does `--version` route through try_dispatch_subcommand → handle_version, before parse_model_config? Line 736 says "Handle early-exit subcommands (--help, --version) before anything else." So yes, `arc --version` never reaches key resolution. The smoke test in the task is loosely worded ("or however the code surfaces it"). The real verification is: in a dir with .env, running arc in a non-interactive mode shouldn't bail with "No API key found."
+
+For a robust unit test of precedence with real CWD, I'll do a serial test using set_current_dir with a tempdir. serial_test is already a dev-dependency. Let me write:
+
+```rust
+#[test]
+#[serial]
+fn test_dotenv_precedence_process_env_wins() {
+    // process env beats .env
+    unsafe { std::env::set_var("arc_DOTENV_TEST_KEY", "process-value"); }
+    // remove var after
+    ...
+}
+```
+
+Hmm, but I shouldn't use real API key var names in tests that other tests rely on. Existing tests set ANTHROPIC_API_KEY and rely on it. If I set_current_dir to a tempdir with a .env containing ANTHROPIC_API_KEY=dummy while ANTHROPIC_API_KEY is unset, other tests running in parallel might see it... serial_test serializes against other serial tests only. Non-serial tests run in parallel threads regardless. This is the classic hazard.
+
+Safer: I'll limit the test to:
+1. `parse_dotenv` — pure parser test (comments, quoting, export prefix, precedence within file).
+2. `load_dotenv_key_in(dir)` — with tempfile TempDir, write .env, read key.
+3. A serial test for the CWD behavior using a *custom* env var name not used anywhere (e.g., `arc_TEST_DOTENV_KEY`) — it won't collide with other tests' assumptions, and set_current_dir is restored after. parse_model_config is hard to drive standalone... but I can at least test that load_dotenv_key reads the CWD .env, and the precedence rule is encoded in the helper used by callers (`resolve_provider_api_key` style helper: env first, then .env). Test that helper with a custom var name:
+
+```rust
+fn get_provider_api_key_opt(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty())
+        .or_else(|| crate::cli::load_dotenv_key(env_var))
+}
+```
+
+Wait — I need to decide where the helper lives and how the resolution sites use it. Let me define in cli.rs:
+
+```rust
+/// Resolve a provider API key: process environment first, then a `.env` file
+/// in the current working directory, then `None`.
+pub fn resolve_api_key_env(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty())
+        .or_else(|| load_dotenv_key(env_var))
+}
+```
+
+And use it in parse_model_config:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| resolve_api_key_env(var));
+```
+Wait original was:
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty());
+```
+→ `provider_env_var.and_then(resolve_api_key_env)`.
+
+And the generic fallback:
+```rust
+match std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY")) {
+    Ok(key) if !key.is_empty() => key,
+    _ => match resolve_api_key_env("ANTHROPIC_API_KEY").or_else(|| resolve_api_key_env("API_KEY")) {
+```
+Hmm wait, that would double-check env (harmless, env was already unset/empty at that point — no, env could have API_KEY set while ANTHROPIC_API_KEY unset: first match returns Ok(API_KEY value) and we never reach the fallback. If both empty, resolve_api_key_env checks env again (empty → skip) then .env. So writing the fallback as `load_dotenv_key("ANTHROPIC_API_KEY").or_else(|| load_dotenv_key("API_KEY"))` is cleaner and avoids redundant env checks. But precedence: process env already checked above in that branch — both were empty. So:
+
+```rust
+_ => match load_dotenv_key("ANTHROPIC_API_KEY").or_else(|| load_dotenv_key("API_KEY")) {
+    Some(key) => key,
+    None => match file_config.get("api_key").cloned() { ... }
+}
+```
+
+That keeps precedence: --api-key > provider env > .env(provider) > config key > ANTHROPIC/API_KEY env > .env(ANTHROPIC/API_KEY) > config api_key > defaults. Good.
+
+For dispatch_sub.rs `resolve_api_key`:
+```rust
+// Provider-specific env var
+if let Some(env_var) = crate::providers::provider_api_key_env(provider) {
+    if let Ok(key) = std::env::var(env_var) {
+```
+→ use cli::resolve_api_key_env. And the fallback for ANTHROPIC/API_KEY similarly with load_dotenv_key after env checks.
+
+For setup.rs needs_setup: after checking env, check load_dotenv_key:
+```rust
+if let Some(env_var) = provider_api_key_env(provider) {
+    if resolve_api_key_env(env_var).is_some() { return false; }
+}
+```
+Actually simpler — replace the env check with resolve_api_key_env which already does env-then-.env. Same for the ANTHROPIC_API_KEY/API_KEY generic checks.
+
+For setup.rs wizard (`setup.rs:364`): when the user presses Enter with empty key input, check `resolve_api_key_env(env_key)`. Let me look at that code more closely to make the edit right.
+
+For agent_builder.rs fallback (line 912):
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+→
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::resolve_api_key_env(env_var) {
+        self.api_key = key;
+    }
+}
+```
+
+For commands_spawn.rs:1389 similarly.
+
+For prompt_retry.rs:397 diagnostic: `let key_set = std::env::var(env_var).is_ok() || crate::cli::load_dotenv_key(env_var).is_some();` — good to keep the diagnostic honest.
+
+For commands_dev.rs:91 doctor check: `std::env::var(var_name).is_ok()` → also check .env? The doctor's "API key" check would say "not set" if key is in .env. Update to use resolve_api_key_env. Cheap and honest.
+
+Also—should I update `main.rs:599` interplay? That sets env var after setup wizard; fine as-is.
+
+Scope check: the task says Files: src/agent_builder.rs, src/cli.rs. But to keep consistency across all resolution/diagnostic sites (dispatch_sub, setup, spawn, prompt_retry, commands_dev), those files also read provider keys via env. The task intends the .env feature to apply to "any provider key the code supports". I'll edit the main resolution sites (cli.rs, agent_builder.rs per the task) AND the directly-related consumers that would otherwise give inconsistent behavior (setup needs_setup is important to not trigger the wizard, dispatch_sub resolve_api_key is important because `arc review`/subcommands would still fail without .env support). The others (spawn, prompt_retry, commands_dev) are diagnostics — I'll update them too since it's the same helper and keeps behavior coherent. But I must be careful to keep the diff surgical.
+
+Wait — there's a subtlety with `resolve_api_key_env` reading `.env` from CWD relative to *current directory at call time*. In tests, CWD is the repo root. If the repo root had a `.env` it could interfere — it doesn't (checked: no `.env`).
+
+Also `parse_dotenv` should probably not be marked dead code — it's used by load_dotenv_key. Fine.
+
+Let me check where parse_config_file / load_config_file reads .arc.toml — CWD-based too. So CWD-based .env is consistent with the codebase's existing config convention.
+
+Now, one more consideration: `.env` path — should it be `Path::new(".env")` relative to CWD → yes, `std::fs::read_to_string(".env")`.
+
+Now about the docs update: add a paragraph to `docs/src/configuration/models.md` after the providers table / env var info, and quick-start.md. The task says one short paragraph: "arc reads provider API keys from a `.env` file in the current directory when the environment variable is not set." I'll add to quick-start.md (where the export example lives) and models.md (provider table section).
+
+Also update CLAUDE.md? The task instructions say "If you changed behavior, added features, or modified architecture, update the docs" — CLAUDE.md documents architecture. Adding a small note to CLAUDE.md's architecture section could be warranted but the file is huge; the key doc requirement is docs/src. The "Project Instructions" say keep CLAUDE.md accurate. The .env loading is a user-facing feature; docs/src pages cover it. I don't need to add CLAUDE.md architecture noise for a ~40-line feature — but the instructions explicitly list CLAUDE.md + README. Hmm. CLAUDE.md has an Architecture section describing files. The feature doesn't change file responsibilities meaningfully (cli.rs already does key resolution). I'll skip CLAUDE.md/README changes to keep it surgical — actually wait, the evolve skill says "If your change makes any doc statement wrong, fix it." My change doesn't make CLAUDE.md statements wrong. And docs/src/models.md/quick-start.md get the new paragraph. That satisfies "update relevant pages for user-facing changes."
+
+Let me now check `load_config_file` handles the case where `.arc.toml` doesn't exist (returns empty map) so parse_model_config flows to key resolution even without config file. Yes — existing flow works.
+
+Let me also double check `needs_setup`'s behavior: if `.arc.toml` exists, returns false (no wizard) regardless of keys. If .env has the key and no .arc.toml → currently returns true (wizard). After my fix → false. 
+
+Now the config hint in the "No API key found" error message — should I mention .env? The error says "Set {env_hint} env var, use --api-key <key>, or add api_key to .arc.toml." Adding ".env in the current directory" would be nice. Let me add it to both cli.rs:510 and dispatch_sub.rs:509-510.
+
+Let me write the code now.
+
+First, add to cli.rs after the KNOWN_PROVIDERS re-export block or near parse_model_config. I'll add a new section before `parse_model_config` (line ~439).
+
+Helper names: `parse_dotenv`, `load_dotenv_key_in`, `load_dotenv_key`, `resolve_api_key_env`.
+
+Then modify parse_model_config's two spots.
+
+Then agent_builder.rs:912.
+
+Then dispatch_sub.rs resolve_api_key.
+
+Then setup.rs needs_setup + wizard empty-key path.
+
+Then commands_spawn.rs:1389.
+
+Then prompt_retry.rs:397.
+
+Then commands_dev.rs:91.
+
+Then tests in cli.rs tests module + docs.
+
+Let me write the parser carefully with the byte-safety rule (no slicing mid-char):
+
+```rust
+/// Parse dotenv-style `KEY=value` file contents into a key→value map.
+///
+/// Deliberately minimal (no dependency, no interpolation, no shell
+/// expansion) — just enough for API keys:
+///
+/// - Blank lines and full-line `#` comments are ignored.
+/// - An optional `export ` prefix is stripped (e.g. `export OPENAI_API_KEY=...`).
+/// - Keys and values are trimmed of surrounding whitespace.
+/// - Values wrapped in matching single or double quotes have the quotes stripped.
+/// - When a key repeats, the last occurrence wins.
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((key, value)) = line.split_once('=') else { continue; };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let value = unquote_dotenv_value(value);
+        map.insert(key.to_string(), value.to_string());
+    }
+    map
+}
+
+/// Strip a single layer of matching `"` or `'` quotes from a dotenv value.
+fn unquote_dotenv_value(value: &str) -> &str {
+    let bytes = value.as_bytes();
+    let len = bytes.len();
+    if len >= 2 {
+        let first = bytes[0];
+        let last = bytes[len - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            // Both ends are ASCII quotes, so `1` and `len-1` are char boundaries.
+            return &value[1..len - 1];
+        }
+    }
+    value
+}
+
+/// Read `key` from the `.env` file in `dir` (if present), without touching the process env.
+pub fn load_dotenv_key_from(dir: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(dir.join(".env")).ok()?;
+    parse_dotenv(&content).get(key).cloned()
+}
+
+/// Read `key` from a `.env` file in the current working directory, if present.
+///
+/// Only the CWD is consulted — no upward walk, no system dirs.
+pub fn load_dotenv_key(key: &str) -> Option<String> {
+    load_dotenv_key_from(Path::new("."), key)
+}
+
+/// Resolve a provider API key with dotenv fallback.
+///
+/// Precedence: process environment > `.env` in the CWD > `None`.
+pub fn resolve_api_key_env(env_var: &str) -> Option<String> {
+    std::env::var(env_var)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| load_dotenv_key(env_var))
+}
+```
+
+Need `use std::path::Path;` — check cli.rs imports. It has `std::io::IsTerminal` and `std::collections::HashMap`. I'll add `use std::path::Path;`.
+
+Now tests in cli.rs tests module:
+
+```rust
+#[test]
+fn test_parse_dotenv_basic() {
+    let content = "\
+# comment line
+
+ANTHROPIC_API_KEY=sk-ant-dummy
+export OPENAI_API_KEY=sk-openai-dummy
+  GOOGLE_API_KEY = spaced-key  \n\
+EMPTY_KEY=\n\
+GITHUB_TOKEN=\"quoted-token\"\n\
+XAI_API_KEY='single-quoted'\n\
+";
+    let map = parse_dotenv(content);
+    assert_eq!(map.get("ANTHROPIC_API_KEY"), Some(&"sk-ant-dummy".to_string()));
+    ...
+}
+```
+
+Wait careful: `EMPTY_KEY=` — value is empty after trim → unquote returns empty → map entry with empty string. That's fine (callers filter empty? load_dotenv_key returns Some("") — callers like parse_model_config then `.filter(|k| !k.is_empty())`? In my updated code, from_provider_env = provider_env_var.and_then(resolve_api_key_env) — that doesn't filter empty. Original filtered empty. Hmm. resolve_api_key_env filters empty from env, but not from .env. An empty value in .env (EMPTY_KEY=) should arguably count as unset. Let me add `.filter(|k| !k.is_empty())` in resolve_api_key_env after the or_else:
+
+```rust
+pub fn resolve_api_key_env(env_var: &str) -> Option<String> {
+    std::env::var(env_var).ok().filter(|k| !k.is_empty())
+        .or_else(|| load_dotenv_key(env_var))
+        .filter(|k| !k.is_empty())
+}
+```
+
+Good.
+
+Precedence test with serial + set_current_dir:
+
+```rust
+#[test]
+#[serial]
+fn test_dotenv_cwd_loading_and_precedence() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join(".env"), "arc_TEST_DOTENV_KEY=from-file\ntrailing=1").unwrap();
+    let prev_cwd = std::env::current_dir().unwrap();
+    std::env::set_current_dir(tmp.path()).unwrap();
+    // cleanup guard so later assertions in this test don't leak
+    let restore = std::panic::catch_unwind?... // overkill
+```
+
+Hmm, set_current_dir is process-global; even with #[serial], non-serial tests running parallel could resolve `.env` in the temp dir. But those other tests don't call load_dotenv_key unless a key var is unset... Actually many other tests call parse_args which NOW calls load_dotenv_key (via resolve_api_key_env) if the env var is unset! E.g. test at line 1639 `test_api_key_from_config_file` — if ANTHROPIC_API_KEY isn't set, parse_model_config → resolve_api_key_env → load_dotenv_key reads CWD `.env`. If a serial test has chdir'd to a tempdir, a parallel test could read that temp .env. That's a real hazard.
+
+To avoid this entirely, I could use a var name for the precedence test that no other test touches (custom `arc_TEST_DOTENV_KEY`), and for the chdir test the .env contains ONLY that var. Parallel tests looking for ANTHROPIC_API_KEY in .env would find nothing → fall through → fine, same as repo root (no .env). They might briefly resolve key=None where repo root also has no .env → identical behavior. The only risk: a parallel test that *needs* a key from .env — none exist. And restore CWD at the end. With `#[serial]` against other serial tests. I'll also make sure to restore CWD even on panic... simplest: do the assertions, restore at end, and accept that on panic the CWD stays temp (CI process is short-lived; subsequent serial tests would chdir back — but a panic in a test only affects that thread's assertions; the process continues. CWD is process-global so a leaked chdir could affect other tests. Let me wrap in a closure-based restore:
+
+```rust
+let result = std::panic::catch_unwind(|| {
+    std::env::set_current_dir(tmp.path()).unwrap();
+    // assertions using load_dotenv_key / a helper
+});
+std::env::set_current_dir(&prev_cwd).unwrap();
+assert!(result.is_ok());
+```
+
+That's clean. Actually, I realize there's an even simpler approach that avoids chdir entirely: test `resolve_api_key_env` precedence WITHOUT chdir by writing .env... no, resolve_api_key_env reads CWD .env. The chdir is needed for the .env path. Alternatively test precedence at the two layers separately:
+1. `parse_dotenv` handles comments/quoting/export (no fs, no env).
+2. `load_dotenv_key_from(dir, key)` reads a tempdir .env (no chdir, no env — pure and safe).
+3. Precedence "process env wins": set env var `arc_TEST_DOTENV_KEY=process`, then call... resolve_api_key_env reads CWD .env, so to prove env wins I need a .env in CWD. Alternative: verify the *composition* logic is env-first by testing with a CWD that has a .env AND an env var set — requires chdir.
+
+Given the hazard, the chdir test with a unique var name and catch_unwind restore is acceptable and actually proves the real behavior end-to-end. Let me also guard: only set the env var that no other test uses, and remove it after.
+
+Wait — is there a risk with parallel non-serial tests running `parse_args` while CWD is the tempdir and the tempdir .env doesn't have ANTHROPIC_API_KEY? They'd behave identically to repo root (no .env). The only difference vs repo root: the tempdir might have a `.arc.toml`? No, I won't create one. So parallel behavior is unchanged. 
+
+Also `#[serial]` — needs `use serial_test::serial;` already imported in cli.rs tests.
+
+Let me now also verify that no other test writes a `.env` to CWD (would poison every other test). Grep: none in cli.rs tests. Good.
+
+Edge: my chdir test calling `load_dotenv_key("arc_TEST_DOTENV_KEY")` — reads CWD .env → "from-file". Precedence test: `std::env::set_var("arc_TEST_DOTENV_KEY", "from-process")` then `resolve_api_key_env("arc_TEST_DOTENV_KEY")` → "from-process" (env wins). Then remove var, `resolve_api_key_env` → "from-file". 
+
+Now integration in parse_model_config — how to test that end-to-end? parse_model_config is private; tests are in the same module so can call it. With chdir to tempdir containing .env with ANTHROPIC_API_KEY=dummy and a config-less parse_args... but parse_args also needs ANTHROPIC_API_KEY for models etc. Actually parse_args → parse_model_config reads .env. In the serial chdir test, I can run `parse_args(&vec!["arc".into()])` with ANTHROPIC_API_KEY unset in env, .env in tempdir containing ANTHROPIC_API_KEY=dummy, and assert config.api_key == dummy. Let me check what else parse_args needs — provider anthropic defaults, model defaults. Should work. Config field: after parse_args returns Some(config), config.api_key? Let me check Config struct field name. Line 552-553: ModelConfig { provider, base_url, api_key, ... }. And Config has api_key field (main.rs 593: agent_config.api_key = result.api_key.clone()). Yes.
+
+But careful: other tests run in parallel reading repo-CWD .env — none exist, fine. During the chdir window, parallel tests calling parse_args would read tempdir .env — which contains ANTHROPIC_API_KEY=dummy! That WOULD change behavior of parallel tests that expect no key → error paths. Hmm. E.g. a parallel test asserting the "No API key found" error in piped mode would fail because .env provides dummy. Let me check which tests hit that error... `test_api_key_from_config_file` uses config, not error path. Are there tests for the missing-key error? grep "No API key found" in cli.rs tests.
+
+Let me grep before finalizing. If such a test exists, the chdir window could flake it. To minimize risk, I'll instead assert only via `resolve_api_key_env`/`load_dotenv_key` with the custom var name (never ANTHROPIC_API_KEY in the temp .env), avoiding any interference. The parse_model_config wiring is simple enough that a targeted unit on the helper + review suffices; plus the manual smoke verification via bash after build (real end-to-end, in a separate process — no parallel-test hazard!). That's the best of both: unit tests for parser/precedence (safe var name) + a bash-driven end-to-end smoke in a tempdir with a real build.
+
+Good plan. Let me also update dispatch_sub resolve_api_key fallback for ANTHROPIC/API_KEY to check .env via load_dotenv_key. And error hints mention .env.
+
+Now let me write all the edits.
+
+Also need to double-check: `HashMap` import in cli.rs exists (line 7). `Path` needs import — add `use std::path::Path;`.
+
+Let me check if `parse_dotenv` naming collides with anything. grep. Also `resolve_api_key_env` — dispatch_sub has a private `resolve_api_key` fn; name collision? Different module, fine. But is there an existing `resolve_api_key_env`? grep to be sure.
+
+Let me start editing.
+────────────────────────────────────────────────────────────────────────────────
+I have the complete picture. Let me check for name collisions and the missing
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "resolve_api_key_env\|par… ✓ (8ms)
+
+I have complete understanding of the code. Let me implement the dotenv loading. I'll add:
+
+1. A `dotenv` module in `src/cli.rs` (the main parse path) with a hand-rolled parser
+2. A central `resolve_api_key_env()` helper that checks process env, then `.env` in CWD
+3. Wire it into `parse_model_config` in cli.rs plus a regression test
+4. Also wire into setup.rs (needs_setup), agent_builder fallback, and dispatch_sub — minimal touches at the env resolution site
+
+Let me start with the parser and helper in cli.rs:
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:700..740 ✓ (0ms)
+
+Now let me add the dotenv module to cli.rs. First, let me find a good spot (after the imports, before the structs) and the test module structure
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '24,60p' src/cli.rs; echo "… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I'll write the dotenv module. Design:
+
+1. `parse_dotenv(content: &str) -> HashMap<String, String>` — pure parser, testable. Handles:
+   - `#` comments (full-line and inline? Task says "ignore comments `#`" — I'll do full-line comments starting with `#` after optional whitespace, and also allow `export ` prefix)
+   - Trim whitespace
+   - `export ` prefix support
+   - Simple unquoted values, quoted values (single/double)
+   - Skip malformed lines (no `=`)
+
+2. `load_dotenv_file(dir: &Path) -> HashMap<String, String>` — reads `.env` from a directory (CWD only). Returns empty on missing/unreadable.
+
+3. `resolve_api_key_env(name: &str) -> Option<String>` — process env wins, then .env value. This is the central helper.
+
+4. Wire into `parse_model_config` — replace direct `std::env::var(var)` calls with `resolve_api_key_env`. This covers the main path including the fallback ANTHROPIC_API_KEY/API_KEY chain.
+
+Also add to setup.rs `needs_setup`, agent_builder fallback, dispatch_sub resolve_api_key. Let me be careful about scope — the task says "Files: src/agent_builder.rs, src/cli.rs". But to make it coherent and honest, the main parse path in cli.rs covers startup and interactive. The dispatch_sub path is used for subcommands like `arc review`. The agent_builder fallback is a runtime switch. Since the task says apply to provider keys, and lists only 2 files, I should keep the surgical footprint but make the primary path work. Let me wire cli.rs (main), and also the setup.rs needs_setup check via the same helper... but setup.rs is a different file.
+
+Actually, let me think about what "Apply to any provider key the code supports" means. The main path `parse_model_config` covers all providers at startup. That's where `arc` finds keys. The fallback-switch in agent_builder is a secondary runtime path (switch provider mid-session) — the task explicitly lists agent_builder.rs as a file, so that fallback site should also use the .env-aware resolution. Let me do both:
+
+- src/cli.rs: add dotenv module + helper, wire into parse_model_config
+- src/agent_builder.rs: wire fallback switch to use the helper
+- Also setup.rs needs_setup: if .env has the key, the setup wizard shouldn't run. This is important — otherwise a user with .env will still get the wizard. This is a behavior change that the task wants ("arc should find keys in .env files"). I'll wire it since it's honest completion of the feature. Actually the task files list says only agent_builder.rs + cli.rs. But needs_setup not honoring .env would mean .env users still get prompted for setup wizard. Hmm, but let me check: needs_setup checks `.arc.toml` exists → false. If no config file and no env var, but .env present... the wizard would run. To make the feature genuinely work I should update needs_setup too. The Files: line is guidance, not a hard contract — "or wherever provider API keys are resolved" is in the task. I'll keep changes minimal but complete: cli.rs (main), setup.rs needs_setup, agent_builder.rs fallback. dispatch_sub resolve_api_key is used by `arc review` etc. — those are subcommands that also need keys. For coherence I'll wire it too — it's a 2-line change using the shared helper.
+
+Where should the shared helper live? In cli.rs, since cli already re-exports provider helpers and other modules use `crate::cli::`. I'll make `resolve_api_key_env` a pub fn in cli.rs, re-export isn't needed since it lives there.
+
+Let me now write the code. Edition 2021 means I can't use `OnceLock` on stable? No, `std::sync::OnceLock` is stable since 1.70 and they already use it. Fine.
+
+Parser details:
+
+```rust
+/// Parse dotenv-style `KEY=value` lines from a string.
+/// Supports:
+/// - `#` comment lines (ignored)
+/// - optional `export ` prefix
+/// - single- and double-quoted values (quotes removed)
+/// - trailing inline comments after unquoted values? — task says ignore comments `#`. Keep it simple: strip inline comment for unquoted values? Standard dotenv strips inline comments only when preceded by whitespace. To keep ~40 lines and predictable, I'll do: trim; skip if empty or starts with `#`; strip optional `export `; split on first `=`; trim key; value = rest trimmed; if value starts with quote, strip matching quotes; drop inline ` #...` comment for unquoted values (only when ` #` appears — hmm, this could break values containing ` #`. Standard dotenv does treat ` #` as comment start. But to be safe and simple, I'll only drop inline comments... let me keep it minimal: no inline comment stripping. Task only requires "ignore comments #" which most naturally means comment lines. I'll handle full-line comments only. Keep it simple and predictable.
+```
+
+Actually, task says "read `KEY=value` lines (ignore comments `#`, trim whitespace, support optional `export ` prefix and simple unquoted/quoted values)". So: comment lines starting with `#`. I'll do full-line comments (after trimming). That satisfies it.
+
+```rust
+/// Parse dotenv-style `KEY=value` lines (hand-rolled, minimal-dependency).
+pub fn parse_dotenv(content: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim().to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = line[eq + 1..].trim().to_string();
+        if value.is_empty() {
+            out.insert(key, value);
+            continue;
+        }
+        // Strip matching surrounding quotes
+        if value.len() >= 2 {
+            let first = value.chars().next().unwrap();
+            let last = value.chars().last().unwrap();
+            if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+                value = value[1..value.len() - 1].to_string();
+            }
+        }
+        out.insert(key, value);
+    }
+    out
+}
+```
+
+Wait — `line[..eq]` and `line[eq+1..]` on a trimmed line: eq is a byte index from `find('=')`. Since key/value are ASCII-safe after trim at boundaries... `eq` could be in the middle of a multibyte char? `=` is ASCII, so `find('=')` returns the byte index of the `=` char, which is a char boundary. `line[..eq]` ends right before `=`, which is a boundary. `line[eq+1..]` starts right after `=`, also a boundary. Safe.
+
+For quote stripping: `value[1..value.len()-1]` — first and last chars are quotes (ASCII, 1 byte) so boundaries are safe.
+
+HashMap import: cli.rs already has `use std::collections::HashMap;` at line 7.
+
+Now the loader:
+
+```rust
+/// Read `.env` from the current working directory only (no upward walk,
+/// no system dirs). Returns an empty map if the file is absent/unreadable.
+pub fn load_cwd_dotenv() -> HashMap<String, String> {
+    std::fs::read_to_string(".env")
+        .map(|content| parse_dotenv(&content))
+        .unwrap_or_default()
+}
+```
+
+Hmm, but for tests I need `load_dotenv_from(dir)`. Let me make:
+
+```rust
+pub fn load_dotenv_from(dir: &std::path::Path) -> HashMap<String, String> {
+    std::fs::read_to_string(dir.join(".env"))
+        .map(|content| parse_dotenv(&content))
+        .unwrap_or_default()
+}
+```
+
+And the resolver:
+
+```rust
+/// Resolve an API-key-style env var with dotenv fallback: process environment
+/// wins, then a `.env` file in the current working directory.
+pub fn resolve_api_key_env(name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(name) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    load_cwd_dotenv().get(name).filter(|k| !k.is_empty()).cloned()
+}
+```
+
+Should the .env parser and loader cache? No need — reads once per call, files are tiny. But `parse_model_config` calls the fallback chain twice potentially. Fine.
+
+Then in `parse_model_config`:
+- Line 473-475: `let from_provider_env = provider_env_var.and_then(|var| std::env::var(var).ok()).filter(|k| !k.is_empty());`
+  → `let from_provider_env = provider_env_var.and_then(resolve_api_key_env).filter(|k| !k.is_empty());`
+  Wait `Option<&'static str>.and_then(resolve_api_key_env)` — resolve_api_key_env takes `&str`, and closure gets `&'static str`... `and_then` on `Option<&'static str>` passes `&'static str` which coerces to `&str`. Fine.
+
+- Lines 489-491: `match std::env::var("ANTHROPIC_API_KEY").or_else(|_| std::env::var("API_KEY"))`
+  → use resolve_api_key_env for both:
+  ```rust
+  match resolve_api_key_env("ANTHROPIC_API_KEY").or_else(|| resolve_api_key_env("API_KEY"))
+  ```
+  But wait — "process env > .env file > built-in defaults" and precedence should remain: provider-specific env var, then config key, then ANTHROPIC/API_KEY generic. With resolve_api_key_env, provider-specific env var falls back to .env. Good.
+
+Also, the load_cwd_dotenv in parse_model_config reads `.env` from CWD. But tests run in the repo root which has no `.env` — and various tests set env vars. But now resolve_api_key_env will read `.env` from CWD — in tests, CWD is the repo root. There's no `.env` there. But wait — is there any risk a test runs in a tempdir with a `.env` and interferes? Only if the test itself creates one. OK.
+
+One concern: `parse_args` is called in many tests with `ANTHROPIC_API_KEY` set via `set_var`. Those still work since process env wins.
+
+Now agent_builder.rs line 912-914:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+→ 
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::resolve_api_key_env(env_var) {
+        self.api_key = key;
+    }
+}
+```
+But there's a test `test_fallback_switch_resolves_api_key` that sets GOOGLE_API_KEY via set_var — still passes (process env wins). And `test_fallback_switch_keeps_api_key_when_env_missing` — removes XAI_API_KEY, expects api_key persists. Now with resolve_api_key_env, if a `.env` in CWD had XAI_API_KEY... there's no .env in repo root, so still None. OK.
+
+setup.rs needs_setup: change `std::env::var(env_var)` checks to also consult dotenv. Let me update the three spots in needs_setup to use cli::resolve_api_key_env. But setup.rs imports from crate::cli already. Wait — does setup.rs need to avoid circular import? cli uses crate::dispatch_sub, config, providers... setup is used by main. No cycle: setup → cli is fine (cli doesn't import setup).
+
+Also setup.rs line 364 (the wizard's env check when user presses Enter with empty key): that's inside the wizard itself. It could also check .env. But minor. Let me update needs_setup (3 checks) and leave the wizard's inner check — actually the wizard's inner check at 364 could be updated too for coherence. Hmm, keep the diff focused but consistent: needs_setup is the gate; the wizard inner check reads env when user enters empty — updating it means a .env key is used when user skips. That's a nice touch and consistent. But careful: setup.rs uses `provider_api_key_env` imported from crate::cli. I'll add `resolve_api_key_env` calls there.
+
+dispatch_sub resolve_api_key: update to use resolve_api_key_env for the provider env var and fallbacks. That file uses `crate::providers::provider_api_key_env` and `crate::cli::` — check imports. It uses `crate::providers::` prefix and loads config via `load_config_file` (probably `use crate::config::load_config_file` or `crate::cli::load_config_file`). I'll use full path `crate::cli::resolve_api_key_env`.
+
+Let me check dispatch_sub imports.
+
+Now about `std::env::var` in commands_dev (doctor check) — that's a diagnostic "is the env var set" check. Should doctor also consult .env? Nice-to-have. The doctor check is about diagnosing whether API key is set — if .env provides it, doctor should say pass. Let me check: `if std::env::var(var_name).is_ok()`. I could update to `crate::cli::resolve_api_key_env(var_name).is_some()`. That's honest: the key IS available. Small change, coherent. But task file list is cli.rs + agent_builder.rs. I'll wire the ones that gate actual key resolution (cli parse, agent_builder fallback, setup needs_setup, dispatch_sub review) and the doctor diagnostic. Actually let me be careful not to overscope. The core deliverable:
+
+1. parse_dotenv + tests ✓ (cli.rs)
+2. resolve_api_key_env + tests ✓ (cli.rs)
+3. Wire parse_model_config ✓ (cli.rs)
+4. Wire agent_builder fallback ✓ (agent_builder.rs)
+5. setup needs_setup — important so .env users don't get the wizard ✓ (setup.rs)
+6. dispatch_sub resolve_api_key — subcommand path (arc review, etc.) ✓ (dispatch_sub.rs)
+7. Docs update (quick-start.md + models.md)
+8. main.rs line 599-603: run_setup_wizard_if_needed sets env var from wizard result — fine, no change needed.
+9. Agent build path in agent_builder — actually let me check: does the agent builder read api_key from config.api_key (which comes from parse_model_config)? Yes, `AgentConfig.api_key` is set from parse_model_config in cli.rs (line 552 area). So the main resolve happens in parse_model_config. Good.
+
+Wait — but there's also `commands_spawn.rs` apply_model_override which reads env var when switching provider mid-session. Should that use dotenv too? For coherence yes, but it's edge. I'll leave it — the primary provider key resolution is what the task asks. Actually "Apply to any provider key the code supports" — the resolution site is what matters. apply_model_override is a model-switch path; a user switching provider mid-session with keys only in .env would get an empty key. Hmm. But the task Files says agent_builder + cli. I'll include setup + dispatch_sub (small, coherent) and mention. Actually, let me reconsider: too many touches = more review surface. The task explicitly scopes to agent_builder.rs + cli.rs. The most defensible interpretation: make the *primary* resolution (parse-time) dotenv-aware in cli.rs, and the fallback switch in agent_builder.rs (explicitly listed). needs_setup gating the wizard is arguably part of "cli.rs" behavior via setup but in a different file — but it's genuinely required for the feature to work for interactive users (otherwise a .env user still gets the wizard because needs_setup checks env vars). Wait — actually let me re-check: needs_setup checks `.arc.toml` exists. If a user has .env, they likely don't have .arc.toml. So the wizard WOULD run even though .env has the key. That's a broken experience. I'll wire needs_setup.
+
+dispatch_sub: `arc review` subcommand uses resolve_api_key → would fail for .env-only users. Same broken experience for subcommands. Wire it.
+
+OK let me just do it. Files: cli.rs, agent_builder.rs, setup.rs, dispatch_sub.rs. All through the one shared helper.
+
+Let me also double check: are there other direct `std::env::var(provider_env_var)` resolution sites I'm missing? grep showed:
+- cli.rs 474 (provider env), 489-490 (fallbacks)
+- agent_builder.rs 913 (fallback switch)
+- setup.rs 364 (wizard empty-key check), 593 (needs_setup provider check), 614+ (generic fallback checks in needs_setup)
+- dispatch_sub.rs 459 (resolve_api_key provider env), 508 fallback? No, 508 is just the env_hint error message. resolve_api_key has: provider env (459), ANTHROPIC (in resolve_api_key around 468), API_KEY (around 475)
+- commands_spawn.rs 1389 (apply_model_override)
+- commands_dev.rs 91-92 (doctor diagnostic)
+- main.rs 621-622 (AWS_SECRET_ACCESS_KEY for bedrock — different semantics, skip)
+- prompt_retry.rs 397 (diagnostic message: "is set"/"not set") — this is a *diagnostic*. If key is in .env, `std::env::var` says "not set" — slightly misleading. But the message says "check the key value" vs "is not set". If a 401 happens, the key IS set (from .env). The diagnostic would wrongly say "not set". Update to resolve_api_key_env for accuracy?
+
+I'll update the diagnostic (prompt_retry) to use resolve_api_key_env for the "is set" check... but careful, that diagnostic prints `export {env_var}=...` as a fix and the .env doesn't require export. Minor. Updating the check is honest. Let me do it — 1 line.
+
+Hmm, I need to stay focused. Let me determine the essential cut: cli.rs parse + tests + agent_builder fallback + setup needs_setup + dispatch_sub resolve_api_key + docs. I'll skip commands_spawn, commands_dev, prompt_retry diagnostics to keep the diff tight... Actually no — commands_dev's doctor check: if a user runs `arc doctor` with keys in .env, doctor says "API key not set" → false failure. That's a product-facing diagnostic that should be honest. It's 1 line. I'll include it. Same for prompt_retry — 1 line making a diagnostic accurate. These small changes make the feature coherent everywhere keys are resolved/diagnosed. But each extra file adds review risk...
+
+Let me weigh: the task is a product task, "apply to any provider key the code supports." The core is parse-time resolution. The listed files are cli.rs + agent_builder.rs. I'll do exactly:
+1. cli.rs — parser + helper + wire parse_model_config + tests
+2. agent_builder.rs — wire fallback switch
+3. setup.rs needs_setup — gate wizard
+4. dispatch_sub.rs resolve_api_key — subcommand path
+5. docs
+
+That's defensible and complete for "find keys in .env files" across all entry paths where keys gate startup. Diagnostics (doctor, prompt_retry) I'll leave — they're advisory, and prompt_retry's message at least names the env var to set. Hmm, but doctor showing "not set" when .env has the key is a real false-negative for a product user... 
+
+OK decision: I'll include commands_dev (doctor) too since a product user running `arc doctor` deserves accurate output. Sticking at: cli, agent_builder, setup, dispatch_sub, commands_dev. Not prompt_retry (runtime diagnostic message, and it's in the auth-failure path — updating it to say "is set but rejected" when it came from .env is actually MORE accurate, but it's a message-only concern; skip to keep scope).
+
+Wait, actually let me reconsider prompt_retry once more. If user's key is in .env and gets 401, diagnostic says "{env_var} is not set." → user misled. That's exactly the class of bug from Day 133/590 lessons (advice from partial view). The fix is 1 line. Include it. Fine — 6 files but each is a surgical 1-3 line change through one helper. Let me go.
+
+Actually — hold on. Let me reconsider whether adding setup.rs/dispatch_sub.rs/commands_dev.rs/prompt_retry.rs is scope creep that could cause issues. The evolve skill says surgical. But the task's verification: "arc --version style invocation doesn't emit a missing-key error at parse time" and "MANUAL smoke: with a temp dir containing .env... arc doesn't emit missing-key error at parse time." So the task verifies the parse path. The extra wirings are the honest completion of "apply to any provider key." I'll do all of them but keep each minimal.
+
+Let me now write the code.
+
+First check dispatch_sub.rs imports and commands_dev.rs / prompt_retry.rs to see how they reference cli helpers.
+
+commands_dev uses `cli::provider_api_key_env(provider)` at line 91. It probably has `use crate::cli;` — check. It said `let env_var = cli::provider_api_key_env(provider);` — yes it uses `cli::` prefix, so I can use `cli::resolve_api_key_env(var_name)`.
+
+Wait line 91-92: `let env_var = cli::provider_api_key_env(provider); match env_var { Some(var_name) => { if std::env::var(var_name).is_ok() {` — I'll change to `if crate::cli::resolve_api_key_env(var_name).is_some()`.
+
+prompt_retry line 397: `let key_set = std::env::var(env_var).is_ok();` → `let key_set = crate::cli::resolve_api_key_env(env_var).is_some();`
+
+dispatch_sub resolve_api_key: uses `std::env::var(env_var)` at 459-462 and fallback `std::env::var("ANTHROPIC_API_KEY")` etc. Replace with `crate::cli::resolve_api_key_env`.
+
+setup.rs needs_setup: three `std::env::var(...)` checks → `crate::cli::resolve_api_key_env(...).is_some()`. Careful: setup.rs has `use crate::cli::{...}` at top — I'll add resolve_api_key_env to that import or use full path.
+
+Let me look at setup.rs imports.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the imports in setup.rs, dispatch_sub.rs, and commands_dev
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,15p' src/setup.rs; echo … ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have everything I need. Let me design:
+
+**Plan:**
+1. Add a `dotenv` module (inline functions in `cli.rs` since that's the crate root module — actually cli.rs is a module of main. I'll add functions to `cli.rs` since it's already `pub use` re-exporting providers stuff).
+
+Functions to add in `cli.rs`:
+- `parse_dotenv_content(content: &str) -> HashMap<String, String>` — pure parser, unit-testable
+- `pub fn resolve_api_key_env(name: &str) -> Option<String>` — process env > .env in CWD
+- `pub(crate) fn load_cwd_dotenv() -> HashMap<String, String>` — reads `.env` from CWD (or empty)
+
+Then wire in:
+- `parse_model_config` in cli.rs: use `resolve_api_key_env` for provider env var, ANTHROPIC_API_KEY and API_KEY fallbacks.
+- `setup.rs needs_setup`: use `resolve_api_key_env` for the checks.
+- `agent_builder.rs` fallback switch: use `resolve_api_key_env`.
+- `dispatch_sub.rs resolve_api_key`: use `resolve_api_key_env`.
+- `commands_spawn.rs apply_model_override`: use `resolve_api_key_env`.
+- `prompt_retry.rs` diagnostic: the `key_set` check — update to also consider `.env`.
+- `commands_dev.rs` doctor check — could update too for consistency, but it's diagnostic. Keep minimal... Actually, the doctor check says "set (VAR)" when env var is set. To be consistent and honest, I could update to use resolve_api_key_env. But minimal churn — the task says apply to any provider key the code supports. The doctor would report "not set" even if .env has it, which would be misleading. Updating it is 1 line. Let's do it for consistency.
+
+Let me write the parser:
+
+```rust
+/// Parse `.env`-style `KEY=value` lines from a string.
+///
+/// Hand-rolled (~40 lines) to keep the dependency tree minimal — the codebase
+/// deliberately avoids a dotenv crate. Supported syntax:
+///   - `# comment` lines are ignored (also inline comments are NOT stripped,
+///     matching the common dotenv behavior of keeping values verbatim)
+///   - optional `export ` prefix
+///   - unquoted, single-quoted, and double-quoted values
+///   - whitespace around key and value is trimmed
+///   - empty lines and lines without `=` are ignored
+///   - later keys override earlier ones (standard dotenv precedence)
+fn parse_dotenv_content(content: &str) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = value.trim();
+        let unquoted = if value.len() >= 2
+            && ((value.starts_with('"') && value.ends_with('"'))
+                || (value.starts_with('\'') && value.ends_with('\'')))
+        {
+            &value[1..value.len() - 1]
+        } else {
+            value
+        };
+        out.insert(key.to_string(), unquoted.to_string());
+    }
+    out
+}
+```
+
+Wait — but the file task says "ignore comments `#`, trim whitespace, support optional `export ` prefix and simple unquoted/quoted values". Let me keep the parser simpler and compatible with common dotenv. For double-quoted values, common dotenv also handles escapes but "simple" is fine.
+
+For precedence: process env > .env > defaults.
+
+```rust
+/// Resolve a provider API key env var with dotenv fallback.
+///
+/// Precedence: process environment > `.env` in the current working directory
+/// > nothing (caller falls back to config/defaults). Reads `.env` only from the
+/// CWD — no upward walk, no system dirs.
+pub fn resolve_api_key_env(name: &str) -> Option<String> {
+    if let Ok(key) = std::env::var(name) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+    // Only consult .env when the process env var is unset/empty (process env wins).
+    load_cwd_dotenv().get(name).map(|k| k.clone()).filter(|k| !k.is_empty())
+}
+```
+
+Hmm, but `load_cwd_dotenv` reads the file on every call. For the parse path this is called a couple times — fine. But for hot paths? `resolve_api_key_env` is called in parse_model_config a few times, needs_setup, fallback etc. Reading a tiny file each time is acceptable. But to be a bit cleaner, cache per-process with `OnceLock`? The `.env` could change between calls in tests... Actually for tests I'd need to control it. Let me not cache with static OnceLock because tests set env vars. The file read is small. Keep it simple — read each time.
+
+Actually wait, tests in the same process: if one test sets CWD's `.env`... tempdir uses set_current_dir. Reading per call is fine and avoids static state pollution. Good.
+
+But there's a subtlety: `load_cwd_dotenv` — reading `.env` requires `std::fs::read_to_string`. If missing, return empty HashMap.
+
+Now for the "manual smoke" verification: with a temp dir containing .env with fake ANTHROPIC_API_KEY=dummy, running `arc --version` — but --version exits early before parse_model_config, so it won't touch .env. That's fine, the point is it doesn't error at parse time. Actually the verification described is trivially satisfied since --version doesn't resolve keys. Let me instead verify with the unit test that the parser works and that resolve_api_key_env falls back.
+
+Let me also handle: the `parse_model_config` fallback chain currently tries provider env var → config key → ANTHROPIC_API_KEY → API_KEY → config → error. I'll replace `std::env::var(var)` with `resolve_api_key_env(var)` in the provider-specific env lookup, and for the generic fallback `ANTHROPIC_API_KEY` / `API_KEY` use resolve too.
+
+For setup.rs `needs_setup`, replace `std::env::var(env_var)` with `crate::cli::resolve_api_key_env(env_var)`.
+
+For agent_builder.rs fallback switch:
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+```
+→
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Some(key) = cli::resolve_api_key_env(env_var) {
+```
+
+For dispatch_sub resolve_api_key:
+```rust
+if let Ok(key) = std::env::var(env_var) { if !key.is_empty() { return Some(key); } }
+```
+→ use resolve_api_key_env.
+
+For commands_spawn apply_model_override similarly.
+
+For prompt_retry key_set diagnostic:
+```rust
+let key_set = std::env::var(env_var).is_ok();
+```
+→ `let key_set = crate::cli::resolve_api_key_env(env_var).is_some();`
+
+For commands_dev doctor check:
+```rust
+if std::env::var(var_name).is_ok() {
+```
+→ `if crate::cli::resolve_api_key_env(var_name).is_some() {` — and detail could mention .env. I'll update detail too: "set (VAR)" → maybe keep. Minimal: just update the check. Actually let me make detail honest: `format!("set ({var_name})")` — if from .env it's still set. Fine.
+
+Now, `resolve_api_key_env` should be `pub` since used across modules (setup, dispatch_sub, spawn, prompt_retry, commands_dev). Place it in cli.rs after the provider re-exports. It uses `load_cwd_dotenv` which is `pub(crate)` or private. `parse_dotenv_content` needs to be accessible from tests in cli.rs (same module — fine) — but the task says "Add a unit test for the .env parser". I'll add tests in src/cli.rs tests module, plus maybe in the new module if separate. I'll keep everything in cli.rs to minimize cross-module churn.
+
+Let me write the code now. Where to place: after `configured_provider()` block, before `AUTO_DISCOVERED_SKILL_COUNT`? Let me put it after the provider-related statics area, around line 55. Let me view lines 45-70.
+────────────────────────────────────────────────────────────────────────────────
+Now I have everything. Let me implement. First, the dotenv parser + resolver
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/cli.rs:44..74 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me implement. I'll add the dotenv module right after the imports/statics section (before the `/// Enable verbose output` or after the statics). Let me put the dotenv code after the `configured_provider` section, around line 55.
+────────────────────────────────────────────────────────────────────────────────
+Now let me add the dotenv parser and resolver to
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/cli.rs (4 → 75 lines)
+    /// The configured provider, if one was recorded this session.
+    pub fn configured_provider() -> Option<String> {
+        CONFIGURED_PROVIDER.get().cloned()
+  + }
+  + 
+  + /// Parse a `.env` file's contents into a key→value map.
+  + ///
+  + /// Hand-rolled (no dotenv dependency — this codebase is minimal-dependency).
+  + /// Rules:
+  + /// - `KEY=value` lines (also `export KEY=value`)
+  + /// - comments start with `#`; a full-line comment is skipped, trailing
+  + ///   inline comments are NOT stripped (values may legitimately contain `#`)
+  + /// - whitespace is trimmed around the key and the value
+  + /// - values may be unquoted, single-quoted (`'...'`), or double-quoted
+  + ///   (`"..."`); quotes are stripped. No escape-sequence processing.
+  + /// - blank lines are ignored
+  + /// - later duplicate keys override earlier ones (`HashMap` insert)
+  + pub fn parse_dotenv(content: &str) -> std::collections::HashMap<String, String> {
+  +     let mut map = std::collections::HashMap::new();
+  +     for line in content.lines() {
+  ... (55 more lines)
+ ✓ (0ms)
+    /// The configured provider, if one was recorded this session.
+    pub fn configured_provider() -> Option<String> {
+        CONFIGURED_PROVIDER.get().cloned()
+  + }
+  + 
+  + /// Parse a `.env` file's contents into a key→value map.
+  + ///
+  + /// Hand-rolled (no dotenv dependency — this codebase is minimal-dependency).
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — `load_cwd_dotenv` reads `.env` relative to the CWD via `std::fs::read_to_string(".env")`. But during tests, the CWD is the project root. That means when tests run, if there's no `.env` in the project root, it returns empty. But my unit test for `parse_dotenv` doesn't depend on CWD. For the precedence test, I need to control CWD — I can use `std::env::set_current_dir` in a temp dir with `serial_test` (since it mutates process-global state).
+
+Actually wait — there's a subtlety. `resolve_api_key_env` reads `.env` from CWD at call time. In tests that use `set_current_dir` to a temp dir, I must restore the original CWD. Let me be careful with that.
+
+Now wire into `parse_model_config`. Currently:
+
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| std::env::var(var).ok())
+    .filter(|k| !k.is_empty());
+```
+
+Change to:
+
+```rust
+let from_provider_env = provider_env_var
+    .and_then(|var| resolve_api_key_env(var))
+    .filter(|k| !k.is_empty());
+```
+
+And the fallback chain:
+
+```rust
+match std::env::var("ANTHROPIC_API_KEY")
+    .or_else(|_| std::env::var("API_KEY"))
+{
+```
+
+Change to use `resolve_api_key_env` for both, in order:
+
+```rust
+match resolve_api_key_env("ANTHROPIC_API_KEY")
+    .or_else(|| resolve_api_key_env("API_KEY"))
+```
+
+Also — there's a subtle issue: `resolve_api_key_env` calls `load_cwd_dotenv()` which does a filesystem read every time. In the fallback chain, this could read `.env` twice. Not a big deal (it's tiny), but let me make the precedence code read `.env` once. Actually simpler: keep `resolve_api_key_env` as-is; each call is one small file read. The parse path calls it at most 2-3 times. Fine — but to be tidy, I could make `parse_model_config` load the dotenv map once and thread it through.
+
+Actually, let me reconsider the design. The cleanest, single-source approach: a helper that consults env-var-then-dotenv per key. The file read per key is negligible (a few KB). But `parse_model_config` may call it up to 4 times (provider env, ANTHROPIC, API_KEY). For a cleaner approach, load once:
+
+Actually simpler and still clean: keep `resolve_api_key_env` as the atomic primitive (env > dotenv for a single var), and in `parse_model_config` just use it. The extra file reads are microseconds-level. Let's keep it simple.
+
+Now the set_var in main.rs line 599-603 — that's `run_setup_wizard_if_needed`, which sets the env var from the wizard result. Not affected.
+
+Now `setup::needs_setup` — check dotenv too:
+
+```rust
+if let Some(env_var) = provider_api_key_env(provider) {
+    if std::env::var(env_var)
+        .ok()
+        .filter(|k| !k.is_empty())
+        .is_some()
+    {
+        return false;
+    }
+}
+```
+
+Change `std::env::var(env_var)` to `crate::cli::resolve_api_key_env(env_var)`. Also the generic fallbacks ANTHROPIC_API_KEY / API_KEY.
+
+Also `setup.rs` line 364 (in wizard, when user presses Enter with empty key), it checks `std::env::var(env_key)`. Change to resolve_api_key_env too.
+
+dispatch_sub.rs `resolve_api_key` — provider env var check:
+```rust
+if let Some(env_var) = crate::providers::provider_api_key_env(provider) {
+    if let Ok(key) = std::env::var(env_var) {
+        if !key.is_empty() {
+            return Some(key);
+        }
+    }
+}
+```
+Change to `crate::cli::resolve_api_key_env(env_var)`. Wait — dispatch_sub is a `crate::cli` module? It imports from `crate::cli`. It can use `crate::cli::resolve_api_key_env`. But there might be a name collision: dispatch_sub has its own `resolve_api_key` function. `resolve_api_key_env` is a different name, so fine. But wait — does dispatch_sub already `use crate::cli::{...}`? Yes. I'll use the fully-qualified `crate::cli::resolve_api_key_env` to be explicit.
+
+Also the generic fallbacks in dispatch_sub's resolve_api_key:
+```rust
+if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") { ... }
+if let Ok(key) = std::env::var("API_KEY") { ... }
+```
+Change to resolve_api_key_env too.
+
+agent_builder.rs line 912 (fallback switch):
+```rust
+if let Some(env_var) = cli::provider_api_key_env(&fallback) {
+    if let Ok(key) = std::env::var(env_var) {
+        self.api_key = key;
+    }
+}
+```
+Change to `if let Some(key) = cli::resolve_api_key_env(env_var) { self.api_key = key; }`.
+
+commands_spawn.rs apply_model_override:
+```rust
+if let Some(env_var) = crate::providers::provider_api_key_env(provider) {
+    if let Ok(key) = std::env::var(env_var) {
+        config.api_key = key;
+    }
+}
+```
+Change to `if let Some(key) = crate::cli::resolve_api_key_env(env_var) { config.api_key = key; }`.
+
+commands_dev.rs doctor check:
+```rust
+if std::env::var(var_name).is_ok() {
+```
+Change to `if crate::cli::resolve_api_key_env(var_name).is_some()`. Hmm, the doctor check says "set (var_name)". With dotenv the env var isn't technically "set" — but the check is about whether a key is available. I could change detail to "available" but that changes display. Minimal: keep the check but use resolve_api_key_env. Actually, the doctor output says "set ({var_name})" — with dotenv, that'd be slightly misleading ("set" when it's from .env). But minimal change is fine; the meaning is "API key available". Let me check what commands_dev actually displays... it says `format!("set ({var_name})")`. To be accurate, I could say "available ({var_name})". Hmm, minimal change principle — but an honest label matters. Let me check the whole check block.
+
+prompt_retry.rs line 394-399:
+```rust
+let env_var = crate::cli::provider_api_key_env(&provider).unwrap_or("ANTHROPIC_API_KEY");
+let key_set = std::env::var(env_var).is_ok();
+```
+Change `key_set` to use `crate::cli::resolve_api_key_env(env_var).is_some()`. The diagnostic message says "is set" / "is not set" — with dotenv, "set" would be slightly off but the meaning ("a key is available to authenticate") is what matters. Let me check the exact message... `format!("  {env_var} is set but the API rejected it — check the key value.")` — that's still accurate if the key comes from .env and the API rejected it. And `"  {env_var} is not set."` — slightly misleading if in .env but... if the API rejected auth with 401, resolve_api_key_env would return the .env key, so key_set=true and it says "is set". OK fine.
+
+Now, one concern: `.env` in project root while running cargo test. The repo has no `.env` (confirmed `.env` doesn't exist). Good — no test pollution. But `does the repo root have a .env?` No. OK.
+
+Also — a critical concern: `load_cwd_dotenv` reads `.env` from CWD. When arc is run in a user's project dir with REPL, that's fine. But there's a security angle: reading `.env` and printing keys? We never print keys. Fine.
+
+Another concern: the `--version` smoke test. The task says: "with a temp dir containing `.env` with a fake `ANTHROPIC_API_KEY=dummy`, `arc --version` style invocation doesn't emit a missing-key error at parse time". Actually `--version` returns early before parse_model_config — so it wouldn't error anyway. The real benefit: `arc` REPL in a dir with `.env` won't error/prompt for setup. My wiring in `needs_setup` and `parse_model_config` covers exactly that.
+
+Now let me also double-check `parse_dotenv`'s `&value[1..value.len() - 1]` — byte indexing. The value could contain multi-byte chars. `value.len()` returns byte length and `value[1..value.len()-1]` — index 1 is always a char boundary? Not necessarily! If the first byte is a quote (b'\'' or b'"'), then index 1 is after an ASCII byte, so it IS a char boundary. And `value.len()-1` is the last byte index, which is a char boundary only if the last byte is ASCII... wait no. `&value[1..value.len()-1]` requires BOTH boundaries valid. If last byte is a quote (ASCII), then `value.len()-1` is the index right after the second-to-last char. If the second-to-last char is multi-byte, then `value.len()-1` may fall inside it!
+
+Example: `KEY='✓"'` — bytes: `'`(1) `✓`(3 bytes: e2 9c 93) `"`(1). value = `'✓"', len=6. first=`'`, last=`"`. `&value[1..5]` — index 5 is the last byte of ✓ (e2 9c 93 covers indices 1,2,3), index 4 is the ✓'s third byte, index 5 is the quote. Wait let me recount: value = `'✓"` — chars: `'` at 0, ✓ at 1-3, `"` at 4. len = 5. `&value[1..4]` — 1 is boundary, 4 is boundary. OK in this example.
+
+Bad example: `KEY='✓✓'` — chars: `'` 0, ✓ 1-3, ✓ 4-6, `'` 7. len=8. `&value[1..7]` — index 7 is the closing quote, boundary. Fine.
+
+Hmm, when would `value.len()-1` NOT be a boundary? If the last char (index len-1) is an ASCII quote, then len-1 is a boundary only if the char BEFORE the quote... no wait. `value.len()-1` is the index of the last byte. For it to be a char boundary, the last byte must be the START of a char, i.e., the last byte must itself be the quote (ASCII). It is — `last == b'\''`. So `value.len()-1` is always a valid boundary when the last byte is ASCII. And index 1 is a valid boundary because byte 0 is ASCII `'` or `"`.
+
+Actually careful: index 1 being a boundary requires that byte 0 is a complete char — it is (ASCII). Yes. So `&value[1..value.len()-1]` is safe when first and last are ASCII quotes. 
+
+But wait — the condition `(first == b'\'' && last == b'\'') || (first == b'"' && last == b'"')` only enters that branch when both first and last are the matching quote. Both are ASCII. Safe. Good.
+
+However, there's another subtlety: single-quoted values with `#` inside — we handle since we don't strip inline comments. Good.
+
+Also the safety rule about byte indexing — I should double check `line[..eq]` where eq is from `line.find('=')`. `find` returns a byte index that is guaranteed to be a char boundary. Safe.
+
+`line[eq + 1..]` — eq+1: the byte after `=`. `=` is ASCII so eq+1 is a boundary. Safe.
+
+Now `strip_prefix("export ")` — only matches lowercase `export `. Task says "optional `export ` prefix" — dotenv convention uses lowercase `export`. Could also be `export` with uppercase? Convention is lowercase. Fine.
+
+Let me now wire the changes.
+────────────────────────────────────────────────────────────────────────────────
+Now wire into `parse_model
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/cli.rs (23 → 23 lines)
+    let api_key = match api_key_from_flag {
+            Some(key) if !key.is_empty() => key,
+            _ => {
+  -             // Try provider-specific env var first
+  +             // Try provider-specific env var first (process env > .env in CWD)
+                let from_provider_env = provider_env_var
+  -                 .and_then(|var| std::env::var(var).ok())
+  +                 .and_then(|var| resolve_api_key_env(var))
+                    .filter(|k| !k.is_empty());
+                // Provider-specific .arc.toml key (e.g. nous_api_key,
+                // opencode_api_key) — lets users keep multiple provider keys in one
+  ···
+                        Some(key) => key,
+                        None => {
+                            // Fallback chain: ANTHROPIC_API_KEY > API_KEY > config file
+  -                         match std::env::var("ANTHROPIC_API_KEY")
+  -                             .or_else(|_| std::env::var("API_KEY"))
+  +                         match resolve_api_key_env("ANTHROPIC_API_KEY")
+  +                             .or_else(|| resolve_api_key_env("API_KEY"))
+                            {
+ ✓ (1ms)
+    let api_key = match api_key_from_flag {
+            Some(key) if !key.is_empty() => key,
+            _ => {
+  -             // Try provider-specific env var first
+  +             // Try provider-specific env var first (process env > .env in CWD)
+                let from_provider_env = provider_env_var
+  -                 .and_then(|var| std::env::var(var).ok())
+  +                 .and_then(|var| resolve_api_key_env(var))
+  ... (12 more lines)
+
+

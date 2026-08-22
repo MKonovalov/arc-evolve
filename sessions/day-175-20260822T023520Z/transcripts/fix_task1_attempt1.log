@@ -1,0 +1,1294 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to:
+1. Read `auto_validate_by_replay` in src/commands_risk.rs
+2. Read `load_validation_history_from` / `parse_validation_events` / `last_validation_association` in src/commands_risk_snapshots.rs
+3. Look at the real records in `.arc/risk_validations.jsonl`
+4. Diagnose why 88 snapshots yield only 2 validation events
+5. Fix the cause, add a unit test
+6. Keep the task under 20 minutes
+
+Let me start by reading the relevant code and data.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -5  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l .arc/risk_snapshots.jsonl .a… ✓ (3ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 8.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the relevant code. First let's look at `auto_validate_by_replay` in src/commands_risk.rs and the snapshot functions in src/commands_risk_snapshots.rs.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "is_ancestor\|merge-base\|… ✓ (3ms)
+ ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.1s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn auto_validate_by_repla… ✓ (3ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2360..2560 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `replay_validate_last_snapshot` — it validates only the **last** snapshot. So the gate that matters is: for each validation event, it pairs the last snapshot vs commits since it. The issue is that `replay_validate_last_snapshot` only validates the most recent snapshot against the current HEAD. But since `arc risk snapshot` runs every evolve session, and it calls `replay_validate_last_snapshot()` before writing the new snapshot...
+
+Let me look at `auto_risk_snapshot` and the `handle_risk` snapshot path.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:106..246 ✓ (0ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the `replay_validate_last_snapshot` and understand the flow. The key gate is:
+
+```rust
+let log_output = crate::git::run_git(&[
+    "log",
+    &format!("{}..HEAD", last.git_hash),
+    "--name-only",
+    "--oneline",
+])
+.ok()?;
+if log_output.trim().is_empty() {
+    return None;
+}
+```
+
+So if the snapshot hash is not an ancestor of HEAD (due to force-push/rebases), `git log <hash>..HEAD` will fail (error: "bad object" / not a valid range) OR succeed with empty output... Actually, if the hash is unreachable, `git log hash..HEAD` will fail with an error like "fatal: ambiguous argument 'hash..HEAD': unknown revision or path not in the working tree". If the hash is reachable but has no commits after it... that only happens if HEAD == hash.
+
+Wait, but there's another subtlety: `git log <hash>..HEAD` with `--name-only` will list commits in HEAD that are not reachable from hash. If hash is an ancestor of HEAD, there will be commits (unless hash == HEAD). So the gate fails when:
+1. The hash is not reachable from HEAD (force-push / rebase) → git log fails → `.ok()?` → None. Also produces a stderr error message each time (which might be noisy).
+2. hash == HEAD → empty log → returns None.
+
+Let me check how many of the 88 snapshot hashes are reachable via merge-base. Let me get the snapshot hashes and test.
+
+Also candidate (b): is there a bounded window? Looking at the code, `replay_validate_last_snapshot` only uses `snapshots.last()` — the most recent snapshot. And `auto_risk_snapshot` fires on `/commit` handler and REPL exit (opt-in), and `arc risk snapshot` (in evolve.sh) writes a new snapshot AND runs replay_validate_last_snapshot of the prior snapshot.
+
+Wait — where does the "validate prior snapshot" half in `arc risk snapshot` happen? Let me look at `handle_risk` in commands_risk.rs around line 2509... Actually line 2509 area is `handle_risk_validate`. Let me search for where `arc risk snapshot` calls replay_validate_last_snapshot too.
+
+Let me look at handle_risk.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=2290 && NR<=2360' src/com…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "handle_risk\b\|RISK_SUBCO… ✓ (3ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 761ms (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=1355 && NR<=1425' src/com…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=4570 && NR<=4661' src/com… ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 653ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the flow. The harness `evolve.sh` calls `arc risk snapshot` every session. That calls `handle_risk_snapshot()` which:
+1. Calls `replay_validate_last_snapshot()` — replays the **last snapshot** (the most recent one in the file, i.e. the prior session's snapshot) against commits since its git_hash.
+2. Writes the new snapshot.
+
+Now the question: with 88 snapshots, why only 2 validation events?
+
+The key: `replay_validate_last_snapshot()` only validates the **last** snapshot — the most recent one. So each new snapshot-write validates the *previous* snapshot only. That should produce ~1 validation event per session (assuming commits since and hits/surprises non-empty)... unless:
+
+1. **Span-selection gate**: `replay_validate_last_snapshot` replays the *last* snapshot. Wait, but there's a subtle bug: `handle_risk_snapshot` validates **before** writing the new snapshot. So it validates the last snapshot = the previous session's. That's fine.
+
+2. But the crucial issue: after validating the prior snapshot and writing a new one, the NEXT session validates the snapshot written last session. That gives a chain: each session validates the previous session's snapshot against the commits since. That should accumulate events as long as (a) there are commits since the snapshot's hash AND the snapshot hash is in the history, and (b) the files predicted broke / surprises occurred.
+
+Actually wait — the important detail: the validation only records an event **if `!hits.is_empty() || !surprises.is_empty()`** — i.e., only when something actually broke. If no scored file broke in the span, no event is recorded. Also, `last_validation_association` dedup: only the (from,to) pair. A new HEAD gives a new (from,to), so no dedup issue.
+
+Also, `replay_validate_last_snapshot` uses `git log {hash}..HEAD --name-only`. If the snapshot hash is not an ancestor of HEAD (force-push history rewrite), `git log hash..HEAD` still works (it shows commits reachable from HEAD but not from hash — actually if hash is NOT an ancestor, `hash..HEAD` shows commits in HEAD not in hash, which is basically everything — that could work but the pair might be weird). Actually `git log A..B` in merge-base realm: if A is not an ancestor of B, the result is commits reachable from B but not from A. If history was rewritten, most commits reachable from old A are also reachable from new B (they're still in the graph, just maybe with different hashes). Hmm.
+
+Wait, actually the real question is why only 2 events for 88 snapshots. Let me examine: snapshots have `git_hash` fields. Let me check the actual data — how many snapshot hashes are reachable from HEAD, and how many of the 88 snapshot-to-HEAD spans overlap.
+
+Actually, wait. Let me re-read the flow more carefully. There might be a subtle issue with the dedup: `last_validation_association` dedups the (from,to) pair — only the LAST event's pair. Since each snapshot has a unique hash and each HEAD differs, pairs differ. So dedup isn't the issue.
+
+The recording gate: `if !hits.is_empty() || !surprises.is_empty()`. So if in a session-to-session span, none of the predicted files and no scored files broke... actually surprises are files that broke that weren't predicted — those come from `broke_files` — ANY file that changed in the span and wasn't predicted (but is "scored"?). Let me look at `compute_validation` and `classify_broke_files`.
+
+The 2 real events:
+- Event 1: day 171, from d76b695 to c96395b, 1 hit (src/commands_risk.rs), surprises = many (various files).
+- Event 2: day 172, from c96395b to ff6b971, 2 hits, 1 surprise.
+
+So between the last snapshot and HEAD there were commits touching those files.
+
+Now, the "88 snapshots" observed vs "2 events". Let me collect data: parse the snapshot file for git_hash values, then check how many are ancestors of HEAD.
+
+Let me also look at `replay_validate_last_snapshot` again — it uses `parse_all_snapshots(&content)` and takes `.last()`. And the `git log {last.git_hash}..HEAD`.
+
+Hmm wait, I see a potential key issue: **the span is validated against the LAST snapshot only, and events are only recorded when something broke.** But the bigger question — the task says "auto_validate_by_replay is either rarely running or rejecting most snapshot→commit spans".
+
+Let me actually analyze the real data:
+1. Parse the snapshot hashes.
+2. Check how many are ancestors of HEAD.
+3. Check the day distribution of snapshots.
+4. Count how many sessions there were.
+
+The important measure: of 88 snapshots, each sequential pair (snapshot N at hash H_N, snapshot N+1 at hash H_{N+1}) should validate H_N..HEAD-at-N+1-time. But since we only ever replay the **last** snapshot (the one most recently written... wait no.
+
+Hold on. Let me re-trace. `handle_risk_snapshot` is called **once per evolve session**. It:
+1. Replays the last snapshot (which is the snapshot written by the *previous* session, since `auto_risk_snapshot`-like write happens at the end... wait, no — `handle_risk_snapshot` writes the new snapshot at the end of the function). So: session N writes snapshot at hash H_N. Session N+1 calls handle_risk_snapshot: replays last snapshot H_N against commits H_N..HEAD (HEAD = H_{N+1}), then writes snapshot at H_{N+1}.
+
+So in principle, every session that has commits since the prior snapshot produces a validation span. 88 snapshots → ~87 spans. Only 2 recorded events. Why?
+
+Possible causes:
+a) **git log {hash}..HEAD fails/empty**: The snapshot stores `git rev-parse --short HEAD` (short hash!). `git log {short_hash}..HEAD` — with a short hash that's ambiguous or... Actually if the history was rewritten/force-pushed, an old short hash may not resolve at all → `run_git` returns Err → `.ok()?` → function returns None → no validation. That's the likely cause!
+
+Wait, but the replay targets the LAST snapshot (most recent), which would be only ~1 session old, so its hash should be reachable and resolvable. Hmm, unless... it's the latest snapshot's hash. The most recent snapshot's hash should be in history (it's the prior session's HEAD).
+
+Let me look at the actual data — timestamps of snapshots vs validations. 88 snapshots over day 171-174-ish? The validations were recorded at day 171 and 172, timestamps 2026-08-19T09:20 and 17:15. Let me look at the snapshots: their days and hashes, the last few.
+
+Also there's the dedup logic: `last_validation_association` dedups the (from,to) of the **last event** — the last event is at (c96395b → ff6b971). If HEAD is still ff6b971 or a descendant... wait, `git log c96395b..HEAD` where HEAD moved on. The association check is `from == last.git_hash && to == head_hash`. If the last validation's `to` (ff6b971) is an OLD hash that got rewritten, and current head differs, no dedup — an event would record. Unless HEAD never changes... no, HEAD changes every session.
+
+Hmm, wait — but also crucially: **when does the validation run?** `replay_validate_last_snapshot` requires `last.predicted` non-empty — fine. It requires `git log {hash}..HEAD --name-only` non-empty — commits since the last snapshot. Since the loop snapshots every session, there's ~1 session's worth of commits (2-6 commits). `classify_broke_files` parses `--name-only`. Then `compute_validation(&last.predicted, &broke_files, ...)`.
+
+Recording condition: `!hits.is_empty() || !surprises.is_empty()`. Let me look at compute_validation to understand hits/surprises.
+
+Let me read compute_validation and classify_broke_files.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the core validation logic and the actual
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_validation\|fn…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (13 lines) ✓ (3ms)
+ ✓ (18ms)
+  2 tools completed in 996ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the data. Let me check the actual core validation logic and how many snapshot hashes are reachable as ancestors of HEAD.
+
+Let me check:
+1. How many of the 88 snapshot hashes are reachable (`git merge-base --is-ancestor`)
+2. The structure of `replay_validate_last_snapshot` — it only validates the **last** snapshot. So per session, only the immediately-prior snapshot is validated. Since the snapshots accumulate one per evolve session (3/day), the span between the prior snapshot's hash and HEAD is typically a single session's worth of work.
+
+The task says 88 snapshots vs only 2 validation events. Let me think about the flow:
+
+`handle_risk_snapshot()` in `commands_risk.rs`:
+1. First calls `replay_validate_last_snapshot()` — which validates the CURRENTLY-last snapshot against commits since its hash (up to HEAD).
+2. Then writes a new snapshot.
+
+So each `arc risk snapshot` call should generate AT MOST one validation event (deduped by association). With 88 snapshots and only 2 validation events, something gates it.
+
+In `replay_validate_core`:
+- `last.predicted.is_empty()` → skip
+- `git_log.trim().is_empty()` → skip (no commits since snapshot)
+- `if !hits.is_empty() || !surprises.is_empty()` → only record when something broke!
+
+**Key gate #1**: A validation event is ONLY recorded when the diff between the snapshot hash and HEAD touches files that were EITHER predicted (hit) OR scored (surprise). If a session's commits only touched non-scored files (e.g., CLAUDE.md, journals, scripts, DAY_COUNT, .skill_evolve_counter), then NO event is recorded. Looking at the first validation event: surprises included ".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "DAY_COUNT", "journals/JOURNAL.md" — wait those aren't scored files... but the event was still recorded with them as surprises. Hmm, let me look at `compute_validation` to see how surprises are computed.
+
+**Key gate #2**: `auto_validate_after_failure` only fires on failures (none — good).
+
+Let me check `compute_validation` and `classify_broke_files`.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=1800 && NR<=2100' src/com… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the validation core. The key issue: `replay_validate_last_snapshot` replays only the **most recent** snapshot (`snapshots.last()`). And `handle_risk_snapshot` validates the prior snapshot once per session (in evolve.sh, `arc risk snapshot` is called once per session). But that's one validation event per... wait, actually let me think.
+
+The flow:
+1. Session N: `arc risk snapshot` → `handle_risk_snapshot()` → validates the *last* snapshot in `.arc/risk_snapshots.jsonl` (which was written by session N-1), using `git log <hash>..HEAD`. Then writes a new snapshot.
+2. Dedup: `last_validation_association` checks `(from, to)` — only the last event's association.
+
+So each session, the prior snapshot is validated. If there are commits between snapshot N-1 and snapshot N, a validation event SHOULD be recorded.
+
+But wait — the dedup logic is per (from,to) pair of the LAST validation event only. Look at line 2392:
+
+```rust
+let already = last_validation_association(validation_path)
+    .is_some_and(|(from, to)| from == last.git_hash && to == head_hash);
+```
+
+This only checks whether the *last* recorded event has the same pair. That's fine for sequential processing, since each snapshot hash should advance monotonically.
+
+But the issue: `classify_broke_files` only counts files touched by commits whose message contains "revert" or "fix"! That's a very narrow definition of "broke". If no commits in the span have "fix" or "revert" in the message, then `broke_files` is empty → `hits.is_empty() && surprises.is_empty()` → no event recorded!
+
+Look at the record condition:
+```rust
+if !hits.is_empty() || !surprises.is_empty() {
+```
+
+So validation events are only recorded when something actually broke according to the narrow "fix"/"revert" heuristic.
+
+Now with the snapshot cadence: `arc risk snapshot` fires once per evolve session, but sessions can run multiple times a day (3/day per the docs... actually "All runs use a flat 8h gap (~3/day)"). But snapshots per day: 3, 7, 10 on some days. So snapshot is taken more often than once per session? Actually per-day counts show 7 and 10 snapshots on days 158-159, so multiple snapshots per day.
+
+Between consecutive snapshots within the same evolve session (e.g., task 1 snapshot, task 2 snapshot, task 3 snapshot — 3 sessions), there may be commits, but if those commits don't contain "fix"/"revert" messages... Actually evolve loop commits have messages like "Day 172: update day counter" or task titles. The `fix`/`revert` classification... `git commit` messages from evolve: e.g. "Day 174: bump skill-evolve counter". Not many contain "fix".
+
+Hmm wait, but the two events that DO exist have hits: `src/commands_risk.rs` in both. Those were spans with fix commits.
+
+So potential causes:
+1. **Narrow breakage detection**: only "fix"/"revert" commits count as breakage. Many spans have no such commits → no events.
+2. **Only the last snapshot is replayed**: `snapshots.last()`. If the hash of the last snapshot is unreachable (force-push), `git log <hash>..HEAD` errors → skip. Also, `handle_risk_snapshot` writes a new snapshot at the same HEAD as prior if the session has multiple snapshots at same hash? No — each session is at a distinct HEAD.
+
+Actually wait — the key issue! Look at `handle_risk_snapshot`'s flow: validate prior snapshot, then write NEW snapshot. The new snapshot is written at the CURRENT head. So snapshot N has hash = HEAD at time N. Next session validates snapshot N against commits since its hash. That's the correct pairing.
+
+But the actual snapshots: 88 snapshots over days 134-174. Let me check: the validation events are only 2, day 171 and 172. Both triggered "replay" with spans d76b695→c96395b and c96395b→ff6b971.
+
+Let me check the actual reason. Let me look at the snapshot hashes and what commits exist between them. The critical question: are snapshots written at hashes that are ancestors of later HEADs?
+
+Force pushes: this repo does periodic `git push -f` cleanup. When that happens, historical commits may be rewritten → old hashes unreachable → `git log <hash>..HEAD` fails → `run_git(...).ok()?` returns None → skip.
+
+Let me actually check reachability of the 88 snapshot hashes.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (6 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (15 lines) ✓ (24ms)
+ ✓ (174ms)
+  2 tools completed in 1.3s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So 77 of 88 snapshot hashes are unreachable — that's cause (a) in the task: the git history is frequently rewritten (`git push -f` cleanup), so most historical snapshot hashes are no longer ancestors of HEAD.
+
+BUT WAIT — the current implementation doesn't check `is-ancestor` at all. Let me re-read the code. `replay_validate_last_snapshot` runs `git log <hash>..HEAD --name-only --oneline`. If the hash is unreachable, `git log <hash>..HEAD` would... Actually, if `hash` is not an ancestor of HEAD but is still an object, `git log hash..HEAD` will list ALL commits in HEAD's history (since `hash..HEAD` = commits reachable from HEAD but not from hash). If the hash is completely unreachable (not an object anymore after gc), git would error "bad object". Let me check.
+
+Actually the key realization: `replay_validate_last_snapshot` only ever looks at the LAST snapshot (the most recent one). So there's no "prior snapshot too old" issue for the snapshot half — it always validates only the most recent snapshot. The dedup guard prevents re-recording the same (from,to) span.
+
+Let me think about why only 2 events exist:
+
+1. `replay_validate_last_snapshot` validates only the LAST snapshot — the one just before the current HEAD.
+2. It requires `git log <last.git_hash>..HEAD` to be non-empty (there must be commits since the snapshot).
+3. It requires at least one hit or surprise to record an event — i.e., at least one file that broke (via commit messages containing "fix" or "revert") AND that broke file must be either in predicted (hit) or a scored file (surprise).
+4. Dedup: same (from,to) already recorded → skip.
+
+The evolve loop calls `arc risk snapshot` once per session. Each call: validate prior snapshot → then write new snapshot. With 3 sessions/day, days 154-174 (though snapshots only start at day 134, sparsely; actually days 134-140 then a gap 141-153!). Look at the day counts: day 134: 1, 136: 2, 137: 2, 138: 3, 139: 3, 140: 3, then NOTHING until 154: 3. So there's a big gap days 141-153 — no snapshots. Interesting.
+
+Now — the 2 validation events are:
+1. day 171: from d76b695 to c96395b 
+2. day 172: from c96395b to ff6b971
+
+d76b695 is a day-171 snapshot. c96395b is a day-172 snapshot. ff6b971 is also day-172. Both recorded with trigger "replay".
+
+Now why so few? Let me check the actual mechanics:
+
+**Cause (a) — hash unreachable:** But the code never checks is-ancestor; it just runs `git log <hash>..HEAD`. If the hash is unreachable but still exists as an object (not gc'd), `git log hash..HEAD` succeeds and returns ALL commits reachable from HEAD. That would give a huge, incorrect span. If the hash was gc'd, `git log` errors "bad object" → `.ok()?` → return None → no validation.
+
+**Cause (b) — no window:** I don't see a bounded window in replay_validate_last_snapshot. It always validates the LAST snapshot.
+
+**Cause (c) — no commits since / no hit/surprise:** For each session: prior snapshot hash H_prev is typically the HEAD of the previous session. Since a session does multiple commits (sometimes several sessions per day), the span H_prev..HEAD will contain those commits. For an event to be recorded, `classify_broke_files` must find at least one commit message containing "fix" or "revert", and a resulting hit or scored surprise.
+
+So with 88 snapshots over days 134–174, each recorded at a distinct HEAD, the "prior snapshot" for session N is the previous session's HEAD. In the normal 3 sessions/day cadence, most sessions' snapshot hashes ARE reachable (they're recent ancestors). But wait — the hashes from days 134-160 are mostly unreachable — because of the force-push cleanup. That doesn't matter for the last-snapshot-only logic, EXCEPT: after a force-push, the last recorded snapshot's hash may be unreachable → `git log` errors (if gc'd) or returns the full history (if object still present).
+
+Let me check what the last snapshot 467588b is: it's a day-174 hash, which is an ancestor of HEAD d0b0ff5? Let me verify: 467588b is "Day 174: bump skill-evolve counter (4)". d0b0ff5 is "Day-174 skill-evolve counter commit" (from evaluator). So the last snapshot IS an ancestor of HEAD.
+
+Hmm... but here's the critical issue: **the last snapshot is recorded at the END of the session's work** — wait, no. Let me re-read `handle_risk_snapshot`: it validates the PRIOR snapshot, then writes a NEW snapshot at the CURRENT HEAD. `evolve.sh` calls `arc risk snapshot` once per session (at the start, per CLAUDE.md: "scripts/evolve.sh already calls once per session"). So the snapshot is at session start HEAD. Then the session makes commits (task commits, wrap-up commits). At the NEXT session, `arc risk snapshot` validates the prior snapshot (session-start HEAD) against current HEAD (which includes all the previous session's commits).
+
+So each session SHOULD produce one validation event if:
+- the prior snapshot hash is reachable (not gc'd),
+- `git log prior..HEAD` is non-empty,
+- at least one commit in the span has "fix" or "revert" in the message with a source file that's either predicted or scored.
+
+The dedup guard: if the (from,to) association was already recorded, skip. Since each session has a distinct HEAD at snapshot time, the (from,to) should differ each time... unless the validation ran twice per session (e.g., session start validates, and the snapshot command also validates → both produce the same from/to → dedup to 1 event, not 2).
+
+Hmm wait, but that would mean ~1 event per session with a "fix" commit. Over days 154-174 that's ~60 sessions × 3/day... but only 2 events. Something else is wrong.
+
+Let me look at the actual data more carefully. Which commit messages are in the spans? Let me check. Actually, let me first check the git log behavior for a few unreachable hashes.
+
+Actually, an important question: does `git log <unreachable-hash>..HEAD` succeed? Let me test with a couple of hashes.
+────────────────────────────────────────────────────────────────────────────────
+77 of 88 snapshot hashes are unreachable. Now let me verify how the actual code behaves with those hashes, and look at the snapshot path in evolve.sh
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "== last … (4 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk snapshot\|risk_snaps… ✓ (3ms)
+ ✓ (9ms)
+  2 tools completed in 577ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Very interesting! The `git log 0f3017f..HEAD` on the unreachable hash SUCCEEDS (exit=0) and returns ALL commits in HEAD history — because `0f3017f` is not an ancestor of HEAD, `git log A..B` shows all commits reachable from B but not from A. Since A is unreachable/unknown to git's graph (the object may not even exist locally), it just lists everything in B's history.
+
+Wait — actually the object may exist locally (fetched earlier) but not be an ancestor. Either way, `git log A..B` with A not being an ancestor lists ALL of B's commits (if A exists as a valid commit object but is not ancestor, git log lists all commits in B not reachable from A — which is all of B). Let me check what exit code/behavior when the hash is completely unknown (object doesn't exist):
+
+Actually the important point: `git log <unreachable>..HEAD` does NOT fail! It lists all commits. So `replay_validate_last_snapshot` would NOT bail at the git log step — it would proceed with ALL commits since HEAD (i.e., the entire history since the beginning of reachable history), classify "fix"/"revert" commits, and produce a validation event pairing the snapshot with the ENTIRE history. That is sound? No — it's actually WRONG semantically: a snapshot from day 134 paired with 40+ days of commits including fixes from before the snapshot was taken. That's a fake association — the prediction didn't precede those commits.
+
+Hmm wait, let me reconsider. The dedup key is `(git_hash_from, git_hash_to)` = `(snapshot.git_hash, HEAD)`. Since each snapshot has a unique hash, replaying each old snapshot would produce a different `(from,to)` pair, and each would be recorded — as long as there's at least one "fix"/"revert" commit in the whole reachable history. So why only 2 events?
+
+Ah, but wait — only the LAST snapshot is validated (`snapshots.last()`). Each session validates only the most recent snapshot (`replay_validate_last_snapshot` loads `snapshots.last()`). So over 88 snapshots, we'd get at most... hmm, actually each session's `risk snapshot` call validates the prior snapshot, then writes a new one. So the last snapshot is always validated by the NEXT session — 88 snapshots would give ~87 validate attempts. The question is why only 2 recorded.
+
+The recording gate: `if !hits.is_empty() || !surprises.is_empty()`. So no event is recorded unless at least one scored file broke in the span. With only 3 commits per session typically (session wrap-up, day counter bump, skill-evolve counter) — those rarely contain "fix"/"revert" messages! So the "broke files" set is almost always empty → no event recorded. That's cause (b)/(c) territory: the definition of "broke" (fix/revert commit messages) is extremely narrow, and the spans are ~4 short commits per day, 3 sessions/day.
+
+Let me look at how the two recorded events got their spans:
+- Event 1: from d76b695 (day 171 snapshot) to c96395b (day 172) — day 171→172 transition. Contains "Close the risk-validation cold-start..." commit (a fix-like commit whose message contains... hmm "Close the risk-validation cold-start" — does the message contain "fix"? The message is "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)". Not "fix". Hmm but hits include src/commands_risk.rs. Let me check what commits are in d76b695..c96395b.
+
+Let me actually verify the hypothesis with real data: how many commits in each snapshot span contain "fix" or "revert" in message?
+
+Actually, wait. Let me first re-read the comments at lines 1365-1380 about the "validate the prior snapshot" flow, and check whether there's a gate about the span. Let me look at lines 1360-1415 again — already seen: `handle_risk_snapshot` calls `replay_validate_last_snapshot()` before writing the new snapshot.
+
+Now `replay_validate_last_snapshot`:
+1. Loads snapshots from RISK_SNAPSHOT_PATH, takes `.last()`.
+2. If last.predicted is empty → None.
+3. Runs `git log <hash>..HEAD --name-only --oneline` — note: this does NOT fail on unreachable hash, it lists everything.
+4. If log empty → None.
+5. Computes `all_ranked` via `compute_file_risk_scores()`.
+6. Calls `replay_validate_core` → parses commits, classifies broke files (fix/revert in message), computes validation, records event if hits or surprises non-empty (with surprises only counted for scored files).
+
+So why only 2 events? Let me analyze the actual commit spans. Let me write a script to go through the 88 snapshots, and for each span (snapshot.hash .. next-reachable), count fix/revert commits and scored files that broke.
+
+But there's a subtlety: the git history has force-push rewrites, so old hashes aren't ancestors, and `git log oldhash..HEAD` lists ALL commits in reachable history. That means when the validate ran on old snapshots... wait, but they ran at the time they were live? No — the current implementation (validate prior snapshot) was added Day 172 (commit dd691e6 "Close the risk-validation cold-start"). The existing flow before Day 172 was: `auto_validate_after_failure` on watch failures only (never fires since no failures), and `handle_risk_validate` CLI manually.
+
+Wait, but the autosnapshot via `arc risk snapshot` in evolve.sh — was that in place before? Let me check git history of evolve.sh for the risk snapshot line. And the two events' `trigger` is "replay", recorded Days 171→172 and 172→173ish (day 172, from c96395b to ff6b971).
+
+Let me look at what the actual fix should be. The task says:
+- a) Span-selection gate too strict: requires prior snapshot hash to be ancestor? — But we just saw `git log <hash>..HEAD` doesn't fail on unreachable hashes. Actually hmm — wait, does it? Let me test with a hash that doesn't exist as an object at all. `git log deadbeef..HEAD` — if the object doesn't exist, git errors "fatal: ambiguous argument 'deadbeef': unknown revision". In that case `run_git(...).ok()?` → None → skip validation. But the old hashes DO exist as objects presumably (they were fetched/kept). Let me check a few.
+
+Actually from the test above, `git log 0f3017f..HEAD` succeeded with exit 0 — so the object exists (probably in the object store from before the force-push). So old snapshots' hashes ARE valid objects but not ancestors.
+
+OK here's the key insight I need to verify: with `git log <non-ancestor-hash>..HEAD` listing ALL of reachable history, the span includes fixes from BEFORE the snapshot was taken, meaning predicted files from that old snapshot would be checked against fixes that happened before the prediction. That's semantically WRONG but would still generate events (more events, not fewer). So that wouldn't explain the low count either.
+
+Hmm, so why only 2? Let me look more carefully at `replay_validate_core` — the dedup: `last_validation_association(...).is_some_and(|(from, to)| from == last.git_hash && to == head_hash)`. So dedup is per (from,to) pair.
+
+The critical question: in a normal evolve session, the span from "prior snapshot hash" to "HEAD at this session" contains maybe 4-8 commits (previous session's 3 commits + this session's commits so far). How many of those commit messages contain "fix" or "revert"? Looking at the actual commit messages in the log: "Day 174: bump skill-evolve counter (5)", "session wrap-up", "skill-evolve: reset counter", etc. — none contain "fix" or "revert"! So `broke_files` is empty → `hits` empty and `surprises` empty → NOT recorded (and `recorded=false`).
+
+So the two recorded events came from spans that DID contain fix/revert commits. Let me check the actual data.
+
+Let me now check the real git log for both recorded events' spans:
+- d76b695 (day 171) .. c96395b (day 172)
+- c96395b (day 172) .. ff6b971 (day 172)
+
+And I need to figure out when "risk snapshot" started being called in evolve.sh. Let me check evolve.sh history.
+
+Also need to check the `predicted` field of ParsedSnapshot — the `top_10` list. `last.predicted` is the top-10 paths.
+
+Let me now check the whole reachable-history span issue more concretely, and count how many spans since the feature was added (Day ~171-172) had any fix/revert commit.
+
+Actually, the cleanest approach: figure out when `arc risk snapshot` started being called in evolve.sh. Then for each snapshot since then (they'd be the reachable ones), compute the span to the next snapshot and count fix/revert commits.
+
+Let me look at the git history for scripts/evolve.sh around the risk snapshot line.
+────────────────────────────────────────────────────────────────────────────────
+`git log <non-ancestor>..HEAD` succeeds (lists entire history) — so unreachable hashes don't bail at the log step. Let me dig into why events aren't recorded: the recording gate requires hits or surprises (fix/revert commit messages). Let me analyze real
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline d76b695..c96395b…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -8 -- scripts/ev… ✓ (5ms)
+ ✓ (6ms)
+  2 tools completed in 822ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The two existing validation events came from spans:
+- `d76b695..c96395b` — the span contains commit messages mentioning nothing that would trigger... wait, actually there were untracked surprise files like `CLAUDE.md`, `DAY_COUNT` — those were DIRECT files listed by git log name-only. But wait, that event has `surprises` including `"22f857b Day 172: bump skill-evolve counter (2)"` — that's a commit MESSAGE string, not a file! Interesting. So the surprise list includes commit message lines in some form? Actually looking at the event: `surprises`: `[".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "CLAUDE.md", "DAY_COUNT", "dd691e6...", "fd51812...", "journals/JOURNAL.md"]`.
+
+Hmm wait — those look like messages ending. Actually `git log --name-only` lists commit message lines and file paths interleaved. The parse_git_log_name_only treats the first non-blank line as message and subsequent as files. This snapshot event was recorded on day 172 at 09:20 — probably with the OLD code before de-noising (the "De-noise risk validation by filtering non-source churn out of accuracy" commit 03a0880 came later day 172 16:36). At that point `is_scored_file` filtering didn't exist, so meta files were counted as surprises.
+
+OK so waste of time — the events did record because there were commits with "fix"/"revert" in message (my "Task 1"/"Task 2" messages contained "Close the risk-validation cold-start" — no "fix". Hmm, `dd691e6` message is "Close the risk-validation cold-start..." — no "fix". But `c96395b` "Update CLAUDE.md risk-validation description..." — no "fix" either. Wait, but the event for span 1 has `hits: ["src/commands_risk.rs"]` — src/commands_risk.rs broke? Which commit... `dd691e6` touched `src/commands_risk.rs` (Task 1). The message doesn't contain "fix" or "revert"... 
+
+Hold on, let me re-check `classify_broke_files`: `is_revert = msg_lower.contains("revert")`, `is_fix = msg_lower.contains("fix")`. Hmm, "Close the risk-validation cold-start" doesn't contain fix. Let me check the commit dd691e6 full message. Maybe it does: "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" — no "fix".
+
+Wait — but the FEED path. That event was recorded by the replay at the NEXT `arc risk snapshot` call on day 172... The span d76b695..c96395b — commits: c96395b, dd691e6, 22f857b, 35f1efd, fd51812. Hmm, `git log --name-only` on that span — actually maybe some of these messages contain "fix"? Let me look at the actual commit like "35f1efd Day 172: update day counter". No fix.
+
+Wait, maybe the commit messages DO contain "fix" — my `git log --oneline` above is abbreviated. Let me check full messages. Actually dd691e6's full message per the validation event surprise list includes "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" — exactly as shown. No "fix".
+
+Hmm, unless... `classify_broke_files` checks `msg_lower.contains("fix")` — "risk-validation cold-start" — no. Hmm wait, but hits = ["src/commands_risk.rs"] means src/commands_risk.rs appeared in a fix/revert commit. 
+
+Let me check the full commit message of dd691e6 and 03a0880 - maybe there's more text. Let me check with git log --format=%B.
+────────────────────────────────────────────────────────────────────────────────
+The existing events were recorded — but span 3 (467588b..HEAD) has no "fix"/"revert" commits, so no event is recorded there even though commits exist. Let me check the full commit messages of the recorded spans
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && for c in c96395b dd691e6 03a0880 d…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "=== span 1 files (name-only)… ✓ (3ms)
+ ✓ (7ms)
+  2 tools completed in 744ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand exactly what happened with the 2 recorded events:
+
+Span 1 (d76b695..c96395b): commit dd691e6 "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" — the message contains "fix"? No. But wait, in the validation event the surprises list includes "dd691e6 Day 172 (08:42): Close the risk-validation cold-start..." — that's a commit message treated as a "file"! Look at the surprises in event 1:
+
+```
+"surprises":[".arc/risk_snapshots.jsonl",".skill_evolve_counter","22f857b Day 172: bump skill-evolve counter (2)","35f1efd Day 172: update day counter","CLAUDE.md","DAY_COUNT","dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)","fd51812 Day 172 (01:28): session wrap-up","journals/JOURNAL.md"]
+```
+
+Interesting — commit messages appear in surprises. That's because those commits' titles contain the word "fix"? No... "Close the risk-validation cold-start" — hmm no "fix". Wait — the parse_git_log_name_only parses "hash message" lines... but here "22f857b Day 172: bump skill-evolve counter (2)" appears as a surprise which means it was classified as a "broke" file. Why? Because the commit *message* contains "fix"? No. Let me re-read.
+
+Actually "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" — contains no "fix" and no "revert"... but it was included in surprises and _surprises_ are the "broke" files that weren't predicted — BUT the surprises filter is `is_scored_file(f)` (src/*.rs)! These are commit messages, not files. Hmm, so how did they get in?
+
+Wait, look at the parse logic. `git log d76b695..c96395b --name-only --oneline`:
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+(blank)
+CLAUDE.md
+(blank)
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)
+(blank)
+src/commands_risk.rs
+(blank)
+22f857b Day 172: bump skill-evolve counter (2)
+(blank)
+.skill_evolve_counter
+(blank)
+35f1efd Day 172: update day counter
+(blank)
+DAY_COUNT
+(blank)
+fd51812 Day 172 (01:28): session wrap-up
+(blank)
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+Hmm wait, is there a blank line between the commit header and its files? Actually in `git log --name-only`, the format is:
+```
+<commit header>
+(blank)
+<files...>
+(blank)
+<next commit header>
+(blank)
+<files...>
+```
+
+So "c96395b Day 172..." is a header, then blank, then "CLAUDE.md" is a file. Then blank, then "dd691e6 ..." is the next header. OK.
+
+So parse_git_log_name_only:
+- Line "c96395b Day 172 (08:42): ... eval-fix 1)": current_msg = Some(c96395b...)
+- Blank → push entry {msg: c96395b..., files: []}
+- "CLAUDE.md": current_msg None → treated as a new commit header! current_msg = Some("CLAUDE.md")
+- Blank → push entry {msg: "CLAUDE.md", files: []}
+- "dd691e6 ...": current_msg None → new header
+- Blank → push {msg: dd691e6..., files: []}
+- "src/commands_risk.rs": current_msg None → header!
+- ...
+
+Wait, that doesn't work either. Let me think about the actual git output format. Running `git log <range> --name-only --oneline`:
+
+```
+c96395b Day 172 (08:42): ...
+CLAUDE.md
+
+dd691e6 Day 172 (08:42): ...
+src/commands_risk.rs
+
+22f857b Day 172: bump skill-evolve counter (2)
+.skill_evolve_counter
+
+35f1efd Day 172: update day counter
+DAY_COUNT
+
+fd51812 Day 172 (01:28): session wrap-up
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+Hmm, is there a blank line between commit header and files? Let me check: `git log --name-only` defaults to `--format` that ends with a blank line after each commit's files. The format for `--name-only` is: `%H %s` + newline + files + newline + newline? Actually let me just run it to see.
+
+From the actual output above ("span 1 files"), we see:
+```
+c96395b Day 172 (08:42): Update CLAUDE.md ...
+(blank)
+CLAUDE.md
+(blank)
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start ...
+(blank)
+src/commands_risk.rs
+(blank)
+22f857b Day 172: bump skill-evolve counter (2)
+(blank)
+.skill_evolve_counter
+(blank)
+35f1efd Day 172: update day counter
+(blank)
+DAY_COUNT
+(blank)
+fd51812 Day 172 (01:28): session wrap-up
+(blank)
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+So the git log option `--oneline` with `--name-only` output separates the header from the file list with a blank line. So parse_git_log_name_only sees:
+
+1. "c96395b Day 172 (08:42): Update CLAUDE.md ..." → current_msg = Some(...)
+2. "" → blank → push {msg: "c96395b ...", files: []}
+3. "CLAUDE.md" → current_msg is None → becomes a header {msg: "CLAUDE.md"}
+4. "" → push {msg: "CLAUDE.md", files: []}
+5. "dd691e6 Day 172 (08:42): Close ..." → header
+6. "" → push {msg: "dd691e6 ...", files: []}
+...
+
+Oh wait — that's wrong! The file "CLAUDE.md" was treated as a commit header because the actual file list comes AFTER a blank line but the parser treats the first line after blank as a new header. So the parser treats files as commit messages and vice versa! But hold on — with `--oneline` the header line has no full hash... the format "c96395b Day 172..." vs file "CLAUDE.md". The parser can't distinguish.
+
+Hmm wait, but then classify_broke_files looks at messages containing "fix"/"revert". "CLAUDE.md" doesn't contain fix. Let me re-check the surprises in event 1:
+
+surprises: [".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "CLAUDE.md", "DAY_COUNT", "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)", "fd51812 Day 172 (01:28): session wrap-up", "journals/JOURNAL.md"]
+
+Hmm, those are entries *from the git log lines that the parser treated as commit "messages"* and which contain... "fix"? "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" — no fix. Hmm.
+
+Wait, the surprises are broke_files filtered by is_scored_file? No wait — look at the code:
+
+```rust
+let mut surprises: Vec<(String, Option<usize>)> = broke_files
+    .iter()
+    .filter(|f| !predicted_set.contains(f))
+    // Only files the scorer could actually rank count as surprises;
+    .filter(|f| is_scored_file(f))
+```
+
+is_scored_file = starts_with("src/") && ends_with(".rs"). None of those surprise entries are src/*.rs... so how did they get into surprises?!
+
+Unless... the surprises were recorded BEFORE this filter was added? The event 1 was recorded at day 171, ts 2026-08-19T09:20:10Z. The filter "De-noise risk validation by filtering non-source churn out of accuracy (Task 1)" commit 03a0880 was at Day 172 16:36. So event 1 (day 171) was recorded BEFORE the de-noise commit. Yes! Event 1 at day 171 with surprises including junk — then the de-noise fix shipped (03a0880, Day 172), and event 2 (day 172, 16:36→17:15... wait ts says 17:15) has only `["src/commands_risk_accuracy.rs"]` as surprise — a scored src file. Good, so event 2 was recorded after the de-noise fix.
+
+So the mechanism: replay_validate_last_snapshot only records a validation event when `!hits.is_empty() || !surprises.is_empty()` — i.e., when at least one "fix"/"revert"-classified commit happened in the span (with a scored src file as surprise after the de-noise fix). Wait, but event 1 had all junk surprises — how did the junk get classified as "broke"? Because of the misparse! The parser treats file paths as commit messages. Then classify_broke_files checks if the message contains "fix" or "revert". 
+
+Hmm hold on. Let me recheck. Actually the blank-line layout in the actual git output — let me run it and look at the exact output. From the result above:
+
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+(blank)
+CLAUDE.md
+(blank)
+dd691e6 ...
+```
+
+Wait, the actual printed output was:
+
+```
+=== span 1 files (name-only) ===
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)
+
+src/commands_risk.rs
+22f857b Day 172: bump skill-evolve counter (2)
+
+.skill_evolve_counter
+35f1efd Day 172: update day counter
+
+DAY_COUNT
+fd51812 Day 172 (01:28): session wrap-up
+
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+Hmm wait, where are the blank lines? The `git log --name-only --oneline --format='%h %s'` output — I used `--format='%h %s'` which means there is NO blank line after commit header, just the file list, and a blank line between commits. Let me look: 
+
+"c96395b Day 172 (08:42): Update CLAUDE.md ..." then blank then "CLAUDE.md", then "dd691e6 Day 172 (08:42): Close ..." then blank then "src/commands_risk.rs"...
+
+Hmm, that doesn't match. Standard git behavior for `git log --name-only --format='%h %s'`: for each commit:
+```
+<hash> <subject>
+<file1>
+<file2>
+(blank)
+<next-hash> <subject>
+<file1>
+...
+```
+No blank between header and files; blank only between commits. But the output above shows:
+
+```
+c96395b Day 172 (08:42): Update CLAUDE.md ...
+(blank)
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation ...
+(blank)
+src/commands_risk.rs
+22f857b ...
+```
+
+That's the display collapsing the actual blank lines in my echoed output — wait no, my echo was piped through `head -30`. The output shows blank lines after "c96395b..." and after "CLAUDE.md"? No wait:
+
+Line 1: c96395b ...
+Line 2: (blank)
+Line 3: CLAUDE.md
+Line 4: dd691e6 ...
+Line 5: (blank)
+Line 6: src/commands_risk.rs
+Line 7: 22f857b ...
+
+Hmm, that's weird. That would be the format where there's a blank between header and files, and NO blank between commits? That pattern — blank after header, not after files — is what you get with `--format='%h %s%n'`? No...
+
+Actually hold on. I passed `--format='%h %s'` and `--name-only`. Let me not theorize — let me directly run the exact command the code uses:
+
+```rust
+run_git(&["log", &format!("{}..HEAD", last.git_hash), "--name-only", "--oneline"])
+```
+
+Note the code does NOT pass a --format flag; it uses --oneline with --name-only. Let me run exactly that and look at raw output with visible line breaks. Also worth checking what happens for the commit "fd51812 Day 172 (01:28): session wrap-up" whose message contains "wrap-up"... The classification is by "fix"/"revert" only.
+
+The key insight so far is actually simpler than the parse issue. Let me re-derive:
+
+Event 1 (day 171): span d76b695..c96395b. Commit messages in that span: "Update CLAUDE.md risk-validation description ... eval-fix 1" — contains "fix" in "eval-fix 1"! And dd691e6 "Close the risk-validation cold-start ... (Task 1)". Hmm "cold-start"... no. Wait, actually the JUNK surprises in event 1 include "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)".
+
+OK so how did that get classified as broke? If the parser is misparsing (files-as-headers, headers-as-files interleaved), then "dd691e6 Day 172 (08:42): ..." might be a *file* line that ended up in an entry whose... no wait, classify looks at message only.
+
+Hmm — actually here's the thing: in the actual git output format for `git log --name-only --oneline`, EVERY commit produces: "hash subject" then a blank line then files, then another blank line between commits? Let me just run it.
+
+Actually, let me stop theorizing and run the exact command.
+
+The important thing for the TASK though: the evaluator feedback says: "Task 1 (diagnose the 88-snapshot/2-validation gap, fix the gate, add a unit test, record the honest summary) was never implemented" and the working tree was clean. So I need to actually implement the fix.
+
+Let me now decide what the root cause is and what fix to implement:
+
+**Root cause candidates:**
+
+(a) Span-selection gate: `replay_validate_last_snapshot` replays ONLY the LAST snapshot (the most recent one) against `git log <hash>..HEAD`. It does NOT replay historical snapshots. So each `arc risk snapshot` invocation validates only ONE snapshot — the most recent at that time. That yields at most one validation event per snapshot, and only when the span contains "fix"/"revert" commits with scored files. 77/88 hashes unreachable doesn't directly block (git log on unreachable hash returns full history — success, non-empty), BUT wait — there's a subtlety: if the hash is unreachable AND the span git-log returns commits that are actually older... the log would contain EVERYTHING, which includes fix commits — that would MORE likely record an event, not fewer. Hmm, but hold on: is it sound? For an unreachable hash, `git log unreachable..HEAD` gives the full history reachable from HEAD — so the validation pairs the snapshot (whose hash is unreachable) with commits that may be entirely OLDER than the snapshot. The association `(git_hash_from=unreachable, git_hash_to=HEAD)` is a fake-ish association — not sound. But it would produce MORE events, not fewer.
+
+Hmm wait, actually let me re-read the task's candidate (a): "the 'validate the prior snapshot' half requires the prior snapshot's git hash to be an ancestor of HEAD, and rebases/force-pushes ... can make most historical hashes unreachable → skip. Verify by checking how many of the 88 snapshot hashes are actually reachable."
+
+The task's hypothesis (a) says the ancestor check makes it SKIP. But in the current code, `git log <hash>..HEAD` does NOT fail for non-ancestor hashes — it just lists all of HEAD's history. So there's no explicit ancestor check! Let me search for `is-ancestor` in the code... The grep earlier for "is_ancestor\|merge-base" found nothing in the src files. So candidate (a)'s premise (an ancestor gate exists) is FALSE in the current code — there is no such check.
+
+So what's actually happening:
+
+1. `replay_validate_last_snapshot()` only ever validates the LAST snapshot. 
+2. `handle_risk_snapshot` calls it before writing a new snapshot, so each `arc risk snapshot` validates the previous one.
+3. It only RECORDS an event when the span has fix/revert commits affecting scored files (via surprises) or predicted files (hits).
+4. Also, dedup via last_validation_association: the same (from,to) pair isn't double-counted.
+
+But wait — with 3 snapshots/day and the last snapshot nearly always validated... why only 2 events?
+
+Because validation events only fire when there are "fix"/"revert" commits in the span! Most spans in this repo are routine commits (bump counter, wrap-up, JOURNAL) — no "fix"/"revert" in message → no hits/surprises → NO event recorded. Only when a task commit with "fix" in the message (e.g. "Task 2, eval-fix 1") or "revert" appears in the span does an event get recorded.
+
+Check the 2 events:
+- Event 1: span d76b695..c96395b contained "Task 2, eval-fix 1" (contains "fix") → classified broke → but wait, that commit touched CLAUDE.md only (not a scored file). Then how was an event recorded? Because of the JUNK surprises — the misparse of commit messages as files. Hmm.
+
+Let me look again at event 1's surprises: they include "22f857b Day 172: bump skill-evolve counter (2)" — the commit message with "fix"? No. Ugh. Let me actually run the exact git log command and the parser to see.
+
+Actually, wait. Let me look at event 1's surprise "fd51812 Day 172 (01:28): session wrap-up". Neither contains "fix" nor "revert". So classify_broke_files wouldn't flag them. Unless... the parse is so broken that message=files and files=messages, and entries get mixed. Let me look at the actual git output with blank lines precisely. I'll run the exact command the code runs.
+
+Let me also reconsider: maybe the reason only 2 events exist is much more mundane, with the parse being correct:
+
+- `git log d76b695..c96395b --name-only --oneline` output:
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+
+CLAUDE.md
+
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)
+
+src/commands_risk.rs
+
+22f857b Day 172: bump skill-evolve counter (2)
+
+.skill_evolve_counter
+
+35f1efd Day 172: update day counter
+
+DAY_COUNT
+
+fd51812 Day 172 (01:28): session wrap-up
+
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+Standard `git log --name-only --oneline` output: for each commit, "hash subject", blank, file list, blank... So the layout is:
+
+header, blank, files, blank, header, blank, files, blank...
+
+With the parser:
+- "c96395b Day 172 ..." → msg
+- blank → push {c96395b..., []}
+- "CLAUDE.md" → msg=Some("CLAUDE.md")
+- blank → push {CLAUDE.md, []}
+- "dd691e6 ..." → msg
+- blank → push {dd691e6..., []}
+- "src/commands_risk.rs" → msg
+- blank → push {src/commands_risk.rs, []}
+- "22f857b ..." → msg
+- blank → push {22f857b..., []}
+- ".skill_evolve_counter" → msg
+- blank → push
+- "35f1efd ..." → msg
+- blank → push
+- "DAY_COUNT" → msg
+- blank → push
+- "fd51812 ..." → msg
+- blank → push
+- ".arc/risk_snapshots.jsonl" → msg
+- "journals/JOURNAL.md" → (no blank at end) → push {.arc/risk_snapshots.jsonl, files:["journals/JOURNAL.md"]}
+
+So ALL entries end up with files=[] except the last! And messages alternate between real commit headers and file paths. classify_broke_files: looks at messages containing "fix"/"revert":
+- "c96395b Day 172 (08:42): Update CLAUDE.md ... (Task 2, eval-fix 1)" → contains "fix" → "broke" → files=[] (empty, so nothing added).
+- "dd691e6 ..." contains "fix"? "Close the risk-validation cold-start" — no.
+- "22f857b Day 172: bump skill-evolve counter (2)" — no.
+- "fd51812 ..." — no.
+
+Hmm, so with this parse, broke_files would be empty (the eval-fix commit has no files in the entry). Then hits=[], surprises=[]... but wait, event 1 recorded surprises! Contradiction.
+
+Unless the git output format is actually: header, files (NO blank between), blank between commits:
+```
+c96395b Day 172 (08:42): ...
+
+CLAUDE.md
+dd691e6 Day 172 (08:42): ...
+src/commands_risk.rs
+```
+From my actual run above (the "== span 1 files ==" output), it printed:
+
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+(blank)
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)
+(blank)
+src/commands_risk.rs
+22f857b Day 172: bump skill-evolve counter (2)
+```
+
+Hmm wait, in that output, "CLAUDE.md" is on the line right after the blank following "c96395b header", and "dd691e6 header" comes right after "CLAUDE.md" without blank. Wait that would mean... hmm actually no. The terminal output shows:
+
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)
+
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)
+
+src/commands_risk.rs
+22f857b Day 172: bump skill-evolve counter (2)
+
+.skill_evolve_counter
+35f1efd Day 172: update day counter
+
+DAY_COUNT
+fd51812 Day 172 (01:28): session wrap-up
+
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+
+That looks like: header, (files immediately? no...). There's a blank after each header, then the file, then next header. That's the `--format='%h %s%n'` style? Hmm — I ran with `--format='%h %s'`. With a custom --format and --name-only... Actually when you give `--format`, `--name-only` is still applied: git outputs "%h %s\n" then file names, and separates commits with a blank line? The observed pattern "header, blank, file, header, blank, file" is bizarre. It looks like git printed "%h %s" + "\n" (format), then... hmm.
+
+Wait, actually here's the thing — with `--format` specified and `--name-only`, git's output for each commit is:
+
+```
+<format output>
+
+<file1>
+<file2>
+```
+
+where the blank line comes from the format's default terminator. Actually `--format` implies the "separator" behavior where each commit is followed by a blank line unless you use `%x00` tricks. And `--name-only` files are indented? No, not indented by default in this version maybe.
+
+OK here's the output again — "header, blank, file(s), header, blank, file(s)":
+- header c96395b, blank, CLAUDE.md, header dd691e6, blank, src/commands_risk.rs, header 22f857b, blank, .skill_evolve_counter, header 35f1efd, blank, DAY_COUNT, header fd51812, blank, .arc/risk_snapshots.jsonl + journals/JOURNAL.md.
+
+Hmm interesting. So in this output, the "blank" separates header from files?? That means... hold on, maybe git puts the blank line BEFORE each commit's files when using --format + --name-only? I.e., each commit prints "%h %s" then a blank then files? That's what `log --format='%h %s'` with default diff output looks like? No...
+
+Wait, I bet what happened: `git log --name-only --oneline --format='%h %s'` — `--oneline` is overridden by `--format`? The format given is '%h %s'. And the output shows for commit c96395b: "%h %s" line, then blank, then "CLAUDE.md" (the file). Then dd691e6 header, blank, src/commands_risk.rs. So git prints the format, then the file list, and **there's a blank line between the header and the files**, and no blank between commits (files of one commit directly precede the next header)?? That's unusual but let me just verify by running the exact command with `cat -A`.
+
+This matters because the whole validation BUG might be here: the parser assumes "blank separates commits" and "first non-blank line after blank is a header". If the actual format is "header, blank, files, header, blank, files", then files become headers and real headers become entries with empty files — exactly the junk we see in event 1's surprises.
+
+Regardless — the critical question for this task is: WHY only 2 validation events, and what's the sound fix?
+
+Let me now look at the ACTUAL git command the code runs: `run_git(&["log", &format!("{}..HEAD", ...), "--name-only", "--oneline"])` — note: NO --format flag, so git uses its default --oneline format combined with --name-only. The default output for `git log --name-only --oneline` is:
+
+```
+<hash> <subject>
+<file1>
+<file2>
+(blank)
+<hash> <subject>
+<file1>
+(blank)
+```
+
+i.e., files immediately follow header; blank separates commits. The parser handles THAT correctly (that's the format parse_git_log_name_only was written for — its doc comment probably shows it).
+
+But my manual run used `--format='%h %s'` which produced the odd "header, blank, files" layout. So my manual parse confusion was due to my own --format flag. The real code uses --oneline (no --format), so the parser likely works correctly.
+
+OK so let me now run the EXACT command the code runs, and simulate the whole flow, to determine empirically why only 2 events were recorded.
+
+The real reasons, from code reading:
+
+1. `replay_validate_last_snapshot()` only validates the LAST (most recent) snapshot — never walks history. So the 88 snapshots each get validated at most ONCE (when they were the "last" at the next `arc risk snapshot` call).
+
+2. Record gate: an event is recorded only if hits (predicted file literally matched in a fix/revert commit's file list) or surprises (a scored src/*.rs file appeared in a fix/revert commit). Since the fix/revert classification relies on commit SUBJECT containing "fix" or "revert", and most spans between consecutive snapshots have no such commits, the replay runs but records nothing.
+
+3. The dedup `last_validation_association` only prevents the SAME (from,to) pair re-recording.
+
+So with 3 snapshots/day, up to ~3 validation opportunities/day, but only on days where a span contains "fix"/"revert" commits do events get recorded. Days 171 and 172 had such commits (the risk-validation work itself: "eval-fix 1", "Task 2, eval-fix"). Every other day — no fix/revert commit subjects, or the snapshot hash unreachable... wait, unmatched hashes: does that matter? For unreachable hash, `git log <h>..HEAD` still succeeds and lists the FULL history, so it would classify ALL of history's fix/revert commits → MORE junk events, not fewer. But wait — it records surprisingly FEW events despite that. Hmm, let me verify whether `git log <unreachable>..HEAD --name-only --oneline` returns exit 0 (it did: exit=0) and non-empty.
+
+Hold on, but then the 77 unreachable hashes would each produce a validation event with full-history fix commits... yet we only have 2 events. Something else gates it. Let me actually check: was replay_validate_last_snapshot even RUNNING before day 171? The evolve.sh `arc risk snapshot` call was added on Day 171 in commit a6f414d (the git log -S shows the `risk snapshot` line was ADDED in a6f414d Day 171). And event 1 was recorded Day 171 09:20. So `arc risk snapshot` per session has only been running since Day 171! Before that, snapshots came from... where? Let me check: snapshots exist from day 134 onward. What wrote them before day 171?
+
+Possibly `/risk snapshot` was invoked manually inside REPL sessions by the agent (auto_risk_snapshot is opt-in ar_RISK_AUTOSNAPSHOT). And `handle_risk_snapshot` (the CLI/REPL command) ALSO writes snapshots and (since day 172) validates the prior one. But the validation half of handle_risk_snapshot only existed since commit dd691e6 (Day 172 08:42) — "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)". 
+
+And the evolve.sh `arc risk snapshot` call — added Day 171 (a6f414d). So the validation feed has only existed since Day 171-172, giving ~2-3 days × 3 sessions = ~6-9 validate attempts, of which spans with fix/revert commits gave 2 events. That's the honest answer!
+
+But wait — the task says "88 snapshots in .arc/risk_snapshots.jsonl versus only 2 events" as the disproportionality to fix. The snapshots were accumulating since day 134 via (presumably) the agent running `/risk snapshot` in REPL sessions (which wrote snapshots but did NOT validate — the validation half didn't exist until day 172). After day 172, every `arc risk snapshot` DOES validate the prior. So the count SHOULD be growing now — we should see more than 2 events after day 172's spans... Let me check the spans after event 2 was recorded (day 172 16:36 → ff6b971). Snapshot ff6b971 was recorded at... let me check the snapshot list: ff6b971 day 172, ba1c380 day 172, c5597b5 day 173, 1ac258f day 173, 709cc09 day 173, 3f99fda day 174, 467588b day 174.
+
+After event 2 (recorded at span c96395b→ff6b971, i.e. when validating snapshot c96395b at the time HEAD was ff6b971): subsequent snapshots ba1c380 (day 172), c5597b5, 1ac258f, 709cc09 (day 173), 3f99fda, 467588b (day 174).
+
+When validating snapshot ff6b971 (span ff6b971..ba1c380): commits between = "ba1c380 Day 172: bump skill-evolve counter"? Let me check the git log. Day 173 and 174 spans — the commits in those spans are routine (wrap-up, counter bumps, skill-evolve cycles). Any "fix"/"revert" subjects? Probably not — hence no events. So the count stays at 2 through day 174.
+
+Interesting: but wait, validation of ff6b971..ba1c380 would be the span containing d9de762 "Add a discriminative breakage-rate signal ... (Task 2)" — no fix. Hmm. Actually wait, event 2's span was c96395b..ff6b971 and it recorded src/commands_risk_accuracy.rs surprise. Which commit in that span mentions fix? "d9de762 Day 172 (16:36): Add a discriminative breakage-rate signal to risk accuracy (do flagged files fail more?) (Task 2)" — "risk accuracy" contains... no "fix". "03a0880 De-noise risk validation by filtering non-source churn out of accuracy (Task 1)" — no. "ca5cbba Day 172: bump skill-evolve counter (3)" — "counter"! Contains... no "fix". "0cc4fbe Day 172 (08:42): session wrap-up" — no.
+
+Hmm! Then how did event 2 record a surprise "src/commands_risk_accuracy.rs"? classify_broke_files only flags messages containing "fix" or "revert". None of the 5 commits in that span contain "fix"... wait: "d9de762 Day 172 (16:36): Add a discriminative breakage-rate signal to risk accuracy (do flagged files fail more?) (Task 2)" — no "fix". Unless... "02:42)... (Task 1)" hmm. "03a0880 Day 172 (16:36): De-noise risk validation by filtering non-source churn out of accuracy (Task 1)" — no.
+
+Wait — maybe "ca5cbba Day 172: bump skill-evolve counter (3)" — no. Sooo how did surprise src/commands_risk_accuracy.rs get classified as broke? Unless the parse misparse happened (files treated as headers, and one of the file lines... no wait, classify checks messages against "fix"/"revert" — file paths don't contain those).
+
+Hmm, let me just run the exact code path on the real data to see. I'll write a quick test harness binary or a unit test? Easier: replicate the parser in python on the actual git output.
+
+Actually — wait. Maybe the bug is exactly the parser and git's actual output format differs. Let me run the EXACT git command and inspect raw bytes.
+────────────────────────────────────────────────────────────────────────────────
+Let me run the exact git command the code uses, to see the raw format the parser consumes
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log c96395b..ff6b971 --name-on…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "=== raw span for event 2 ===… ✓ (3ms)
+ ✓ (4ms)
+  2 tools completed in 733ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the recorded events. Event 2: span c96395b..ff6b971 — the commits are "Add a discriminative breakage-rate signal..." and "De-noise risk validation by filtering non-source churn out of accuracy". Wait, none of these messages contain "fix" or "revert"... yet event 2 was recorded with hits ["src/commands_risk.rs", "src/commands_risk_snapshots.rs"] and surprises ["src/commands_risk_accuracy.rs"].
+
+Hold on — "fix" — "De-noise risk validation by filtering non-source churn out of accuracy" — no. Hmm, but wait — "Add a discriminative breakage-rate signal to risk accuracy (do flagged files fail more?) (Task 2, eval-fix 1)". There's "eval-fix 1" in the message! `is_fix = msg_lower.contains("fix")` — "eval-fix" contains "fix". So commits with "eval-fix" in the message are classified as fixes. That's how span 2 got recorded: "Task 2, eval-fix 1" contains "fix".
+
+Span 1 (d76b695..c96395b): commits "Update CLAUDE.md risk-validation description..." (no fix), "Close the risk-validation cold-start..." — contains "risk-validation" ... wait no. Hmm, event 1 has hits ["src/commands_risk.rs"] — the dd691e6 commit "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" touched src/commands_risk.rs and contains "fix" anywhere? "risk-validation" — substring "fix"? r-i-s-k---v-a-l-i-d-a-t-i-o-n. No "fix". Hmm wait...
+
+Actually wait — message "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)". Contains "fix"? No. Let me re-check. Hmm, but event 1 recorded hits ["src/commands_risk.rs"]. That commit dd691e6 touched src/commands_risk.rs. How was it classified as broke?
+
+Wait, classify_broke_files looks for "revert" or "fix" in the message. Hmm — neither "update CLAUDE.md", nor "Close the risk-validation cold-start", nor "bump skill-evolve counter", nor "update day counter", nor "session wrap-up" contain "fix" or "revert"... 
+
+Wait, unless... "22f857b Day 172: bump skill-evolve counter (2)" no. Hmm. Let me re-read: "35f1efd Day 172: update day counter" no.
+
+Hmm, so how did event 1 get hits? Let me look more carefully. Actually, hmm, maybe git_hash_from "d76b695" — that snapshot is from day 171. Which commit is d76b695? Let me check. The snapshot d76b695 is from day 171 (the third snapshot that day). The span d76b695..c96395b.
+
+Wait, actually maybe the log parse treats the commit differently. Let me check how the parser works: `parse_git_log_name_only` — first non-blank line = message, subsequent non-blank lines = files. The output above for span 1 shows... let me run it raw.
+
+Also I realize there may be a subtle bug: when running `git log hash..HEAD --name-only --oneline`, commits that touch ONLY files (like ".skill_evolve_counter") appear with message at top then files, and blank line separators. But if a commit touches no files? Not possible with --name-only.
+
+OK so for span 1, which commits contain "fix"? Let me run the raw output.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log d76b695..c96395b --name-on… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the format. The parser:
+
+```
+for line in output.lines():
+    trimmed = line.trim()
+    if trimmed.is_empty(): flush commit
+    if current_msg.is_none(): current_msg = trimmed
+    else: files.push(trimmed)
+```
+
+So commits are separated by blank lines? But `git log --name-only --oneline` output has NO blank lines between commits in this case! Looking at the output above — there are no blank lines between commits. Hmm, wait, `git log --name-only` usually separates commits with blank lines. But in this output there are no blank lines...
+
+Actually wait, look carefully — output shows:
+```
+c96395b Day 172 (08:42): Update CLAUDE.md ... (Task 2, eval-fix 1)
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start ...
+src/commands_risk.rs
+22f857b Day 172: bump skill-evolve counter (2)
+...
+```
+
+No blank lines! So how does the parser distinguish? It can't in this case — current_msg is the first line, everything after is a "file". That would break the parse entirely... unless the file paths after the first commit all get appended to the first commit's files.
+
+Hmm wait, but actually git log --name-only DOES insert blank lines between commits normally. Let me check... Actually I ran `git log ... --name-only --oneline | cat -A` and there are NO blank lines. Interesting — that's because the default `--name-only` for `git log`... hmm actually let me think. When there's no `--format` given and you use `--name-only`, git inserts a blank line between the commit header and the files, and another blank line between commits. But here the header and files are on consecutive lines with no blank...
+
+Actually no. Look: `git log --name-only` commits are separated by blank lines when using default format (which includes author/date). With `--oneline --name-only`... let me actually check. The output above shows no blank lines at all. Let me verify by counting with grep or checking.
+
+Actually the `cat -A` output shows every line ending with `$` and no blank lines (`^$` lines). So there are genuinely no blank lines in this output.
+
+But wait — the event 1 WAS recorded with hits `["src/commands_risk.rs"]` and surprises including `.arc/risk_snapshots.jsonl` etc. Let me trace: with the no-blank-line format, the first line `c96395b Day...` becomes current_msg, and ALL subsequent lines (including `dd691e6 Day 172...` commit messages) become "files" of the first commit. Actually no wait — `dd691e6 Day 172 (08:42): Close the risk-validation cold-start...` — "Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" is not a file, it's a commit message pushed into files[]. Hmm.
+
+But then how did the parser mark `src/commands_risk.rs` as broke? Only if the message contains "fix" or "revert". The first commit's message `c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)` — contains "fix"! "eval-fix 1" contains "fix". So is_revert/is_fix = true → all "files" (which includes `CLAUDE.md`, `dd691e6 Day 172 (08:42)...`, `src/commands_risk.rs`, `.skill_evolve_counter`, etc.) are marked broke!
+
+That matches the observed data for event 1! `hits: ["src/commands_risk.rs"]` and `surprises: [".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "CLAUDE.md", "DAY_COUNT", "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)", "fd51812 Day 172 (01:28): session wrap-up", "journals/JOURNAL.md"]`.
+
+Yes! Exactly — the "surprises" include commit messages as if they were files: "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "dd691e6 Day 172 (08:42): Close...", "fd51812 Day 172 (01:28): session wrap-up". These are COMMIT MESSAGE lines misparsed as file paths!! Confirms the parser is broken with this git output format.
+
+Wait, but is that really the git behavior? Let me check if git log normally separates commits with blank lines. Actually I bet the real git output DOES have blank lines, and this repo's git version/config... no. I literally ran the command above and there are no blank lines. So `git log <a>..<b> --name-only --oneline` in this repo produces NO blank-line separators with this git version.
+
+Hold on — this is likely because git 2.3x+ with `--oneline` and `--name-only`... Actually, historically `git log --name-only` uses the "commit separator" which is a blank line. Let me test on a different range with more commits to be sure, and also test the exact same command the code runs.
+
+Actually, wait. Let me re-examine. Maybe git DOES emit blank lines but the shell captured... no, cat -A shows none. Let me test with `git -c log.showSignature=false` or check git version. Let me just test explicitly.
+
+Let me test:
+```
+git log 467588b..HEAD --name-only --oneline | cat -A
+```
+
+Actually I already did that earlier for the other ranges. Let me try a different range with a commit that touches files to double check blank line behavior.
+
+Actually, the exact reproduction: The code calls:
+```
+run_git(&["log", &format!("{}..HEAD", last.git_hash), "--name-only", "--oneline"])
+```
+
+Let me check what git version does here. But the observed data is the ground truth: commit messages appear in the surprises list as "files". So the parser is mangling the output. This is the primary bug!
+
+But wait — does that fully explain only 2 events? Let me think about what the flow is:
+
+Every evolve session calls `arc risk snapshot` (line 2089 of evolve.sh). That calls `handle_risk_snapshot()` which:
+1. Calls `replay_validate_last_snapshot()` — validates the prior snapshot
+2. Writes a new snapshot.
+
+Then `auto_validate_after_failure` fires on watch failures (rare).
+
+So per session: 1 validation attempt of the prior snapshot against commits since it.
+
+For a validation event to be recorded, `replay_validate_core` requires:
+- last snapshot exists, has predictions
+- git_log not empty
+- hits or surprises non-empty (i.e., some commit message contains "fix" or "revert")
+
+Now given the parser bug: all commit messages after the first are treated as files of the first commit, and the FIRST commit in the range is the range's newest commit. Its message determines is_fix/is_revert for ALL lines. If the newest commit message contains "fix" or "revert" → everything "broke". If not → nothing broke → no event recorded.
+
+Hmm wait, actually that's wrong. Let me re-trace more carefully. The parser:
+
+```rust
+for line in output.lines() {
+    let trimmed = line.trim();
+    if trimmed.is_empty() { flush commit; continue; }
+    if current_msg.is_none() { current_msg = Some(trimmed); }
+    else { current_files.push(trimmed); }
+}
+flush last
+```
+
+For event-1 range `d76b695..c96395b`:
+- c96395b → msg
+- CLAUDE.md → file
+- dd691e6 ... → file (it's a commit message but pushed as file!)
+- src/commands_risk.rs → file
+- etc.
+
+So a single CommitEntry: message = "c96395b Day 172 (08:42): Update CLAUDE.md ... (Task 2, eval-fix 1)", files = [CLAUDE.md, dd691e6..., src/commands_risk.rs, .skill_evolve_counter, 35f1efd..., DAY_COUNT, fd51812..., .arc/risk_snapshots.jsonl, journals/JOURNAL.md]
+
+is_fix because "eval-fix" → broke = all those files. hits = intersection with predicted = src/commands_risk.rs (predicted). surprises = broke files that are scored (start with src/ and end .rs) minus predicted. Among "files": src/commands_risk.rs (predicted), and... the commit-message-as-file lines don't start with "src/" so not scored. So surprises should be empty?
+
+But observed surprises include .arc/risk_snapshots.jsonl, .skill_evolve_counter, etc. Those don't start with "src/" — they're not scored files. Wait — the observed event 1 surprises contain non-scored files: ".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "CLAUDE.md", "DAY_COUNT", "journals/JOURNAL.md" and commit messages. But `compute_validation` filters surprises by `is_scored_file(f)` (starts with src/ and ends .rs)!
+
+Hmm, but event 1 was recorded BEFORE the de-noise commit 03a0880 ("De-noise risk validation by filtering non-source churn out of accuracy (Task 1)"). So at the time of event 1, the filter didn't exist yet, explaining non-scored surprises. OK consistent.
+
+Event 2 (c96395b..ff6b971): 
+- ff6b971 (msg, contains "fix" in "eval-fix 1") → is_fix
+- files: src/commands_risk.rs, src/commands_risk_accuracy.rs, d9de762...(msg as file), src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs, 03a0880...(msg as file), src/commands_risk.rs, ca5cbba...(msg), .skill_evolve_counter, 0cc4fbe...(msg), .arc/risk_snapshots.jsonl, .arc/risk_validations.jsonl, journals/JOURNAL.md
+
+broke = all those. hits = src/commands_risk.rs + src/commands_risk_accuracy.rs (predicted). surprises scored = src/commands_risk_snapshots.rs (starts src/, .rs). Observed event 2: hits [src/commands_risk.rs, src/commands_risk_snapshots.rs]? No wait — observed: hits: ["src/commands_risk.rs","src/commands_risk_snapshots.rs"], surprises: ["src/commands_risk_accuracy.rs"], total_scored 77, scored_broke 3.
+
+Hmm interesting. That means predicted at that time included src/commands_risk.rs and src/commands_risk_snapshots.rs but NOT src/commands_risk_accuracy.rs. And the actual scored-broke files were those 3. OK.
+
+So the recorded events were fine at the time (they did correspond to real fix commits — dd691e6 and d9de762 touched src/commands_risk.rs etc.). But the parse is subtly broken: commit messages are misinterpreted as files, and commit boundaries are lost. This pollutes the file list, though the scored-file filter hides most pollution.
+
+Now WHY only 2 events in 88 snapshots? Let's enumerate the conditions per session:
+
+In `handle_risk_snapshot()`:
+1. `replay_validate_last_snapshot()`
+   - reads last snapshot
+   - runs `git log <last.hash>..HEAD --name-only --oneline`
+   - if empty → None
+   - calls replay_validate_core with head_hash = current HEAD
+2. Then writes new snapshot.
+
+`replay_validate_core`:
+- parses snapshots, takes last, predictions non-empty?
+- git_log trim empty → None
+- classify broke files: any commit message containing "fix" or "revert"
+- compute_validation
+- record only if hits or surprises non-empty
+  - AND dedup: last_validation_association (from,to) == (last.git_hash, head_hash)? If already recorded for that pair, skip.
+
+Now, the dates: the 88 snapshots span day 134 → day 174. The `risk snapshot` subcommand in evolve.sh was only added at day 171 (commit a6f414d "Day 171 (08:42): Self-improvement (small, committed) (Task 1)"). Wait — but snapshots exist from day 134!
+
+Let me check when snapshots started being recorded. Snapshots exist from day 134. How were they recorded pre-171? Probably `auto_risk_snapshot` via the REPL-exit hook with `arc_RISK_AUTOSNAPSHOT=1`? Or `/commit` handler? Let me check call sites of auto_risk_snapshot.
+
+Actually — crucial: the validation happens ONLY in `handle_risk_snapshot` (CLI path) and `auto_validate_by_replay` (REPL exit). Neither fires per-snapshot historically unless:
+- snapshots were taken via `arc risk snapshot` CLI (which validates prior), or
+- REPL exit with flag set (validates prior).
+
+If most of the 88 snapshots were recorded by `auto_risk_snapshot` (e.g. from `/commit` handler or REPL-exit) without validation, and `arc risk snapshot` CLI only started at day 171, then before day 171 there was zero validation. That matches: both events are from day 171-172, and the fix commits dd691e6/d9de762 are day 172.
+
+Also from day 171 onward: `arc risk snapshot` fires once per evolve session (line 2089 in evolve.sh). There are ~3 sessions/day. Let me count snapshots after day 171: day 171 has 3 (a6f414d, ed086b1, d76b695), 172 has 3, 173 has 3, 174 has 2. That's 11 snapshots. But only 2 validation events.
+
+Why not event for every session post-171? Each session runs `arc risk snapshot` → validates prior snapshot → records if (a) commits since prior snapshot exist, (b) some commit message contains "fix"/"revert", (c) not deduped, (d) hits or surprises non-empty.
+
+Let me check the 11 post-171 snapshot spans:
+
+Snapshots post-171 (git_hash, day):
+- a6f414d 171
+- ed086b1 171
+- d76b695 171
+- c96395b 172
+- ff6b971 172
+- ba1c380 172
+- c5597b5 173
+- 1ac258f 173
+- 709cc09 173
+- 3f99fda 174
+- 467588b 174
+
+Validation events:
+1. d76b695→c96395b (day 171 snapshot → day 172 HEAD)  — recorded when snapshot at c96395b was taken (day 172 session)
+2. c96395b→ff6b971 — recorded when snapshot at ff6b971 taken (day 172)
+
+So: when snapshot ff6b971 was taken, prior was... wait, we need the ORDER of snapshots: a6f414d, ed086b1, d76b695, c96395b, ff6b971, ba1c380...
+
+Event 1: from=d76b695 to=c96395b. This was recorded when the snapshot AT c96395b was being taken (i.e., during the session that ended at c96395b). Prior snapshot = d76b695. Span d76b695..c96395b contains commits... wait earlier I ran `git log d76b695..c96395b` and got exactly c96395b, dd691e6, 22f857b, 35f1efd, fd51812 (5 commits). The commit dd691e6 message contains "Close the risk-validation cold-start" — no "fix"! But c96395b contains "eval-fix 1" → fix!
+
+Hmm wait, but the FIRST line of the range newest-first is c96395b. Parser takes c96395b as the single commit message → contains "fix" → everything broke. But the REAL fix-commit is dd691e6 ("Close the risk-validation cold-start...") — hmm no, that doesn't have "fix" either. Actually with the blank-line bug, ALL files in the range map to the newest commit's message. Since the newest commit msg (c96395b) contains "fix", the whole range's files count as broke. So event 1 recorded with hits=[src/commands_risk.rs] (from dd691e6's real file) — coincidentally correct-ish.
+
+For event 2: span c96395b..ff6b971: ff6b971 is newest, message contains "fix" → recorded. Files include src/commands_risk.rs (from d9de762), src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs. hits + surprises as observed. OK.
+
+Now post-171 sessions where no event:
+
+Snapshot at ff6b971 was validated... wait no. Let me re-derive: when snapshot ba1c380 is taken, validate prior = ff6b971, span ff6b971..<HEAD at ba1c380>. That span's newest commit contains...? At day 172, snapshot ba1c380 HEAD — commits after ff6b971: ba1c380 plus maybe the day-counter/handle-eval-fix commits. If the newest commit message has no "fix"/"revert" → no broke files → no event.
+
+Actually WAIT. I need to check whether the parser ACTUALLY produces blank lines or not. The observed events' surprises contain commit-message-looking strings — proving the boundary-blank-lines are NOT present in the git output, OR that git inserts blank lines only between some commits... Let me verify with a git version check and a controlled experiment.
+
+Actually, hmm — modern git `git log --name-only --oneline` DOES print a blank line between each commit's file list and the next commit header. Let me look again at the `cat -A` output... it clearly shows NO blank lines (`^$` would appear as just `$`). All 16 lines are non-empty. So in THIS repo's git environment, `git log --name-only --oneline` does NOT emit blank separators?? That can't be right...
+
+Wait, actually maybe it's `--oneline` + `--name-only` that suppresses the separator. Let me test various git versions / formats in a scratch repo to see. Actually, more productively: I should check git version here.
+
+Hmm, hold on. Let me look at git's actual behavior. `git log --oneline --name-only` — I recall that `--name-only` (diff-based) output for `git log` by default inserts a blank line between header and files, and between commits, UNLESS format is explicitly set. But with `--oneline`, the header is one line, then files, then blank, then next header... Let me just test it in this environment directly. I did — no blank lines. But wait, maybe I should double-check with `od` or python to count empty lines.
+
+Actually the `cat -A` output is definitive — lines with `$` only. There were zero empty lines. So git here outputs no blank separators with `--oneline --name-only`... 
+
+Hmm wait, actually I wonder — is this because the range has "--name-only" and there's some interaction? Let me just test `git log --format=%h --name-only` on a single commit.
+
+OK regardless of the reason, the observed behavior is that the parser mangles commit boundaries AND attributes all files to one commit. But the observed events were correctly (accidentally) recorded because newest-range messages contained "fix".
+
+Now, the REAL reason there are only 2 events: Let me count the spans post-171 and determine for each whether the newest commit message contains "fix"/"revert":
+
+Snapshot sequence with HEADs at each snapshot (day):
+1. a6f414d (171) — before CLI validate existed (the CLI feature commit itself is a6f414d; likely the snapshot at a6f414d was taken before feature was live, or by auto_risk_snapshot). No validation recorded for prior.
+2. ed086b1 (171) — validate prior a6f414d: span a6f414d..ed086b1: newest = ed086b1 message contains? Let me check. Also, was CLI `risk snapshot` used here?
+3. d76b695 (171) — validate prior ed086b1
+4. c96395b (172) — validate prior d76b695 → EVENT 1
+5. ff6b971 (172) — validate prior c96395b → EVENT 2
+6. ba1c380 (172) — validate prior ff6b971: span ff6b971..ba1c380 — newest msg?
+7. c5597b5 (173) — validate prior ba1c380
+8. 1ac258f (173) — validate prior c5597b5
+9. 709cc09 (173) — validate prior 1ac258f
+10. 3f99fda (174) — validate prior 709cc09
+11. 467588b (174) — validate prior 3f99fda
+
+So up to 10 validation opportunities post-171 (plus the a6f414d one), yet only 2 events. Why did 8+ opportunities produce nothing?
+
+Possible reasons per opportunity:
+- The span had no commits since the prior snapshot (dedup by git hash means multiple snapshots can share... no, each has distinct hash). Wait, snapshots are recorded once per session, and the span from prior snapshot to the new session's HEAD may include a few commits (session commits + wrap-up). If the session produced zero commits (e.g., a session that did nothing after the snapshot... but the snapshot itself is a commit in evolve.sh? no — the snapshot JSONL line is swept into the wrap-up commit).
+
+Hmm, actually the snapshot is recorded BEFORE the session's commits are made (line 2089 in evolve.sh runs at session start?). Let me look at evolve.sh context around line 2089.
+
+Actually, important: the sequence per session: `arc risk snapshot` runs at some point during the session, then the session does tasks and commits. So when session N+1 starts and runs `arc risk snapshot`, the prior snapshot (from session N) is validated against the commits made since session N's snapshot — i.e., the commits of session N + between-session commits.
+
+For NO event: either (a) no "fix"/"revert" message in the span → no broke files → nothing recorded; or (b) no commits at all in span; or (c) hits+surprises both empty (all predicted files didn't break and no scored surprises) → nothing recorded (this is legit — a true "no breakage" result produces no event, which is itself a data gap! The task says "a validation event must pair a snapshot with the actual set of scored files that broke" — but the current code only records when SOMETHING broke).
+
+Key insight (b/c): the recording gate `if !hits.is_empty() || !surprises.is_empty()` means a clean span (no breakage) produces NO validation event. With only ~1-2 fix-commits per day and 3 sessions/day, most spans contain NO "fix"/"revert" commit → no event. That's the main reason for the 2-vs-88 disproportionality.
+
+Also the parser bug compounds it: since all files attach to the newest commit's message, only whether the NEWEST commit in the span contains "fix" matters. If the newest commit is a wrap-up/counter commit (very common — "Day N: bump skill-evolve counter", "session wrap-up"), NO files count as broke even if a fix commit exists deeper in the span. That's a real defect: fix commits mid-span are ignored because their messages are swallowed as "files" of the newest commit.
+
+So the diagnosis is clear:
+1. **Parser bug**: `git log <a>..<b> --name-only --oneline` output in this git version has NO blank-line separators (or the parser's assumption is wrong), so `parse_git_log_name_only` collapses the whole range into ONE commit entry whose message is the newest commit's. The "fix"/"revert" classification then depends only on the newest commit's message, and all file paths (plus other commits' messages) get attached to it. This both pollutes the file set and hides mid-range fix commits.
+
+Wait, I need to double check the blank line claim once more, because it has big implications for the fix. Let me test in a scratch repo to see whether `--oneline --name-only` prints separators based on git version.
+
+Hmm — but actually, the ground truth from the surprises field of event 1 (commit messages as "files") definitively proves that in the environment where the event was recorded, the parser saw no blank lines (or the messages were attached as files). Whether that was due to git version behavior or something else...
+
+Wait, actually, there's another possibility: the blank lines ARE in the git output, but the code that captures it (run_git) strips/trailing... no, run_git returns stdout as a String preserving newlines. `.lines()` would see blank lines and flush the entry. Hmm.
+
+Let me look at one more possibility: `git log` on a range where the commit at the boundary... let me just experimentally run the EXACT command on the exact range and check for empty lines with awk.
+
+I did run it: `git log c96395b..ff6b971 --name-only --oneline | cat -A` showed no blank lines. Let me also verify with `grep -c '^$'`.
+
+OK, I'll verify once more explicitly, and also check git version. Then design the fix.
+
+THE FIX PLAN:
+
+1. **Fix `parse_git_log_name_only` to be robust to missing blank-line separators**: Since commit headers are `^[0-9a-f]{7,40} ` (short hash + space), a file path can be distinguished from a commit header: file paths don't start with a hex hash + space, and commit messages always start with the hash. Also, `--name-only` file lines are paths. A robust heuristic: a line that matches `^\h*[0-9a-f]{7,40}\s` is a commit header. This handles both blank-line-separated and unseparated output.
+
+Actually even better: change the git invocation to use a machine-readable format: `git log <a>..<b> --format=... --name-only` with a marker, e.g. `--format=%H %s` and rely on... still needs boundary detection. The hash-prefix heuristic is simplest and robust. Or use `-z` (NUL-separated) with `--name-only -z` which is fully machine-parseable! `git log -z --name-only --format=...` produces NUL-separated records. But run_git returns a String — NULs in a String are fine in Rust. Parsing NUL-separated is robust.
+
+Hmm, but simpler and testable: keep the text format, detect headers by "line starts with a git hash followed by space". Commit hashes are 7+ hex chars; file paths in this repo don't look like that... in general a file could be named "deadbee foo" but that's absurd. I'll go with the header-detection heuristic, fixing the parser so commit boundaries are respected regardless of blank-line presence.
+
+2. **Fix the classification/recording semantics**: The current `classify_broke_files` marks a file as "broke" only via "fix"/"revert" in the commit message. And recording only happens when hits or surprises are non-empty. The task says: "a validation event must pair a snapshot (prediction) with the actual set of scored files that broke in the commits since it — never invent a fake association."
+
+The disproportionality root cause: most spans have NO fix/revert commit → zero events. But actually that's semantically "no breakage" — which, for the prediction meter, is a legitimate outcome (0 hits is a valid validation result!). The DREAM milestone needs "matched prediction-outcome pairs" — i.e., hits. A clean span doesn't add hits anyway.
+
+Hmm wait — what does the meter actually need? "accumulating ≥5 matched prediction-outcome pairs". Matched pairs = predicted files that broke (hits). With 88 snapshots and only 2 events, we have maybe 2 matched pairs (event1: 1 hit, event2: 2 hits = 3 pairs total). The meter starves because events only get recorded when there's a fix/revert in a span AND the newest-commit-message happens to contain "fix".
+
+The REAL defect making it worse than it should be: the parser collapse means mid-span fix commits are invisible. E.g., span 467588b..HEAD has dd719fb "Day 174: bump skill-evolve counter (5)" as newest — no "fix". Are there fix commits deeper? No — the span has 3 commits, none with fix. But other spans like 3f99fda..467588b had... let me check.
+
+Let me enumerate what the correct parser would produce per post-171 span and count how many events SHOULD have been recorded vs. the 2. That tells me the impact precisely.
+
+3. Additionally, the "clean span" case: should recording happen when nothing broke? The accuracy meter needs events to compute stats. Currently `compute_accuracy_stats`... let me check what it uses. If we only ever record when something breaks, a 0-hit event is rare (only false-positive-only spans: hits empty but scored surprises non-empty). The current semantics record only breakage-bearing spans, so "clean" outcomes are unrepresented — biasing accuracy upward. But the task is narrow (20 min) — the primary asked-for fix is the gate causing disproportionality. Let me focus:
+
+**Primary fix: parser robustness** (commit boundary detection) — this is defect (a concrete bug), and it directly explains missed events: mid-span fix commits ignored.
+
+Also, I should reconsider: is the newest-commit-message rule what ACTUALLY happened? For event 1, the newest commit in d76b695..c96395b is c96395b whose message has "eval-fix" → fix → all "files" broke → recorded. Without the parser bug, the correct parse: entries = [c96395b(files:[CLAUDE.md]) fix, dd691e6(files:[src/commands_risk.rs]) NOT-fix, 22f857b counter, 35f1efd day counter, fd51812 wrap-up]. broke = {CLAUDE.md}. hits = predicted ∩ {CLAUDE.md} = ∅ (predicted files are src/*.rs). scored surprises = ∅ (CLAUDE.md not scored). → NO EVENT would be recorded under correct parsing! Because the real fix commit dd691e6 touches src/commands_risk.rs but its message "Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)" contains no "fix"/"revert"!
+
+Interesting!! So event 1 was recorded purely BECAUSE of the parser bug (c96395b's "eval-fix" leaked onto all files). The correct behavior would have recorded nothing (a fix that doesn't say "fix"). And event 2's span has d9de762 "Add a discriminative breakage-rate signal..." — no fix; ff6b971 "..(Task 2, eval-fix 1)" contains "eval-fix" → leak again.
+
+So the "fix/revert keyword" heuristic is inherently noisy: half the real fix commits don't contain the word "fix" (they say "Task 1, eval-fix 1" or describe the change). And real fix-attempt commits appear as "eval-fix N" — which often are in the SAME day's later commits.
+
+Hmm OK. So there are two real defects:
+- D1: parser collapses commit boundaries (attribute-to-newest-message) — a genuine bug that distorts breakage detection.
+- D2: breakage signal = "fix"/"revert" substring in commit message — extremely noisy/weak: misses most real breakage, records phantom breakage.
+
+And D2 is the architectural reason only 2 events exist: with 3 sessions/day and spans of ~3-6 commits each, most spans have no commit containing "fix". And when spans DO have "fix", the parser bug may or may not surface it depending on position.
+
+Given the 20-minute budget, what's the sound, minimal fix that meaningfully increases validated pairs without inventing associations?
+
+Option A: Fix the parser (D1) only. Effect: spans with a genuine "fix"-message commit anywhere (not just newest) now count. Let me measure: for each of the ~10 post-171 spans, is there any commit whose message contains "fix"? If yes, we'd get more events. But since "fix" rarely appears (most fix-attempts are "Task N" / "eval-fix N")... hmm, "eval-fix N" contains "fix"! Those are literally the eval fix attempts. They DO contain "fix". Let me just measure.
+
+Let me quantify post-171 spans with any fix/revert commit:
+- a6f414d..ed086b1: ?
+- ed086b1..d76b695: ?
+- d76b695..c96395b: c96395b "eval-fix 1" → yes
+- c96395b..ff6b971: ff6b971 "eval-fix 1" → yes
+- ff6b971..ba1c380: ?
+- ba1c380..c5597b5: ?
+- ... etc
+
+Let me actually compute. If most spans lack "fix"/"revert" even in any commit, then fixing the parser alone won't add many events — the keyword heuristic itself is the bottleneck (D2).
+
+Option B: Also broaden the breakage signal soundly. The task says "a validation event must pair a snapshot (prediction) with the actual set of scored files that broke in the commits since it — never invent a fake association." What's a sound definition of "broke"? The current one: files touched by a commit whose message contains fix/revert. The risk meter's semantics... "broke" ≈ files that needed follow-up work (fix/revert). Broaden soundly: also include commits whose message contains "fail" (e.g., "'fix build failure'", "failed CI")? That's still keyword-based. Or include follow-up commits on the same file within the same day (a file touched by ≥2 commits in the span = churn = broke)? Hmm, that's exactly the "churn" signal — files rewritten immediately again are plausibly "broke". But that invents associations? No — a file touched by multiple commits in the span is evidence of rework, which IS outcome signal. But it's a semantic change.
+
+Given budget and navigation: The task explicitly lists candidate causes a/b/c and says "Prefer fixing (a)/(b)/(c) over weakening semantics." Let me re-read the task's framing:
+
+- (a) Span-selection gate too strict: "validate the prior snapshot" requires prior hash ancestor of HEAD... wait, does it? reading `replay_validate_last_snapshot`: it runs `git log <hash>..HEAD` — does NOT check is-ancestor. git log on non-ancestor just lists everything → NOT a gate. 77 unreachable hashes don't block. Hmm, but WAIT — actually does `git log <hash>..HEAD` for an unreachable hash really list everything? Earlier I tested `git log 0f3017f..HEAD --oneline` and it listed d0b0ff5... YES it ran fine. So (a) as literally implemented is NOT a gate... but hold on, maybe there IS an ancestor check somewhere. Let me search for is_ancestor / merge-base in the code. Earlier grep for "is_ancestor|merge-base" returned nothing in src! Let me double-check with a wider search.
+
+Actually wait — the earlier grep output only showed matches from commands_risk.rs lines 14, 4647... that grep was for "last_validation_association, load_validation_history_from" etc. The SECOND grep for is_ancestor|merge-base `grep -n "is_ancestor\|merge-base\|..." src/commands_risk.rs src/commands_risk_snapshots.rs` returned lines only from the first pattern group (last_validation_association etc.) — I see matches but they're the same as grep1. Let me redo the is_ancestor grep specifically to be sure.
+
+Also (b) date/session window: is there any window limiting? Not that I've seen — it always takes the LAST snapshot only. So no window.
+
+So causes (a) and (b) are NOT actually in the code — the real causes are (c) + the parser/keyword defects:
+- The validation only runs from `handle_risk_snapshot` (evolve.sh, added day 171) and `auto_validate_by_replay`/`auto_validate_after_failure` (opt-in/rare). Snapshot recording existed since day 134 via other paths (probably `/commit` handler calls auto_risk_snapshot AND the REPL-exit hook auto-compact... let me check call sites of auto_risk_snapshot).
+- The parser/keyword defects suppress events even when validation runs.
+
+Let me check auto_risk_snapshot call sites and confirm the history: how were snapshots recorded days 134-170 without validation?
+
+Then decide the fix. Given time budget, I'll:
+1. Fix `parse_git_log_name_only` to detect commit headers by leading hash (robust to missing blank lines) — genuine parser bug fix, unit-testable.
+2. Broaden the breakage classification soundly: treat a commit as breakage-bearing if message contains "fix", "revert", OR "failed"/"failure"...
+
+Hmm, wait. Let me think about D2 more carefully — is there a sounder signal than keywords? The purpose: prediction meter outcomes. The natural outcome: which scored files needed follow-up (fix/revert) after being predicted. The keyword approach was the original design (Day ~158-172 era). 
+
+Let me instead FIRST measure what the correct parser would yield: for each post-171 span, list commits with "fix"/"revert" in ANY position. If parser-fix alone adds events (spans where the fix commit isn't newest but exists), great — that's the sound minimal fix. If spans rarely contain "fix" at all, I'll note that and possibly extend the keyword set (fix|revert|fail|broken|regress|repair) — hmm, "eval-fix" already contains "fix", so those count.
+
+Let me measure now. Then implement.
+
+Let me also check git version / confirm no-blank-line behavior once more, and check parse behavior — I want to write a unit test reproducing the observed git output (no blank lines) to lock the parser fix.
+
+Also: check call sites of auto_risk_snapshot and auto_validate_after_failure and auto_validate_by_replay.
+────────────────────────────────────────────────────────────────────────────────
+The last-snapshot hash is reachable and the log succeeds. Now let me verify the parser's assumptions — and find where snapshots are recorded. Key observation already: the observed event-1 `surprises` list contains **commit message strings** ("22f857b Day 172: bump skill-evolve counter (2)", etc.) as if they were file paths — evidence the `parse_git_log_name_only` parser is mis-splitting the git log output.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && echo "git version: $(git --version…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "auto_risk_snapshot\|auto… ✓ (7ms)
+ ✓ (7ms)
+  2 tools completed in 1.1s (2 ✓)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && awk 'NR>=2432 && NR<=2474' src/com… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the mechanics deeply. Let me now verify the **key structural problem** with the parser: with `--name-only --oneline`, git doesn't emit blank lines between commits in this git version. The parser treats the *first* non-blank line as a commit message and subsequent non-blank lines as files. So:
+
+For span 2 (`c96395b..ff6b971`):
+```
+ff6b971 Day 172 (16:36): Add a discriminative breakage-rate signal to risk accuracy (do flagged files fail more?) (Task 2, eval-fix 1)
+src/commands_risk.rs
+src/commands_risk_accuracy.rs
+d9de762 Day 172 (16:36): Add a discriminative breakage-rate signal...
+src/commands_risk.rs
+src/commands_risk_accuracy.rs
+src/commands_risk_snapshots.rs
+03a0880 Day 172 (16:36): De-noise risk validation...
+src/commands_risk.rs
+...
+```
+
+The parser sees:
+- entry 1: msg=`ff6b971 Day 172 ...`, files=[src/commands_risk.rs, src/commands_risk_accuracy.rs, **d9de762 Day 172 (16:36): Add a discriminative...**, src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs, 03a0880 Day 172...]
+
+Wait — that's the bug! The parser **doesn't split** on the next commit header because without blank lines it has no separator. So as long as ANY entry in the whole log output (as a single giant "commit") has "fix" or "revert" in the FIRST line, then ALL files across ALL commits become the "files" of that one entry, and all of them count as "broke".
+
+Actually wait, let me re-check how event 2 got its hits. Event 2: hits = [src/commands_risk.rs, src/commands_risk_snapshots.rs], surprises = [src/commands_risk_accuracy.rs], predicted_count=10.
+
+With the merged-parser interpretation: msg = "ff6b971 Day 172 (16:36): Add a discriminative breakage-rate signal to risk accuracy (do flagged files fail more?) (Task 2, eval-fix 1)", which contains "fix" — wait "eval-fix" contains "fix"! So is_fix = true. Then files = ALL subsequent non-blank lines: src/commands_risk.rs, src/commands_risk_accuracy.rs, d9de762 ..., src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs, 03a0880 ..., src/commands_risk.rs, ca5cbba..., .skill_evolve_counter, 0cc4fbe..., .arc/risk_snapshots.jsonl, .arc/risk_validations.jsonl, journals/JOURNAL.md.
+
+broke_files = {src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs, .skill_evolve_counter, .arc/risk_snapshots.jsonl, .arc/risk_validations.jsonl, journals/JOURNAL.md}. Non-source ones filtered from surprises by is_scored_file. hits = predicted ∩ broke. Predicted top-10 probably included src/commands_risk.rs and src/commands_risk_snapshots.rs → hits = those two → 2 hits "matched". Surprises = broke non-predicted scored = src/commands_risk_accuracy.rs. That gives exactly event 2! accuracy = 2/3 = 66.7%. ✓
+
+Event 1: span d76b695..c96395b:
+```
+c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description...
+CLAUDE.md
+dd691e6 Day 172 (08:42): Close the risk-validation cold-start...
+src/commands_risk.rs
+22f857b Day 172: bump skill-evolve counter (2)
+.skill_evolve_counter
+35f1efd Day 172: update day counter
+DAY_COUNT
+fd51812 Day 172 (01:28): session wrap-up
+.arc/risk_snapshots.jsonl
+journals/JOURNAL.md
+```
+Merged: msg = c96395b..., contains "fix"? "risk-validation" — no "fix". Hmm "validation" doesn't contain "fix". Neither does the message... wait, we need is_fix or is_revert for a broke classification! But event 1 WAS recorded with hits=[src/commands_risk.rs], surprises=[those strings]. 
+
+Hmm — wait. The surprises in event 1 contain commit messages as "file paths": "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)", "fd51812 Day 172 (01:28): session wrap-up", "CLAUDE.md", "DAY_COUNT", ".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "journals/JOURNAL.md", "d76b695"? No, git_hash_from=d76b695, predicted_count 10, hits=[src/commands_risk.rs].
+
+Interesting. So the surprises for event 1 look like they were a merge of files AND commit messages — but 22f857b, 35f1efd, dd691e6, fd51812 lines were treated as FILES (they're in surprises). But src/commands_risk.rs was a hit... and "dd691e6 ... (Task 1)" treated as a file, its own message not containing "fix"...
+
+Wait, this contradicts my merged-parser theory. Let me think again. If the parser had NO blank lines and merged everything into one entry, then the single msg = "c96395b Day 172 (08:42): Update CLAUDE.md risk-validation description to match new snapshot-also-validates behavior (Task 2, eval-fix 1)". Does that contain "fix"? Yes! "eval-**fix** 1"! So is_fix=true, files = all lines after: [CLAUDE.md, dd691e6 Day 172..., src/commands_risk.rs, 22f857b..., .skill_evolve_counter, 35f1efd..., DAY_COUNT, fd51812..., .arc/risk_snapshots.jsonl, journals/JOURNAL.md]. All those become broke_files. 
+
+hits = predicted ∩ broke = {src/commands_risk.rs} (if predicted). **But wait — the surprises list contains the commit-message strings** ("22f857b Day 172: bump skill-evolve counter (2)", etc.). But surprises filter by is_scored_file — those aren't src/*.rs files! So how did those get into surprises??
+
+Look again at event 1 surprises: [".arc/risk_snapshots.jsonl", ".skill_evolve_counter", "22f857b Day 172: bump skill-evolve counter (2)", "35f1efd Day 172: update day counter", "CLAUDE.md", "DAY_COUNT", "dd691e6 Day 172 (08:42): Close the risk-validation cold-start by making `risk snapshot` also validate the prior snapshot (Task 1)", "fd51812 Day 172 (01:28): session wrap-up", "journals/JOURNAL.md"]. These are NOT scored files! But the current `compute_validation` filters surprises by `is_scored_file`. So event 1 must have been recorded by an OLDER version of compute_validation that did NOT filter surprises by is_scored_file. Indeed grep showed commit 03a0880 "De-noise risk validation by filtering non-source churn out of accuracy (Task 1)" — that de-noise landed between the two events. Event 1 (day 171, 09:20) recorded before the de-noise; event 2 (day 172, 17:15) after. That explains the surprise difference. 
+
+OK so now I understand: the parser merges all commits into ONE CommitEntry because git 2.55 doesn't emit blank lines between commits with `--oneline --name-only`. The "files" list contains both file paths AND subsequent commit-header lines (as strings). classify_broke_files: msg contains "fix" (from "eval-fix") → EVERYTHING (all lines incl. commit headers and non-source) counts as broke. Then surprises were the non-source strings (pre-de-noise version). And is_scored_file keeps breaking (filtering non-source).
+
+So the DEEP structural bug: **the git-log parsing collapses all commits into a single entry because `git log --oneline --name-only` in git 2.55 has no blank line separators.** This makes the "validation" mostly garbage: the first span's "actual breakage" = whole history, and later spans' classification depends on whether ANY commit message in the merged blob contains "fix"/"revert" — which "eval-fix" always does. So events fire only when the merged first-line message contains fix/revert... wait, no: msg is the FIRST line only (c96395b...). If the first commit's message doesn't contain "fix", then is_fix=false and is_revert=false → broke_files empty → no hits/surprises → no event! 
+
+Ah, THIS is the starvation mechanism! `classify_broke_files` only classifies a commit as breaking if **its message** contains fix/revert. With the parser collapsing everything into one entry, breaking-ness depends only on the FIRST commit's message (c96395b, ...eval-fix...). But wait — for event 2, first commit ff6b971 has "eval-fix 1" → contains "fix" ✓ → event recorded. And span 3 (467588b..HEAD): first commit = d0b0ff5 "skill-evolve: reset counter (cycle 2026-08-21T17:05Z)" — no "fix"/"revert" → is_fix=false → broke_files empty → NO EVENT. That's why span 3 produced nothing!
+
+But even then, would span 1 have produced an event with the OLD parser (no blank lines)? Yes, because "eval-fix" was in the first message.
+
+Now let me explain why 88 snapshots → only 2 events overall:
+
+1. Before day 171 (the "Close the risk-validation cold-start" change, a6f414d/161... wait the evolve.sh change landed day 171 in a6f414d), `arc risk snapshot` did NOT validate the prior snapshot. Only `/risk validate` manual CLI and the opt-in REPL-exit `auto_validate_by_replay` (gated behind arc_RISK_AUTOSNAPSHOT=1, off by default) ran validation. Looking at the recorded events: both have trigger "replay", days 171 and 172.
+
+2. Even after the day-171 change, the validation half fires only when:
+   - The last snapshot's git hash is reachable (77/88 unreachable → but only the LAST snapshot matters, not all 88)
+   - There are commits since the last snapshot (usually yes)
+   - **At least one commit in the span "broke" (fix/revert message)** — with the merged parser, only the FIRST commit's message matters
+   - AND at least one predicted file was among or some surprise exists (hits/surprises non-empty — always true when is_fix fire, since files list non-empty... well needs predicted∩broke or scored surprise)
+
+3. The 3-per-day cadence: the snapshots are recorded ~3/day, but validation only fires on `risk snapshot` when the prior snapshot's span contains a fix/revert commit — most spans between sessions contain only "bump skill-evolve counter" / "session wrap-up" / "Day N: bump day counter" commits with no fix/revert messages → no validation event. ALSO the parser bug merges all commits, so only the FIRST commit in the span's message matters, making it pure luck.
+
+Wait, let me re-examine: with a correct parser (blank separators — which git 2.55 doesn't give), each commit's own message is checked. Then "fix" in commit messages like "Day 172 (16:36): Add a discriminative breakage-rate signal ... (Task 2, eval-fix 1)" would fire... hmm, "eval-fix" contains "fix". That's a false positive — "eval-fix" is a fix-attempt label, not actual breakage! So even the two existing events are based on tenuous signal ("eval-fix" strings in messages).
+
+Let me quantify more about event recording conditions for the real data:
+- The span for event 1: d76b695..c96395b — includes dd691e6 (the day-171 change itself, "Close the risk-validation cold-start..."), commit message doesn't contain fix/revert but c96395b has "eval-fix 1" → fire.
+- Event 2: c96395b..ff6b971 — ff6b971 "Add a discriminative breakage-rate signal ... (Task 2, eval-fix 1)" → fire.
+- Span 3 (467588b..HEAD): d0b0ff5, dd719fb, 56e131e — none contains fix → no event.
+
+Also, importantly: `parse_git_log_name_only` treats the blank line as the separator, but git 2.55 with `--oneline --name-only` doesn't print blank lines. Hmm wait — let me double check: older gits DID print a blank line after each commit's file list with --name-only. In git 2.55, apparently not (I verified grep -c '^$' = 0 above). Hmm, actually wait — the `--oneline` + `--name-only` combination: is the blank line suppressed? Let me test without --oneline... Actually I verified grep -c '^$' => 0 for `git log c96395b..ff6b971 --name-only --oneline`. So yes, no blank lines.
+
+Actually hold on, let me check whether there is a blank line *before* the first commit... no, output started directly with the commit line. And between commits there's no blank line, just file lines then next commit header directly. So the parser:
+- entry 1 msg = first commit header
+- files = [its files, next commit header, its files, next header, ...] — EVERYTHING after
+- never sees a blank line → never flushes intermediate entries → ONE entry total.
+
+So the "commit_count" = 1 (entries.len() == 1). And broke classification depends on first header only.
+
+Now the FIX. The task says:
+- Prefer fixing (a)/(b)/(c) over weakening semantics.
+- (a) Span-selection gate: requires prior hash to be ancestor; verify reachability. 77/88 unreachable — BUT only the LAST snapshot matters for the `risk snapshot` validate-prior path. If the last snapshot's hash is unreachable, `git log {hash}..HEAD` silently lists ALL of history (success) → the validation then pairs the snapshot against the ENTIRE history as "commits since" — a fake association! That's unsound. Hmm, actually wait — it's not a fake association per se (the snapshot really predates... no it doesn't necessarily — if the hash is unreachable, the snapshot may not even be an ancestor; the commits listed might include commits that happened BEFORE the snapshot... no wait, unreachable hash might be an ancestor whose history
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+

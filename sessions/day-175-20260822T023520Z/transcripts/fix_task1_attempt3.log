@@ -1,0 +1,237 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. The evaluator says the task was never implemented — I need to:
+
+1. Read `auto_validate_by_replay` in `src/commands_risk.rs` and the validation helpers in `src/commands_risk_snapshots.rs`
+2. Determine why only 2 validation events exist out of 88 snapshots
+3. Fix the cause (soundly)
+4. Add a unit test for the fixed gate
+5. Verify with cargo fmt/clippy/build/test
+
+Let me start by reading the relevant code and data.
+────────────────────────────────────────────────────────────────────────────────
+I'll start by examining the current state and reading
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && wc -l .arc/risk_snapshots.jsonl .a… ✓ (3ms)
+ ✓ (7ms)
+  2 tools completed in 884ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The working tree is clean at d0b0ff5. The task wasn't implemented. Let me look at the actual code that needs to be diagnosed: `auto_validate_by_replay` in src/commands_risk.rs and the snapshot helpers in src/commands_risk_snapshots.rs.
+
+Let me read the relevant code.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -3 .arc/risk_snapshots.jsonl … ✓ (3ms)
+ ✓ (17ms)
+  2 tools completed in 1.3s (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "auto_validate_by_replay" … ✓ (2ms)
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2460..2640 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me find `replay_validate_last_snapshot` and `replay_validate_core` definitions.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn replay_validate_last_s… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "replay_validate" src/comm… ✓ (3ms)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "replay_validate_last_sna… ✓ (6ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2260..2410 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me continue reading this function and then look at the caller `replay_validate_last_snapshot`.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2410..2540 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at how `arc risk snapshot` in dispatch_sub.rs calls this — the "validate prior snapshot" half. Let me look at the handle_risk function and the snapshot part.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the `handle_risk` snapshot path and how the two halves connect (`dispatch_sub.rs` and the snapshot writing
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1340..1430  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk" src/dispatch_sub.rs… ✓ (1ms)
+ ✓ (4ms)
+  2 tools completed in 1.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `handle_risk` — the routing of the `snapshot` subcommand, and understand where validation fires. The `handle_risk_snapshot` calls `replay_validate_last_snapshot()` before writing a new snapshot. Let me trace the counts:
+
+- 88 snapshots in `.arc/risk_snapshots.jsonl` — this fires once per evolve session via `arc risk snapshot` in evolve.sh.
+- 2 validation events in `.arc/risk_validations.jsonl`.
+
+Both involve `replay_validate_last_snapshot()`: this only replays the LAST snapshot. When `arc risk snapshot` runs, it validates the prior (last) snapshot, but only if:
+1. The last snapshot has predictions (top_10)
+2. There are commits since the last snapshot hash (`git log {hash}..HEAD` non-empty)
+3. `git log {hash}..HEAD` succeeds (`.ok()?`) — if the hash is unreachable (force-push), git errors out and `None` is returned
+
+Wait — actually, `replay_validate_last_snapshot()` returning `None` when the last snapshot hash is unreachable would mean the validation never fires AND also... wait, does `handle_risk_snapshot` still write the new snapshot? Yes — the `if let Some(v) = ...` block just skips the validation note. Then the snapshot write happens regardless.
+
+So the key issue: how many of the 88 snapshot hashes are reachable from HEAD? If the repo does periodic `git push -f` cleanup / rebases, most old snapshot hashes may be unreachable. Also since each session validates the PRIOR snapshot, only the last snapshot needs to be reachable — but `replay_validate_last_snapshot` reads the last snapshot only. Hmm, but wait — with only 2 validation events, each firing from "validate the prior snapshot" half... but there are 88 snapshots. So either:
+- Most times the last snapshot's hash was unreachable (force-push changes HEAD?), OR
+- The last snapshot had no commits since it (i.e., snapshot written at end of session and validated at start of next → there should be commits), OR
+- dedup: `last_validation_association` returns the last association, and if from==last.git_hash && to==head_hash it's deduped. That only dedups the exact same span.
+
+Wait, actually there's a subtle bug: dedup only checks the LAST validation association. If the same snapshot hash spans multiple HEADs... that's fine.
+
+Let me check the git history for force-pushes and hash reachability. Let me first check the snapshot hashes and see which are reachable.
+
+Also importantly — "snapshot" writes use short hashes (7 chars?). `rev-parse --short HEAD` gives short hash. When `git log {shorthash}..HEAD` runs, git resolves short hashes via the reflog/object database. But short hashes... if the commit was force-pushed away and garbage collected, the object may be gone.
+
+Let me actually check reachability of the 88 snapshot hashes.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the snapshot hashes for reachability — the core diagnostic:
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (19 lines) ✓ (159ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The diagnosis is clear: 77 of 88 snapshots reference unreachable git hashes (periodic `git push -f` cleanup / history rewriting makes most historical hashes unreachable). Only 11 are reachable.
+
+Now, `replay_validate_last_snapshot` only validates the LAST snapshot. So the count of validation events depends on:
+1. The last snapshot's hash being reachable (git log `{hash}..HEAD` works)
+2. Commits since then
+3. Something actually breaking (hits or surprises non-empty)
+
+The current code only ever replays the *last* snapshot. So even though 77/88 hashes are unreachable, the only one that matters for `replay_validate_last_snapshot` is the *last* one. Let me check what the last snapshot's hash is and whether it's reachable.
+
+From earlier: last 3 snapshots are `709cc09` (day 173), `3f99fda` (day 174), `467588b` (day 174). 
+
+Wait — but the validations were recorded on days 171 and 172. The snapshots from day 173/174 exist... but did validation fire? Current HEAD is d0b0ff5. Let me check reachability of these last snapshot hashes.
+
+Also let me think about the actual mechanism: `arc risk snapshot` in evolve.sh calls `handle_risk_snapshot` which first calls `replay_validate_last_snapshot()`. That validates the last snapshot at the time of the call, against commits since its hash up to HEAD. For this to record:
+- git log `{last_hash}..HEAD` must work (hash reachable)
+- There must be commits since (almost always true)
+- `!hits.is_empty() || !surprises.is_empty()` — something must have broken. Note both hits AND surprises being empty means no validation event is recorded!
+
+That's a big gate: **if nothing broke** (no src changes in the span, or changes don't touch scored files), no event is recorded. Actually let me look at compute_validation — what are hits/surprises? hits = predicted files that broke. surprises = files that broke but weren't predicted. If the commits since the snapshot touched no scored src files (e.g., only docs, skill-evolve counter bumps, CI config), then both hits and surprises would be empty → no event recorded.
+
+But more importantly: **only the LAST snapshot is ever validated**. The task says "88 snapshots yield only 2 validation events". Even if every session validated the prior snapshot, we'd only get ~1 event per session at most, and it's deduped by association (from==last.git_hash && to==head_hash). Sessions run 3/day. But with 88 snapshots over ~40 days (day 131→174 ish)... only 2 events. So something is gating hard.
+
+Key causes:
+1. **77/88 hashes unreachable** — but only the last matters for the existing code path.
+2. The main gate is that validation only fires for the *last* snapshot at the time `arc risk snapshot` runs, and requires `!hits.is_empty() || !surprises.is_empty()`.
+
+But actually the more fundamental issue: the existing `replay_validate_last_snapshot` validates only ONE snapshot (the last). The task's DREAM milestone wants ≥5 matched prediction-outcome pairs. With only one snapshot validated per session and heavy dedup, plus unreachable hashes, the count stays low.
+
+Wait, but actually, let me reconsider. Let me check the day-171/172 events. Day 171 event: git_hash_from d76b695 → git_hash_to c96395b. Day 172: c96395b → ff6b971. So the day-172 snapshot was validated against day-171's... wait no. The day-171 event validates snapshot at d76b695 against commits up to c96395b. Then day 172's event uses snapshot c96395b → ff6b971. That's the "validate prior snapshot" cadence working — each session validates the prior session's snapshot, IF the span had breakage.
+
+So the current code DOES produce one event per session when conditions are met. Yet only 2 events over 88 snapshots. Why?
+
+The conditions for `handle_risk_snapshot`'s replay to record:
+1. Last snapshot (at call time) has non-empty predicted (it does, always — top 10)
+2. `git log {hash}..HEAD --name-only --oneline` non-empty — requires the hash be reachable/present
+3. hits ∪ surprises non-empty — requires the commits since to have touched scored files
+
+Let me check how many spans would even qualify. Actually the key question: which snapshot hashes were the "last" at each `arc risk snapshot` call in evolve.sh, and were their hashes reachable at that time?
+
+Hmm, but here's the thing — the snapshot is written AFTER the replay in the same command. The snapshot's git_hash is the HEAD at the time of the session. In evolve.sh, `arc risk snapshot` runs at some point during the session. The replay happens BEFORE writing the new snapshot, so at replay time, the last snapshot is from the prior session, and its hash is the HEAD at the end of the prior session (or whenever the prior session ran its `arc risk snapshot`).
+
+Here's a likely killer: **`git push -f` cleanup makes prior-session HEADs unreachable**. The evolve loop runs on GitHub Actions with ephemeral runners... wait, actually the evolve loop commits and pushes to main. Then `arc risk snapshot` runs — what's the HEAD at that point? If the snapshot command runs right after the session's commits are pushed, the prior snapshot's hash (a commit from the prior session) should be an ancestor of current HEAD... unless history was rewritten via force-push between sessions.
+
+I verified: 77/88 unreachable NOW. Since sessions run 3/day, and the validations only check the last snapshot, the question is whether the last snapshot's hash was reachable at session time. If a force-push cleanup happens (the repo does periodic `git push -f` cleanup per the task description), then the previous session's commits get replaced by new commits with different hashes → prior snapshot hash becomes unreachable → `git log {prior_hash}..HEAD` fails → `.ok()?` returns None → no validation.
+
+But actually with only 2 validations in ~40 days, and sessions every 8h, the forces are probably: (a) most prior hashes unreachable at replay time due to regular-ish force-push rebasing, (b) the hits/surprises-empty gate when nothing broke.
+
+Let me think about what a *sound* fix could be that respects the "validate a snapshot (prediction) against the actual set of scored files that broke in commits since it" semantics:
+
+**Option A: When the last snapshot's hash is unreachable, fall back to the most recent *reachable* snapshot.** But that changes semantics — the span would be huge (from an old snapshot to HEAD), and the "prediction" would be very stale. Is that sound? A validation event pairs a snapshot with actual breakage since it. If we pick the most recent reachable snapshot, that's still a genuine pairing — the prediction was made at that snapshot's time, and we compare against commits since it. It's sound. It would recover the 11 reachable snapshots.
+
+**Option B: Validate ALL reachable snapshots, not just the last.** The task says "why 88 snapshots yield only 2 validation events" — the dream milestone needs ≥5 matched pairs. Currently only the last snapshot is ever validated. If we replay every snapshot that has commits since it and hasn't been validated yet (dedup by association), we could accumulate many pairs from the 11 reachable snapshots. This is a more complete fix: iterate over snapshots (oldest→newest or newest→oldest), for each reachable one, git log hash..HEAD, compute validation, dedup, write. But wait — that requires distinguishing reachable vs unreachable and only validating reachable ones. Also each event dedups by (from, to) association — currently `last_validation_association` only checks the LAST association! Let me re-read that.
+
+Let me look at `last_validation_association` and `write_validation_event`:
+
+From the grep: `last_validation_association` at line 160 of commands_risk_snapshots.rs. Let me read it.
+
+Also there's the day-171 event which has NO scored_broke/total_scored (older format, accuracy_pct 10.0 with surprises including git log output lines — wait, look at the first event's surprises: `.arc/risk_snapshots.jsonl`, `.skill_evolve_counter`, `22f857b Day 172: bump skill-evolve counter (2)`, `35f1efd Day 172: update day counter`, `CLAUDE.md`, `DAY_COUNT`, `dd691e6 ...`, `fd51812 ...`, `journals/JOURNAL.md`. These are git log lines that aren't file paths! That looks like the old format misclassifying commits as file breaks, or surprise files being raw log lines. Hmm, that's the day-171 event — computed via compute_validation where surprises include non-src files. Actually the classifier `classify_broke_files` probably extracts src file paths and treats the rest as surprises? No — surprises in the day 171 event include commit subjects. Let me look at `parse_git_log_name_only` and `classify_broke_files` to understand.
+
+Actually the day-172 event looks cleaner: surprises [src/commands_risk_accuracy.rs], hits [commands_risk.rs, commands_risk_snapshots.rs], total_scored 77, scored_broke 3. That's the new format.
+
+The day-171 event has no scored_broke — it's the old format without the lift measurement. And its surprises contain non-file lines (commit messages). Wait, but the current `replay_validate_core` persists surprises filtered to scored files... The day-171 event wrote surprises that include "22f857b Day 172: bump skill-evolve counter (2)" — that's a git log oneline! So the day-171 event predates some code change. Fine.
+
+Now the plan. The evaluator said the task was never implemented and the tree is clean. I need to:
+1. Do the diagnosis (done — 77/88 unreachable).
+2. Fix the cause soundly.
+3. Add a unit test for the fixed gate in commands_risk_snapshots.rs.
+4. Honest note in task summary.
+
+Let me now read the relevant snapshot-side functions to understand dedup and structure: `last_validation_association`, `write_validation_event`, `parse_all_snapshots`, `last_snapshot_git_hash`, and the git helper `run_git`.
+
+The sound fix design:
+
+**Core problem**: `replay_validate_last_snapshot` only validates the *last* snapshot, and bails with `None` if the last snapshot's hash is unreachable (`git log {hash}..HEAD` fails → `.ok()?` → None). With 77/88 unreachable and the last one often unreachable after force-push cleanup, validation starves.
+
+**Fix**: Generalize the replay to walk snapshots (newest → oldest) and validate *reachable, unvalidated* snapshots:
+- For each snapshot with non-empty predicted:
+  - Check if already validated for its association (dedup via full history, not just last association)
+  - Run `git log {hash}..HEAD`; if it fails (unreachable hash) → skip (sound: can't pair with actual commits)
+  - If there are commits since AND there's breakage (hits or surprises) → record
+- Return the most recent validated one (or the most recent candidate) to preserve the existing single-result report API.
+
+But careful: writing a validation event for EVERY snapshot with breakage could produce many events at once, and each must be a genuine pairing. That's sound. The dedup must check against ALL existing events' (from, to) associations, not just the last.
+
+Wait, but there's an ordering subtlety for dedup: currently `last_validation_association` only checks the last association, so re-running on the same HEAD doesn't double-count (the same (from,to) would match the last one). If I generalize to iterate multiple snapshots, dedup for each must check whether (snapshot.hash, head) already exists anywhere in the file. Let me look at the functions.
+
+Also there's a concern: if I walk ALL reachable snapshots and validate each against HEAD, the "span" for old snapshots is huge (e.g., 40 days of commits). The event pairs a very stale prediction with a long span. That's still a genuine (prediction, outcome) pair — the prediction was a real snapshot, and we're honestly computing what broke since. But the accuracy semantics get muddied — a prediction from day 140 being evaluated against 34 days of commits isn't a great signal. The dream wants "matched prediction-outcome pairs" — each snapshot → outcome. I think validating each reachable unvalidated snapshot against commits since its hash to HEAD is the honest generalization.
+
+Hmm, but wait — should I limit to the most recent snapshot per the "20 minute task" scope? The task explicitly says: "Fix the cause you find. Only loosen gates in ways that stay sound... Prefer fixing (a)/(b)/(c) over weakening semantics." Cause (a) is unreachable hashes. The minimal sound fix: when the last snapshot's hash is unreachable, fall back to the most recent *reachable* snapshot. That directly addresses (a) and stays sound.
+
+But does it help accumulate ≥5 pairs? Currently only the last snapshot is validated per session → 1 pair per session max. With 2 validations in 40 days... falling back to the most recent reachable snapshot only adds 1 more potential pair. To reach ≥5 pairs the dream milestone needs, validating reachable unvalidated snapshots across history seems necessary.
+
+Actually, let me re-read the "Why": "The harness feed works — `arc risk snapshot` fires every evolve session — but the validation half is starved: 88 snapshots ... versus only 2 events". The milestone is "accumulating ≥5 matched prediction-outcome pairs". The natural interpretation: each snapshot should eventually produce one matched pair. So the fix should validate ALL snapshots (that can be soundly paired), not just the last.
+
+Let me design:
+
+```rust
+/// Replay all validated-able snapshots against commits since their git_hash.
+/// Returns the most recent ReplayValidated (for the single-result report API).
+fn replay_validate_snapshots() -> Option<ReplayValidated> {
+    let content = fs::read_to_string(RISK_SNAPSHOT_PATH).ok()?;
+    let snapshots = parse_all_snapshots(&content);
+    let all_risks = compute_file_risk_scores();
+    let all_ranked: Vec<String> = ...;
+    let head_hash = ...;
+    let val_path = Path::new(RISK_VALIDATION_PATH);
+    let mut last_recorded: Option<ReplayValidated> = None;
+    for snap in snapshots.iter().rev() {  // newest first
+        if snap.predicted.is_empty() { continue; }
+        // skip if already validated for this association
+        let log_output = run_git(["log", format!("{}..HEAD", snap.git_hash), "--name-only", "--oneline"]).ok();
+        let Some(log) = log_output else { continue }; // unre
+
+  error: Stream ended
+  💡 The API stream ended without the expected termination signal.
+     This is common with some providers (e.g. MiniMax) whose SSE format 
+     differs slightly from the OpenAI standard. The response was likely 
+     delivered in full — check the output above. Not retrying.
+
+
