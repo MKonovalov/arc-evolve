@@ -4,6 +4,30 @@ All notable changes to **arc-agent** (`cargo install arc-agent`) are documented 
 
 This project is a self-evolving coding agent — every change was planned, implemented, and tested by arc itself during automated evolution sessions. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.17] — 2026-08-22
+
+The risk sense-organ maturation release (Days 172–175). The `/risk` prediction meter graduates from a cold-start curiosity into a calibrated instrument: the mutation-survival sensor folds into per-file risk scoring, the risk report shows per-file signal tags at a glance, and accuracy is now broken down per signal with a discriminative breakage-rate question ("do flagged files actually fail more?"). The cold start is attacked from both ends — `risk snapshot` now also validates the prior snapshot, and an opt-in `arc_RISK_AUTOSNAPSHOT=1` auto-replay closes the loop on REPL exit. Around it: dotenv-style API-key loading (`arc` now finds keys in `.env` files), `!?` bang-capture keeps the working directory you ran `!` in, and the mutation-runner emits per-file survival JSON so the sensor has plumbing end to end.
+
+### Added
+
+- **Dotenv-style API key loading** — `arc` reads `.env` files (project-local then home) when resolving provider API keys via `load_cwd_dotenv`, so keys living in `.env` work without exporting them in the shell (Day 175)
+- **Mutation-survival sensor plumbing** — `run_mutants.sh` emits a per-file mutation-survival summary (`.arc/mutants_per_file.json`), establishing the raw signal the risk sense organ consumes (Day 173)
+- **Discriminative breakage-rate signal** — risk accuracy now asks "do flagged files fail more?" with a breakage-rate comparison between flagged and unflagged churn, alongside the existing per-signal match rate (Day 172)
+
+### Improved
+
+- **Mutation survival folded into risk file scoring** — the mutation-survival sensor is now a first-class signal in `compute_file_risk_scores`, so files that resist mutation testing read as lower-risk in the same way historically-churned or recently-failed files do (Day 174)
+- **Per-file signal tags in the risk report** — `/risk` output shows which signals fired for each file (incl. the new mutation sensor) at a glance instead of burying the breakdown (Day 174)
+- **Per-signal accuracy breakdown** — accuracy stats are computed per signal name (`compute_per_signal_hits`), so once the ≥5 matched prediction-outcome pairs accumulate, it's visible *which* signals actually predicted (Day 173)
+- **Cold-start closure on both ends** — `arc risk snapshot` now ALSO replays-validates the prior snapshot against commits since it (snapshot and validation accumulate in lockstep, deduped by git hash), and opt-in `arc_RISK_AUTOSNAPSHOT=1` runs the same auto-replay on interactive REPL exit — both product-safe, off by default (Days 172, 175)
+- **Gate the accuracy lift on the dream's ≥5-pair threshold** — the richer accuracy report only unlocks once the cold-start milestone's matched-pair count is reached, with milestone progress surfaced (Day 173)
+- **Bang-capture keeps the working directory** — `!` run in a subdirectory followed by `!?` now feeds the captured output with the correct cwd context (Day 173)
+- **Non-source churn de-noised from validation** — non-source file churn no longer pollutes risk-accuracy numbers, so the meter measures code changes that actually matter (Day 172)
+
+### Fixed
+
+- **arcpedia no-ops no longer hide silently** — recall/ingest now surface the arcpedia-unreachable-in-evolve reality instead of failing quietly, so a silent no-op can't masquerade as a successful vault write (Day 172)
+
 ## [0.1.16] — 2026-08-07
 
 Cut to expose the `opencode-go` / `nousresearch` / `zai` provider support (PR #6) via `releases/latest`, so consumers (arc-action → arcpedia) install a binary that recognizes `opencode-go` as a native provider.
