@@ -21,6 +21,15 @@ arc --api-key sk-ant-...
 > environment variable first or press Ctrl+C to cancel. Re-running setup over
 > an existing config backs it up to `.arc.toml.bak` and preserves any settings
 > the wizard doesn't manage (e.g. `auto_watch`).
+>
+> **`.env` support:** arc also reads provider API keys from a `.env` file in
+> the current directory when the environment variable is not set. This works
+> in any directory that keeps secrets in a `.env` file (the standard for a
+> decade). Precedence is process environment > `.env` file — if
+> `ANTHROPIC_API_KEY` (or the key for your configured provider) is set in the
+> shell, it wins; otherwise a `KEY=value` entry in `.env` in your CWD is used.
+> Keys are parsed as `KEY=value` lines; `#` comments and an optional `export `
+> prefix are supported.
 
 You'll see a banner like this:
 

@@ -3543,4 +3543,95 @@ command = "server-two"
         assert!(config2.auto_edit);
         assert!(!config2.auto_approve, "--auto-edit should not imply --yes");
     }
+
+    #[test]
+    fn test_parse_dotenv_basic() {
+        // comments, optional `export ` prefix, whitespace trimming,
+        // and unquoted/single-quoted/double-quoted values
+        let content = "\
+# a full-line comment
+FOO=bar
+export BAZ=qux
+  TRIMMED =  spaced value  
+EMPTY=
+QUOTED='single quotes'
+DQ=\"double quotes\"
+also_export = value
+no_equals_here
+";
+        let map = parse_dotenv(content);
+        assert_eq!(map.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(map.get("BAZ").map(String::as_str), Some("qux"));
+        assert_eq!(map.get("TRIMMED").map(String::as_str), Some("spaced value"));
+        assert_eq!(map.get("EMPTY").map(String::as_str), Some(""));
+        assert_eq!(map.get("QUOTED").map(String::as_str), Some("single quotes"));
+        assert_eq!(map.get("DQ").map(String::as_str), Some("double quotes"));
+        assert_eq!(map.get("also_export").map(String::as_str), Some("value"));
+        assert!(!map.contains_key("no_equals_here"));
+        assert!(!map.contains_key("comment"));
+    }
+
+    #[test]
+    fn test_parse_dotenv_blank_and_comments_only() {
+        let map = parse_dotenv("\n# only a comment\n   \n\t\n");
+        assert!(
+            map.is_empty(),
+            "blank/comment-only file yields an empty map"
+        );
+    }
+
+    #[test]
+    fn test_parse_dotenv_duplicate_last_wins() {
+        let map = parse_dotenv("KEY=first\nKEY=second\n");
+        assert_eq!(map.get("KEY").map(String::as_str), Some("second"));
+    }
+
+    #[test]
+    fn test_parse_dotenv_inline_hash_kept_in_value() {
+        // trailing `#` is part of the value (matching the doc comment:
+        // inline comments are NOT stripped, values may contain `#`)
+        let map = parse_dotenv("KEY=sk-#fragment\n");
+        assert_eq!(map.get("KEY").map(String::as_str), Some("sk-#fragment"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_api_key_env_precedence() {
+        // Precedence: process env > .env in CWD > none.
+        let key = "arc_TEST_DOTENV_KEY";
+        std::env::remove_var(key);
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env"), format!("{key}=from-dotenv\n")).unwrap();
+
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tmp.path()).unwrap();
+
+        // 1. env var unset -> .env value is used
+        assert_eq!(
+            resolve_api_key_env(key).as_deref(),
+            Some("from-dotenv"),
+            ".env value should be used when env var is unset"
+        );
+
+        // 2. env var set -> process env wins over .env
+        std::env::set_var(key, "from-env");
+        assert_eq!(
+            resolve_api_key_env(key).as_deref(),
+            Some("from-env"),
+            "process env must take precedence over .env"
+        );
+
+        // 3. env var set but empty -> treated as unset, .env value used
+        std::env::set_var(key, "");
+        assert_eq!(
+            resolve_api_key_env(key).as_deref(),
+            Some("from-dotenv"),
+            "empty env var should fall through to .env"
+        );
+
+        // restore
+        std::env::remove_var(key);
+        std::env::set_current_dir(orig_cwd).unwrap();
+    }
 }
