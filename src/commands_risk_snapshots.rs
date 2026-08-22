@@ -1188,7 +1188,10 @@ mod tests {
         let meter = compute_risk_meter(snapshot_content, validation_content);
         assert_eq!(meter.snapshots, 3);
         assert_eq!(meter.validations, 4);
-        assert_eq!(meter.pairs, 2, "only scored_broke > 0 events count as matched pairs");
+        assert_eq!(
+            meter.pairs, 2,
+            "only scored_broke > 0 events count as matched pairs"
+        );
         assert_eq!(meter.last_snapshot_day, 174);
         assert_eq!(meter.target_pairs, RISK_METER_TARGET_PAIRS);
     }
