@@ -1,0 +1,286 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by looking at the current state of `load_cwd_dotenv` and `parse_dotenv` in `src/cli.rs` to understand the code I need to split.
+  ▶ search 'fn (load_cwd_dotenv|parse_dotenv|resolve_api_key_env)' in src/cli.rs  ▶ $ sed -n '1,60p' src/cli.rs ✓ (4ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 549ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search tool didn't find the pattern — maybe because of how the functions are named. Let me search for `load_cwd_dotenv` directly.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'load_cwd_dotenv|parse_dotenv|resolve_api_key_env' in src/cli.rs ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Hmm, no matches found? That's odd. Let me check the file exists and search for "dotenv" generally.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "dotenv" src/ | head -50; echo "---"; grep -rn "load_cwd_dotenv" . --in… ✓ (31ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:55..135 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — there are already tests around line 3590-3630 that seem to test dotenv file loading. Let me look at the existing tests to see what's already there.
+────────────────────────────────────────────────────────────────────────────────
+Interesting — there are already some tests near line 3600. Let me look at the existing test block.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/cli.rs:3540..3640 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the current state. There's already a `test_resolve_api_key_env_precedence` test that uses `set_current_dir` with `#[serial]`. The task wants me to:
+
+1. Add `pub fn load_dotenv_from(dir: &std::path::Path) -> HashMap<String, String>` that reads `dir/.env` and runs `parse_dotenv`.
+2. Reimplement `load_cwd_dotenv()` as a one-liner delegating to `load_dotenv_from(&std::path::Path::new("."))`.
+3. Add tests `test_load_dotenv_from_reads_file` and `test_load_dotenv_from_missing_file_returns_empty`.
+4. Update `docs/src/contributing/testing.md` with one sentence.
+5. Possibly update CLAUDE.md if wording matches.
+
+Let me check if `tempfile` is available as a dev-dependency (it's used in the existing test). Yes, `tempfile::TempDir::new()` is used, so it's available.
+
+Let me make the changes now. First the split:
+────────────────────────────────────────────────────────────────────────────────
+The current state is clear. The task wants a directory-scoped pure function with hermetic tests. There's already a `#[serial]` test using set_current_dir — but the new tests must avoid that. Let me make the surgical changes.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ edit src/cli.rs (10 → 19 lines)
+  - /// Best-effort read of the `.env` file in the current working directory.
+  + /// Best-effort read of the `.env` file in a given directory.
+    ///
+  - /// Only the CWD is checked (no upward walk, no system dirs). Returns an empty
+  - /// map when the file is missing or unreadable — `.env` is purely additive.
+  - pub fn load_cwd_dotenv() -> std::collections::HashMap<String, String> {
+  -     match std::fs::read_to_string(".env") {
+  + /// Reads `dir/.env` and parses it with [`parse_dotenv`]. Only that directory is
+  + /// checked (no upward walk, no system dirs). Returns an empty map when the file
+  + /// is missing or unreadable — `.env` is purely additive.
+  + pub fn load_dotenv_from(dir: &std::path::Path) -> std::collections::HashMap<String, String> {
+  +     match std::fs::read_to_string(dir.join(".env")) {
+            Ok(content) => parse_dotenv(&content),
+            Err(_) => std::collections::HashMap::new(),
+        }
+  + }
+  + 
+  + /// Best-effort read of the `.env` file in the current working directory.
+  + ///
+  + /// Delegates to [`load_dotenv_from`] — kept as a thin wrapper so callers keep
+  ... (4 more lines)
+ ✓ (382ms)
+  - /// Best-effort read of the `.env` file in the current working directory.
+  + /// Best-effort read of the `.env` file in a given directory.
+    ///
+  - /// Only the CWD is checked (no upward walk, no system dirs). Returns an empty
+  - /// map when the file is missing or unreadable — `.env` is purely additive.
+  - pub fn load_cwd_dotenv() -> std::collections::HashMap<String, String> {
+  -     match std::fs::read_to_string(".env") {
+  + /// Reads `dir/.env` and parses it with [`parse_dotenv`]. Only that directory is
+  ... (13 more lines)
+
+Now add the two new tests. I'll add them after `test_parse_dotenv_inline_hash_kept_in_value` (before the `#[serial]` precedence test):
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ edit src/cli.rs (3 → 70 lines)
+    #[test]
+  -     #[serial]
+  -     fn test_resolve_api_key_env_precedence() {
+  +     fn test_load_dotenv_from_reads_file() {
+  +         // Hermetic: exercises the directory-scoped path without touching CWD.
+  +         let dir = std::env::temp_dir().join(format!(
+  +             "arc-dotenv-test-{}",
+  +             std::process::id()
+  +         ));
+  +         std::fs::create_dir_all(&dir).unwrap();
+  +         std::fs::write(
+  +             dir.join(".env"),
+  +             "# a comment\nMY_SECRET=super-secret-value\n",
+  +         )
+  +         .unwrap();
+  + 
+  +         let map = load_dotenv_from(&dir);
+  +         assert_eq!(
+  +             map.get("MY_SECRET").map(String::as_str),
+  +             Some("super-secret-value"),
+  ... (52 more lines)
+ ✓ (379ms)
+    #[test]
+  -     #[serial]
+  -     fn test_resolve_api_key_env_precedence() {
+  +     fn test_load_dotenv_from_reads_file() {
+  +         // Hermetic: exercises the directory-scoped path without touching CWD.
+  +         let dir = std::env::temp_dir().join(format!(
+  +             "arc-dotenv-test-{}",
+  +             std::process::id()
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait, I replaced the old_text with my new tests but I dropped the `#[test] #[serial] fn test_resolve_api_key_env_precedence() {` line! Let me check — the old_text was:
+
+```
+#[test]
+    #[serial]
+    fn test_resolve_api_key_env_precedence() {
+```
+
+And I replaced it with my tests but didn't include the original line back. Let me verify.
+────────────────────────────────────────────────────────────────────────────────
+Wait — I need to verify I didn't drop the `test_resolve_api_key_env_precedence` opener. Let me check:
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '3596,3675p' src/cli.rs ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The old_text I replaced was `#[test]\n    #[serial]\n    fn test_resolve_api_key_env_precedence() {` — and my new_text ended with the three new tests but I need to check that the `test_resolve_api_key_env_precedence` still starts. The sed output shows it stops at line 3675 with `}` — the last test got cut off. Let me view further.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ sed -n '3675,3720p' src/cli.rs ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I broke the test — the `#[test] #[serial] fn test_resolve_api_key_env_precedence()` header is gone. I need to restore it.
+────────────────────────────────────────────────────────────────────────────────
+I accidentally consumed the `test_resolve_api_key_env_precedence` header. Let me restore it:
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/cli.rs (2 → 6 lines)
+    }
+  + 
+  +     #[test]
+  +     #[serial]
+  +     fn test_resolve_api_key_env_precedence() {
+            // Precedence: process env > .env in CWD > none.
+ ✓ (379ms)
+    }
+  + 
+  +     #[test]
+  +     #[serial]
+  +     fn test_resolve_api_key_env_precedence() {
+            // Precedence: process env > .env in CWD > none.
+
+Now the docs sentence in `docs/src/contributing/testing.md`. Let me find the hermetic-testing convention:
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "hermetic\|set_current_dir\|ANTHROPIC_API_KEY\|env_remove" docs/src/cont… ✓ (3ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read docs/src/contributing/testing.md:120..150 ✓ (0ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit docs/src/contributing/testing.md (5 → 7 lines)
+      causes flaky races against other tests running in parallel. Pass an
+      explicit temp path to `run_git_in_dir()` (or a raw `Command` with
+      `.current_dir(...)`) instead.
+  + - Tests that exercise `.env`-file loading should use `load_dotenv_from(temp_dir)`,
+  +   never `set_current_dir` — the pure directory-scoped form keeps tests hermetic.
+ ✓ (0ms)
+      causes flaky races against other tests running in parallel. Pass an
+      explicit temp path to `run_git_in_dir()` (or a raw `Command` with
+      `.current_dir(...)`) instead.
+  + - Tests that exercise `.env`-file loading should use `load_dotenv_from(temp_dir)`,
+  +   never `set_current_dir` — the pure directory-scoped form keeps tests hermetic.
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check the CLAUDE.md mention — it says `cli.rs` bullet. Let me check what CLAUDE.md says about `load_cwd_dotenv`.
+────────────────────────────────────────────────────────────────────────────────
+Now check CLAUDE.md's mention:
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "load_cwd_dotenv\|parse_dotenv" CLAUDE.md📦 RTK detected — using compressed output (disable with --no-rtk)
+ ✓ (9ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Claude.md doesn't mention load_cwd_dotenv explicitly. Let me check the cli.rs bullet description. Actually the task said "CLAUDE.md documents `load_cwd_dotenv` in the `cli.rs` bullet". Let me check.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "cli.rs —" CLAUDE.md | head -5; grep -n "dotenv" CLAUDE.md ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "cli.rs" CLAUDE.md ✓ (8ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The CLAUDE.md mention is just "CLI argument parsing, subcommands, configuration" — doesn't mention `load_cwd_dotenv` specifically, so no change needed there per the task's conditional.
+
+Now run the checks: fmt, clippy, build, test.
+────────────────────────────────────────────────────────────────────────────────
+CLAUDE.md's cli.rs bullet doesn't mention `load_cwd_dotenv` specifically, so no change needed there (the task's condition). Now run the verification suite:
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo fmt && cargo clippy --all-targets -- -D warnings 2>&1 | tail -5 ✓ (12.2s)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo build 2>&1 | tail -3 && cargo test 2>&1 | tail -25 ✓ (1m 21s)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo test 2>&1 | grep -E "dotenv|load_dotenv" ✓ (47.4s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me verify the dotenv tests specifically ran and passed. Let me run them by name.
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo test load_dotenv 2>&1 | tail -12 ✓ (182ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo test --lib load_dotenv 2>&1 | tail -12 ✓ (108ms)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo test --bin arc-agent load_dotenv 2>&1 | tail -15 ✓ (110ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo test --bin arc load_dotenv 2>&1 | tail -15 ✓ (148ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+All 3 new tests pass. Let me verify they're real tests by checking they'd fail without the file — well, the task says tests must fail if .env is not read. The tests write a real .env file and assert the value is read, so they exercise the actual file path. Good.
+
+Let me also run fmt --check to confirm.
+────────────────────────────────────────────────────────────────────────────────
+All 3 new tests pass. Let me run the final format check and confirm the diff:
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cargo fmt -- --check && echo "FMT OK"; git status --short; git diff --stat ✓ (941ms)
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ git add -A && git commit -m "Day 176 (01:40): Make dotenv loading testable end-t… ✓ (13ms)
+
+Done. Committed as `5f86637`.
+
+## What I did
+
+**`src/cli.rs`** — split the dotenv loader:
+• Added `pub fn load_dotenv_from(dir: &Path) — reads dir/.env`, parses via parse_dotenv, returns empty map on missing/unreadable file (same best-effort contract).
+• `load_cwd_dotenv()` is now a one-liner delegating to `load_dotenv_from(Path::new("."))`. Behavior for product users is byte-for-byte unchanged; `resolve_api_key_env` untouched.
+• Added 3 hermetic tests (all in the existing `cli.rs` test module, no `set_current_dir`, no new file):
+  • `test_load_dotenv_from_reads_file` — real `.env` in a temp dir, asserts key/value + comment skipped, cleans up.
+  • `test_load_dotenv_from_missing_file_returns_empty` — nonexistent dir → empty map, no panic.
+  • `test_load_dotenv_from_export_and_quotes_via_file` — one integration-ish case: export  prefix, quoted value, inline # via real file.
+
+**`docs/src/contributing/testing.md`** — added the one-sentence convention: `.env`-loading tests should use `load_dotenv_from(temp_dir), never set_current_dir`.
+
+Verification: `cargo fmt -- --check, cargo clippy --all-targets -- -D warnings, cargo build, cargo test` (88 passed) all green. The 3 new tests were confirmed to actually run and pass.
+
+No scope expansion: precedence, search order, and `resolve_api_key_env` semantics unchanged; no home-dir support added. CLAUDE.md's cli.rs bullet doesn't name `load_cwd_dotenv`, so no edit was needed there.
+
+

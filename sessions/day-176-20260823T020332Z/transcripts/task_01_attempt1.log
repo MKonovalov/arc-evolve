@@ -1,0 +1,1105 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to:
+
+1. Add `--misses` flag handling in `handle_risk` (`src/commands_risk.rs`)
+2. Add `collect_validation_misses()` helper
+3. Add `format_misses_report(...)` in `src/commands_risk_report.rs`
+4. Keep `handle_risk_predict` unchanged for plain `/risk predict`
+5. Register flag in help/subcommand parse + update `src/help_data.rs`
+
+Tests first, per arc rules.
+
+Let me look at the relevant files first. Let me start exploring.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ search 'handle_risk_predict' in src/commands_risk.rs ✓ (2ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 586ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the relevant code sections to understand the structure. Let me look at `handle_risk`, `handle_risk_predict`, and the validation readers in `commands_risk_snapshots.rs`, plus the report style in `commands_risk_report.rs`.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1000..1120  ▶ read src/commands_risk.rs:1350..1410 ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 631ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at `commands_risk_snapshots.rs` for `parse_validation_events` / `ValidationEvent` structure, and `commands_risk_report.rs` for the report module style and existing tests.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'struct ValidationEvent|fn parse_validation_events|surprises|…' in src/commands_risk_snapshots.rs  ▶ search 'pub\(crate\) fn|fn format_validation_report|#\[cfg\(test\)\]…' in src/commands_risk_report.rs ✓ (2ms)
+ ✓ (2ms)
+  2 tools completed in 610ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The searches didn't match — maybe the regex syntax. Let me search individually.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "ValidationEvent\|parse_va…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pub\|fn format_validation… ✓ (4ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 591ms (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:370..450  ▶ read src/commands_risk_report.rs:239..359 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 843ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `prediction_accuracy_summary_from` function in commands_risk_report.rs to understand the pattern, and understand the `ValidationEvent` structure. I need to see the full JSONL validation event structure, especially whether it has `git_hash` and `head_hash` fields.
+
+Let me look at write_validation_event and the actual validation events to understand the schema.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:155..235  ▶ read src/commands_risk_report.rs:195..240 ✓ (1ms)
+ ✓ (1ms)
+  2 tools completed in 812ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the JSONL format. The validation event has `surprises` as an array of strings. I need to build `collect_validation_misses()` which reads `.arc/risk_validations.jsonl` and returns for each event with non-empty surprises: `{day, git_hash_from..to, accuracy_pct, surprises: Vec<String>}`.
+
+Note the existing `ValidationEvent` struct doesn't keep the surprises list or git_hash_from/to — it only keeps counts. So I'll need to parse the JSON directly in `collect_validation_misses`. Let me check `parse_validation_events` — it doesn't retain surprises or git hashes. So I should build `collect_validation_misses` as a pure function taking content + a path, parsing JSONL myself, returning a struct of misses.
+
+Let me design:
+
+```rust
+/// A single validation event's surprise half — files that changed but were NOT
+/// predicted by the risk scorer. This is the calibration signal for the sense
+/// organ: what it did NOT see.
+pub(crate) struct ValidationMiss {
+    pub(crate) day: u32,
+    pub(crate) git_hash_from: String,
+    pub(crate) git_hash_to: String,
+    pub(crate) accuracy_pct: f64,
+    pub(crate) surprises: Vec<String>,
+}
+
+pub(crate) fn collect_validation_misses() -> Vec<ValidationMiss> {
+    collect_validation_misses_from(std::path::Path::new(RISK_VALIDATION_PATH))
+}
+
+pub(crate) fn collect_validation_misses_from(path: &std::path::Path) -> Vec<ValidationMiss> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_validation_misses(&content)
+}
+
+pub(crate) fn parse_validation_misses(content: &str) -> Vec<ValidationMiss> {
+    let mut misses = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let surprises: Vec<String> = val["surprises"].as_array().map(|a| {
+            a.iter().filter_map(|s| s.as_str().map(String::from)).collect()
+        }).unwrap_or_default();
+        if surprises.is_empty() { continue; }
+        misses.push(ValidationMiss {
+            day: val["day"].as_u64().unwrap_or(0) as u32,
+            git_hash_from: val["git_hash_from"].as_str().unwrap_or("?").to_string(),
+            git_hash_to: val["git_hash_to"].as_str().unwrap_or("?").to_string(),
+            accuracy_pct: val["accuracy_pct"].as_f64().unwrap_or(0.0),
+            surprises,
+        });
+    }
+    misses
+}
+```
+
+Where to put it? The task says: "Add a pure data-prep helper `collect_validation_misses()` in `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers)". The validation readers (`parse_validation_events`, `load_validation_history_from`, `ValidationEvent`) live in `commands_risk_snapshots.rs`. Hmm — the cleanest place is `commands_risk_report.rs` alongside the format functions, since it's a reporting concern and that keeps format+data-prep together for unit testing. But the task says "keep it next to the other validation readers". The validation readers are in `commands_risk_snapshots.rs`. But then `format_misses_report` goes in `commands_risk_report.rs` which re-exports... Actually the pattern: commands_risk_snapshots.rs owns the readers, commands_risk_report.rs owns formatters. I'll put `collect_validation_misses` in `commands_risk_snapshots.rs` (next to the other validation readers) and `format_misses_report` in `commands_risk_report.rs`. That matches the stated architecture best.
+
+Let me check the re-export pattern in commands_risk.rs for these modules. Let me look at the top of commands_risk.rs.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs (80 lines)  ▶ read src/commands_risk_report.rs (30 lines) ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 709ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the `parse_validation_events` — it doesn't preserve the actual `surprises` file list, only the count. And it doesn't have git_hash_from/to. The task wants `{day, git_hash_from..to, accuracy_pct, surprises: Vec<String>}`.
+
+So `collect_validation_misses()` needs to parse the JSONL directly, since `parse_validation_events` collapses surprises to a count and drops git hashes. Let me look at the actual JSONL format from `write_validation_event`:
+- `ts`, `day`, `trigger`, `hits`, `surprises` (array of strings), `predicted_count`, `accuracy_pct`, `git_hash_from`, `git_hash_to`, plus optional `total_scored`, `scored_broke`.
+
+So I'll write `collect_validation_misses()` that parses JSONL directly (or I could add a richer parse). The task says: "use `parse_validation_events` re-export from `commands_risk_snapshots` if suitable; otherwise `parse_all_snapshots`/`load_validation_history_from`". Since `parse_validation_events` collapses the surprises to a count and loses git hashes, it's NOT suitable for collecting the actual surprise file list. So I'll parse the JSONL directly in `collect_validation_misses()`.
+
+Wait — but maybe I can add a helper. Let me check: there's mention of `parse_rich_validation_events` in a comment (line 175). Let me check if it exists.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "parse_rich_validation_eve…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat .arc/risk_validations.jsonl 2>… ✓ (4ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 927ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the data shape. The validation events JSONL has: `accuracy_pct`, `day`, `git_hash_from`, `git_hash_to`, `hits`, `predicted_count`, `surprises`, `trigger`, `ts`, and sometimes `scored_broke`, `total_scored`.
+
+There's a `parse_rich_validation_events` referenced in a comment — let me check where it is. It said "accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)". Let me grep for it.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "parse_rich_validation_ev… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1400..1520 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at how handle_risk_predict is invoked and understand where the misses flag would be checked. The task is clear:
+
+1. Add `--misses` flag handling in `handle_risk`: when `/risk predict --misses` runs, print misses report.
+2. Add `collect_validation_misses()` in `src/commands_risk.rs` — reads `.arc/risk_validations.jsonl` and returns for each validation event with non-empty surprises: `{day, git_hash_from..to, accuracy_pct, surprises: Vec<String>}`.
+3. Add `format_misses_report(...)` in `src/commands_risk_report.rs`.
+4. Keep `handle_risk_predict` unchanged for plain `/risk predict`.
+5. Register the flag in `/risk` help/subcommand parse and add a line to `/risk` help text in `src/help_data.rs`.
+
+Let me check how `handle_risk` / `dispatch_sub.rs` routes `arc risk predict`, and the help text for `/risk` in help_data.rs.
+
+Note: the current `handle_risk` does exact-match `sub == "predict"`. So `/risk predict --misses` would fall through to the default score report. I need to handle `predict --misses`.
+
+Let me check the dispatch_sub.rs routing and help_data.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "predict\|risk" src/dispat…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "risk" src/help_data.rs | … ✓ (4ms)
+ ✓ (4ms)
+  2 tools completed in 617ms (2 ✓)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/help_data.rs:1250..1290 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the handle_risk_predict function and the subcommand parse in the CLI dispatch for `arc risk predict`. Let me check how `handle_risk_predict` is dispatched and understand the input handling. Let me look at `RISK_SUBCOMMANDS` and `handle_risk`.
+
+Now let me plan my implementation:
+
+1. **`collect_validation_misses()`** — reads `.arc/risk_validations.jsonl`, uses `parse_rich_validation_events` (already exists in commands_risk.rs!) which parses day, hits, surprises, accuracy_pct, ts. Wait, but the task asks for `{day, git_hash_from..to, accuracy_pct, surprises}`. The `RichValidationEvent` already has ts, day, hits, surprises, accuracy_pct. But it's missing git_hash_from/to. Let me extend `RichValidationEvent` to include git_hash_from/git_hash_to, or create a new Miss struct.
+
+Actually, the cleanest: `collect_validation_misses()` lives next to other validation readers in `commands_risk_report.rs`. But `parse_rich_validation_events` is private in `commands_risk.rs`. The task says "use `parse_validation_events` re-export from `commands_risk_snapshots` if suitable; otherwise `parse_all_snapshots`/`load_validation_history_from`".
+
+`parse_validation_events` returns `ValidationEvent` which doesn't have surprises list (only counts), so not suitable. I need the actual surprise file lists. The simplest approach: in `collect_validation_misses()`, parse the JSONL directly (like `parse_rich_validation_events` does) and extract day, git_hash_from, git_hash_to, accuracy_pct, surprises.
+
+Let me define a struct `ValidationMiss` in commands_risk_report.rs:
+```rust
+pub(crate) struct ValidationMiss {
+    pub day: u32,
+    pub git_hash_from: String,
+    pub git_hash_to: String,
+    pub accuracy_pct: f64,
+    pub surprises: Vec<String>,
+}
+```
+
+And `collect_validation_misses()` reads `.arc/risk_validations.jsonl` via RISK_VALIDATION_PATH and parses. Make an inner `collect_validation_misses_from(path)` for testing... but the task tests say "construct the JSONL string inline". Let me make a `parse_validation_misses(content: &str)` pure function that takes content, and `collect_validation_misses()` that reads the file and calls parse. Following existing patterns (`prediction_accuracy_summary` / `prediction_accuracy_summary_from`).
+
+2. **`format_misses_report(...)`** — pure, unit-testable. Takes `&[ValidationMiss]`. Renders per-event day + accuracy + surprise list, `.rs` files first, non-source churn dim/grouped last. One-line summary at end: total surprise events, and .rs-only surprise files seen more than once (recurring blind spots).
+
+3. **Flag handling in `handle_risk`**: `sub == "predict"` currently. Need to handle `"predict --misses"`. But wait — the sub string is the whole rest after `/risk`. Let me check: `sub == "predict"` exact match. So `/risk predict --misses` would have `sub = "predict --misses"` which doesn't match `"predict"`, so it falls through to the risk score display. Actually wait — `sub` is the full remainder. `/risk predict --misses` → sub = "predict --misses". Current code only matches exact "predict". So `--misses` after predict currently shows the risk score table. Need to add handling.
+
+Also `'--all'` for `arc risk --all` — the `input.contains("--all")` check is for the default. Let me add a check for `predict --misses`:
+
+```rust
+if sub == "predict" || sub == "predict --misses" {
+    if sub == "predict --misses" {
+        handle_risk_predict_misses();
+    } else {
+        handle_risk_predict();
+    }
+    return;
+}
+```
+
+Hmm, but what about `arc risk predict --misses` — dispatch_sub builds `/risk predict --misses` via build_risk_input. Good.
+
+Task says: "Register the flag in the `/risk` help/subcommand parse (`RISK_SUBCOMMANDS` or the sub-subcommand parser in `handle_risk`)". I'll add a `handle_risk_predict_misses()` function and handle sub == "predict --misses" in handle_risk.
+
+Also update `RISK_SUBCOMMANDS`? It's tab-completion for /risk. I can add "predict --misses" but it's a multi-word completion... Actually the simple thing: leave RISK_SUBCOMMANDS with "predict" (completion for predict is fine; --misses is a flag). But the task explicitly says register the flag in `/risk` help/subcommand parse — either RISK_SUBCOMMANDS or the sub-subcommand parser. I'll add to the handle_risk parser. Maybe I could also add "predict --misses" to RISK_SUBCOMMANDS for tab completion discoverability. Let me check how RISK_SUBCOMMANDS is used.
+
+Let me check how the misses report should be formatted. Looking at the existing report style — `format_prediction_report` in commands_risk_report.rs. Let me read format_prediction_report and format_validation_report for style.
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "format_prediction_report\…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "RISK_SUBCOMMANDS" src/ |… ✓ (5ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 793ms (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "format_validation_report\… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at how `format_validation_report` is structured, and how tests are done for it, so I can follow the style. Let me also look at the tests structure in commands_risk.rs around line 2877.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2009..2069  ▶ read src/commands_risk.rs:2860..2930 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 661ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a good picture. Let me plan the implementation:
+
+1. In `src/commands_risk.rs`:
+   - Modify `handle_risk` to detect `predict --misses` (or `--misses` flag)
+   - Add `collect_validation_misses()` helper — pure data prep, reads `.arc/risk_validations.jsonl`, returns for each validation event with non-empty `surprises`: `{day, git_hash_from..to, accuracy_pct, surprises: Vec<String>}`
+
+2. In `src/commands_risk_report.rs`:
+   - Add `format_misses_report(...)` — pure, unit-testable
+   - Tests
+
+3. `src/help_data.rs` — add `predict --misses` line to `/risk` help
+
+4. `RISK_SUBCOMMANDS` — the flag handling is via the sub-subcommand parser in `handle_risk`. The `RISK_SUBCOMMANDS` const is used for tab completion. I should add "predict --misses"? Actually RISK_SUBCOMMANDS lists subcommands for completion. Let me check how completion filters. Probably better to leave `predict` and add handling in handle_risk for the `predict` sub with `--misses`.
+
+Let me check what `handle_risk` gets: `sub = input.strip_prefix("/risk").unwrap_or(input).trim()`. So for `/risk predict --misses`, sub = "predict --misses". I'll change that to handle `predict` prefix detection.
+
+Let me look at what the current validation JSONL line format looks like (already showed):
+```
+{"accuracy_pct":10.0,"day":171,"git_hash_from":"d76b695","git_hash_to":"c96395b","hits":[...],"predicted_count":10,"surprises":[...],"trigger":"replay","ts":"..."}
+```
+
+Note that surprises in day 171 include non-source churn: `.arc/risk_snapshots.jsonl`, `.skill_evolve_counter`, `22f857b Day 172: bump skill-evolve counter (2)`, `35f1efd Day 172: update day counter`, `CLAUDE.md`, `DAY_COUNT`, commit-hash lines, `journals/JOURNAL.md`. These are the noise that was de-noised from accuracy in Day 172.
+
+Wait — in day 171 event, `hits` is `["src/commands_risk.rs"]` and surprises include the commit subject lines. Interesting — those come from the `replay_validate_last_snapshot` territory. The task says: "non-source churn such as DAY_COUNT/journal/hash lines marked dim or grouped last, since non-source churn was de-noised from accuracy in Day 172 and is noise here too."
+
+So in `format_misses_report`, I should:
+- Group surprises into .rs source files (first) and non-source churn (dim/grouped last).
+- Summary: total surprise events, and .rs-only surprise files seen more than once (recurring blind spots).
+
+Note day 175's surprise is `src/update.rs` — a .rs file, accuracy 0.0. That's the "clean miss".
+
+Now design:
+
+```rust
+/// A single validation event's surprise files (what the scorer missed).
+pub(crate) struct ValidationMiss {
+    pub(crate) day: u32,
+    pub(crate) git_hash_from: String,
+    pub(crate) git_hash_to: String,
+    pub(crate) accuracy_pct: f64,
+    pub(crate) surprises: Vec<String>,
+}
+
+/// Collect validation events that had non-empty surprises — the "what did the
+/// sense organ NOT see" half of the loop. Pure data prep (reads + parses only).
+pub(crate) fn collect_validation_misses(path: &std::path::Path) -> Vec<ValidationMiss> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    collect_validation_misses_from(&content)
+}
+
+pub(crate) fn collect_validation_misses_from(content: &str) -> Vec<ValidationMiss> {
+    let mut misses = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(trimmed) { Ok(v) => v, Err(_) => continue };
+        let day = val["day"].as_u64().unwrap_or(0) as u32;
+        let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+        let git_hash_from = val["git_hash_from"].as_str().unwrap_or("?").to_string();
+        let git_hash_to = val["git_hash_to"].as_str().unwrap_or("?").to_string();
+        let surprises: Vec<String> = val["surprises"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+        if surprises.is_empty() { continue; }
+        misses.push(ValidationMiss { day, git_hash_from, git_hash_to, accuracy_pct, surprises });
+    }
+    misses
+}
+```
+
+Where should `collect_validation_misses` live? The task says `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers). The other validation readers (`load_validation_history_from`, `parse_validation_events`) live in `commands_risk_snapshots.rs`. Hmm, but the miss-collection is a data-prep helper for the report. I'll put it in `commands_risk_report.rs` since it's used by the report module and the task lists both files as Files. Actually task says "in `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers)". `load_validation_history_from` is in `commands_risk_snapshots.rs`; `prediction_accuracy_summary_from` is in `commands_risk_report.rs`. I'll put `collect_validation_misses` in `commands_risk_report.rs` — it's presentation-facing data prep, and its tests belong there alongside the format tests. Then `find format_misses_report` in the same file.
+
+Actually wait — the Files listed are `src/commands_risk.rs, src/commands_risk_report.rs`. The report module is the natural home. Let me put both `collect_validation_misses` and `format_misses_report` in `commands_risk_report.rs`.
+
+Now `format_misses_report`:
+
+```rust
+/// Render the "misses" report — the surprise files across validation events.
+pub(crate) fn format_misses_report(misses: &[ValidationMiss]) -> String {
+    if misses.is_empty() {
+        return format!("  {DIM}No validation misses recorded yet — the sense organ hasn't been surprised.{RESET}\n");
+    }
+    let mut out = String::new();
+    out.push_str(&format!("\n  {BOLD}Validation Misses{RESET} — what the risk scorer did NOT see\n\n"));
+    let mut rs_seen: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+
+    for m in misses {
+        // Split surprises into source (.rs) vs non-source churn
+        let mut src: Vec<&String> = m.surprises.iter().filter(|s| s.ends_with(".rs")).collect();
+        let mut noise: Vec<&String> = m.surprises.iter().filter(|s| !s.ends_with(".rs")).collect();
+        src.sort();
+        noise.sort();
+        out.push_str(&format!("  Day {} — {:.1}% accuracy ({}{}..{})\n", m.day, m.accuracy_pct, ...git hashes));
+        for s in &src {
+            out.push_str(&format!("    {YELLOW}{}{RESET}\n", s));
+            *rs_seen.entry(s.as_str()).or_insert(0) += 1;
+        }
+        if !noise.is_empty() {
+            out.push_str(&format!("    {DIM}+ {} non-source changed{RESET}\n", noise.len()));
+        }
+    }
+    // Summary
+    ...
+}
+```
+
+Wait — the task says: "render per-event day + accuracy + the surprise file list (surprise `.rs` files first, non-source churn such as DAY_COUNT/journal/hash lines marked dim or grouped last...). End with a one-line summary: total surprise events, and the .rs-only surprise files seen more than once (recurring blind spots)."
+
+So per-event: day + accuracy + surprise list with .rs first, non-source grouped last (dim). Summary line: total surprise events + recurring .rs blind spots (seen more than once).
+
+Let me be careful about the clippy `-D warnings`. Use imports properly.
+
+Now colors: `crate::format::*` has DIM, RESET, YELLOW, BOLD, CYAN, GREEN, RED consts presumably. Let me check format/mod.rs for these color constants. They're used already in commands_risk.rs and report.rs so they exist.
+
+Now the flag routing in `handle_risk`:
+
+```rust
+if sub == "predict" {
+    handle_risk_predict();
+    return;
+}
+
+if sub == "predict --misses" || sub.starts_with("predict --misses") { ... }
+```
+
+Better: handle "predict" case with flag parsing.
+
+```rust
+if sub == "predict" || sub.starts_with("predict ") {
+    if sub.split_whitespace().any(|f| f == "--misses") {
+        handle_risk_predict_misses();
+    } else {
+        handle_risk_predict();
+    }
+    return;
+}
+```
+
+Add `handle_risk_predict_misses()`:
+
+```rust
+/// Handle `/risk predict --misses` — surface the surprise half of the
+/// validation loop: files the scorer did NOT predict that broke anyway.
+fn handle_risk_predict_misses() {
+    let path = std::path::Path::new(RISK_VALIDATION_PATH);
+    let misses = collect_validation_misses(path);
+    let report = format_misses_report(&misses);
+    print!("{report}");
+    if let Some(meter) = ... // no, keep simple. Maybe print meter line? Not required.
+}
+```
+
+Also need to re-export `collect_validation_misses` and `format_misses_report` from commands_risk for dispatch? The dispatch_sub.rs calls `crate::commands_risk::handle_risk(&input)`. Since these are in commands_risk_report.rs, and commands_risk re-exports the report module's names — but if they're only used inside commands_risk.rs's handle_risk, then commands_risk needs access. Let me add them to the re-export list in commands_risk.rs:
+
+```rust
+pub(crate) use crate::commands_risk_report::{
+    collect_validation_misses, file_risk_summary, format_misses_report, format_risk_context,
+    format_risk_report, prediction_accuracy_summary, risk_context_for_files,
+};
+```
+
+And in report.rs, import `std::path::Path` etc.
+
+Also the task requires the day-171 event with non-source churn noise: `.arc/risk_snapshots.jsonl`, `.skill_evolve_counter`, commit hash lines, `CLAUDE.md`, `DAY_COUNT`, `journals/JOURNAL.md`. These are non-.rs so they'll group as noise. Good.
+
+Now, `RISK_SUBCOMMANDS` — should I add "predict --misses"? The completion const lists subcommands. Since `predict` is already there, and completion filters candidates by partial match, adding `"predict --misses"` would let users tab-complete it. That seems reasonable and matches "Register the flag in the /risk help/subcommand parse (RISK_SUBCOMMANDS or the sub-subcommand parser in handle_risk)". I'll add it to RISK_SUBCOMMANDS.
+
+Wait — but tab completion candidate filtering for "/risk pr" would match "predict" and "predict --misses" both. That's fine.
+
+Now the help text in help_data.rs — add:
+```
+\x20 /risk predict       Show predicted top-10 riskiest files\n\
+\x20 /risk predict --misses   Show what the scorer missed across validations\n\
+```
+
+Now tests in commands_risk_report.rs:
+
+1. `test_collect_validation_misses_filters_empty` — mixed JSONL; events with non-empty surprises returned with day/accuracy/hash/surprises; empty-surprise events excluded.
+2. `test_format_misses_report_mixed` — event with `src/update.rs` + `DAY_COUNT` in surprises → both present; noise dimmed/grouped.
+3. `test_format_misses_report_empty` — empty list → "no misses" line, no panic.
+4. `test_format_misses_report_recurring_rs` — two events both with `src/update.rs` → appears in recurring blind spots summary.
+
+Note: the `#[cfg(test)]` destructive git guard — my helper only reads files, no git, so temp dir fine.
+
+Wait — there's a subtlety: fields `git_hash_from`/`git_hash_to` on day 171 event exist. But some old events might not have them. I'll default to "unknown" or "?".
+
+Let me also double check the `DIM` and other color constants used in report.rs. Let me check what's imported.
+
+Let me check `crate::format::*` contents for the color constants quickly.
+
+Also — verification of the format_misses: The task mentions "surprise `.rs` files first, non-source churn such as DAY_COUNT/journal/hash lines marked dim or grouped last". Day 171's surprises include commit-hash subject lines like "22f857b Day 172: bump skill-evolve counter (2)" — those don't end with .rs so grouped as noise. Good.
+
+One more consideration: `predict --misses` — I should also handle the case where user runs `/risk predict --misses` — input is "/risk predict --misses", sub = "predict --misses". Let me write the routing cleanly:
+
+```rust
+if sub == "predict" || sub.starts_with("predict ") {
+    let wants_misses = sub.split_whitespace().any(|f| f == "--misses");
+    if wants_misses {
+        handle_risk_predict_misses();
+    } else {
+        handle_risk_predict();
+    }
+    return;
+}
+```
+
+Now write the code. First the tests (write first per rules). Let me add tests to commands_risk_report.rs tests module, then the helper + formatter, then routing, then help.
+
+Let me check the tests module tail of commands_risk_report.rs to know where to add.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the color constants and the tail of the test module in the report file.
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "pub const DIM\|pub const … ✓ (3ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "DIM\s*:" src/format/mod.… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a full picture. Let me design the implementation:
+
+**`src/commands_risk.rs`:**
+1. Add `--misses` flag handling in `handle_risk` — when `sub == "predict --misses"` (or input contains `predict` and `--misses`), call `handle_risk_predict_misses()`.
+2. Add `collect_validation_misses()` pure helper — reads `.arc/risk_validations.jsonl`, parses with `parse_rich_validation_events` (which preserves surprises file lists) — wait, but I need `day`, `git_hash_from..to`, `accuracy_pct`, `surprises`. `parse_rich_validation_events` doesn't parse git hashes. Let me create a dedicated parser in the misses helper, or extend. Actually the task says: "reads `.arc/risk_validations.jsonl` (use `parse_validation_events` re-export from `commands_risk_snapshots` if suitable; otherwise `parse_all_snapshots`/`load_validation_history_from`)". But `parse_validation_events` doesn't preserve surprises file names, only counts. So I'll write a dedicated pure parser for misses that extracts `day`, `git_hash_from`, `git_hash_to`, `accuracy_pct`, `surprises: Vec<String>` — filtering non-empty surprises.
+
+I'll define a small struct `ValidationMiss` with fields: `day: u32, git_hash_from: String, git_hash_to: String, accuracy_pct: f64, surprises: Vec<String>`.
+
+`collect_validation_misses(path: &Path) -> Vec<ValidationMiss>` — reads file, parses each line.
+
+**`src/commands_risk_report.rs`:**
+3. `format_misses_report(misses: &[ValidationMiss]) -> String` — render per-event day + accuracy + surprise file list (`.rs` files first, non-source marked dim or grouped last). End with summary: total surprise events, `.rs`-only surprise files seen more than once (recurring blind spots).
+
+Where should ValidationMiss live? Since it's used by both commands_risk.rs (collect) and commands_risk_report.rs (format), and the report module is where formats live... The task says add `collect_validation_misses()` in `src/commands_risk.rs` (or commands_risk_report.rs), and `format_misses_report` in commands_risk_report.rs. Re-exports are the established pattern: report module's items re-exported via commands_risk. Actually the report module imports from commands_risk (FileRisk etc.), and commands_risk re-exports report items. So the struct can be defined in commands_risk.rs next to collect_validation_misses, and format_misses_report in report module takes `&[ValidationMiss]` — report module would need to import ValidationMiss from commands_risk. That's fine — report already imports from commands_risk (FileRisk).
+
+Wait, circular import? commands_risk.rs uses `use crate::commands_risk_report::{...}` for re-export. commands_risk_report.rs uses `use crate::commands_risk::{...}`. That already exists and works (they're sibling modules in the same crate; Rust allows mutual references at module level as long as there's no infinite type recursion). FileRisk is defined in commands_risk and imported in report. So defining ValidationMiss in commands_risk and importing in report works the same way.
+
+Let me put `ValidationMiss` struct + `collect_validation_misses` in commands_risk.rs. Then `format_misses_report` in commands_risk_report.rs. And re-export `format_misses_report` from commands_risk (via the existing `pub(crate) use crate::commands_risk_report::{...}` line).
+
+Actually, to keep it simpler and follow the pattern: the misses collector reads the file — that's data access, similar to `prediction_accuracy_summary_from` which lives in report module. Hmm. But the task says "Add a pure data-prep helper `collect_validation_misses()` in `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers)". The validation readers live in commands_risk_snapshots.rs but re-exported through commands_risk.rs. The rich parser `parse_rich_validation_events` lives in commands_risk.rs. I'll put it in commands_risk.rs next to the other validation-reader code (near parse_rich_validation_events) — that seems most natural.
+
+Now `handle_risk`:
+```rust
+if sub == "predict" {
+    handle_risk_predict();
+    return;
+}
+if sub == "predict --misses" {
+    handle_risk_predict_misses();
+    return;
+}
+```
+
+Wait, the input is `/risk predict --misses` → strip_prefix gives `predict --misses`. Let me check that `/risk predict --misses` in dispatch_sub: build_risk_input produces `/risk predict --misses` from tail. Good.
+
+But also handle `--misses` with other order? Task says `/risk predict --misses` or `arc risk predict --misses`. Keep it simple: check `sub == "predict --misses"`. Maybe also accept `sub.contains("predict") && sub.contains("--misses")`? The RISK_SUBCOMMANDS contains "predict". For robustness, I could check `sub == "predict --misses"`. Let me just handle the exact form plus a fallback that checks starts_with "predict" && contains "--misses".
+
+Actually simplest and testable: 
+```rust
+if sub.starts_with("predict") && sub.contains("--misses") {
+    handle_risk_predict_misses();
+    return;
+}
+if sub == "predict" { ... }
+```
+
+This also tolerates extra whitespace.
+
+`handle_risk_predict_misses`:
+```rust
+fn handle_risk_predict_misses() {
+    let misses = collect_validation_misses(std::path::Path::new(RISK_VALIDATION_PATH));
+    let report = format_misses_report(&misses);
+    print!("{report}");
+}
+```
+
+Now `collect_validation_misses`:
+```rust
+/// A single validation event that contained surprises — the "what the sense
+/// organ did NOT see" half of the calibration loop.
+pub(crate) struct ValidationMiss {
+    pub(crate) day: u32,
+    /// Commit span the replay covered (snapshot hash .. head hash).
+    pub(crate) git_hash_from: String,
+    pub(crate) git_hash_to: String,
+    pub(crate) accuracy_pct: f64,
+    /// Files that broke but were NOT in the predicted top-10.
+    pub(crate) surprises: Vec<String>,
+}
+
+/// Read `.arc/risk_validations.jsonl` and return every validation event that
+/// recorded non-empty surprises — the raw material for the `/risk predict --misses`
+/// report. Pure (path-driven) so tests can point it at a temp JSONL.
+pub(crate) fn collect_validation_misses(path: &std::path::Path) -> Vec<ValidationMiss> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_validation_misses(&content)
+}
+
+/// Parse misses from JSONL content (testable without filesystem).
+fn parse_validation_misses(content: &str) -> Vec<ValidationMiss> {
+    let mut misses = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let surprises: Vec<String> = val["surprises"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if surprises.is_empty() {
+            continue;
+        }
+        let day = val["day"].as_u64().unwrap_or(0) as u32;
+        misses.push(ValidationMiss {
+            day,
+            git_hash_from: val["git_hash_from"].as_str().unwrap_or("?").to_string(),
+            git_hash_to: val["git_hash_to"].as_str().unwrap_or("?").to_string(),
+            accuracy_pct: val["accuracy_pct"].as_f64().unwrap_or(0.0),
+            surprises,
+        });
+    }
+    misses
+}
+```
+
+Now `format_misses_report` in commands_risk_report.rs:
+
+```rust
+/// Render the `/risk predict --misses` report — the surprise half of the
+/// validation loop, made legible. Source (`.rs`) surprises come first per
+/// event; non-source churn (DAY_COUNT/journal/hash lines — de-noised from
+/// accuracy in Day 172) is grouped last in dim. Ends with a one-line summary:
+/// total surprise events + recurring `.rs`-only blind spots.
+pub(crate) fn format_misses_report(misses: &[ValidationMiss]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("\n  {BOLD}🎯 Risk Misses{RESET} — files that broke but were NOT predicted\n\n"));
+    if misses.is_empty() {
+        out.push_str(&format!("  {DIM}No misses recorded yet — the sense organ hasn't been surprised.{RESET}\n"));
+        out.push('\n');
+        return out;
+    }
+
+    for m in misses {
+        out.push_str(&format!(
+            "  {BOLD}Day {}{RESET}  {DIM}{}..{}{RESET}  accuracy {:.1}%\n",
+            m.day, m.git_hash_from, m.git_hash_to, m.accuracy_pct
+        ));
+        let mut src: Vec<&String> = m.surprises.iter().filter(|s| s.ends_with(".rs")).collect();
+        let mut non_src: Vec<&String> = m.surprises.iter().filter(|s| !s.ends_with(".rs")).collect();
+        src.sort();
+        non_src.sort();
+        for s in &src {
+            out.push_str(&format!("    {YELLOW}{}{RESET}\n", s));
+        }
+        if !non_src.is_empty() {
+            out.push_str(&format!("    {DIM}(non-source churn: {}){RESET}\n", non_src.join(", ")));
+        }
+        out.push('\n');
+    }
+
+    // Recurring blind spots: .rs-only surprises seen in more than one event.
+    let mut counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+    for m in misses {
+        for s in &m.surprises {
+            if s.ends_with(".rs") {
+                *counts.entry(s.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut recurring: Vec<(&str, u32)> = counts.into_iter().filter(|(_, c)| *c > 1).collect();
+    recurring.sort();
+    let mut summary = format!("  {DIM}{} surprise {} ·", misses.len(), if misses.len() == 1 { "event" } else { "events" });
+    if recurring.is_empty() {
+        summary.push_str(" no recurring .rs blind spots{RESET}\n");
+    } else {
+        let list: Vec<String> = recurring.iter().map(|(f, c)| format!("{f} (×{c})")).collect();
+        summary.push_str(&format!(" recurring .rs blind spots: {}{RESET}\n", list.join(", ")));
+    }
+    out.push_str(&summary);
+    out.push('\n');
+    out
+}
+```
+
+Wait — sorting the HashMap keys by (&str, u32)... `recurring.sort()` sorts tuples — fine.
+
+Now tests. In commands_risk.rs tests module, add:
+- `test_collect_validation_misses_filters_non_empty`: temp JSONL with two lines — one with surprises, one empty surprises → returns 1 event with correct day/accuracy/from/to/surprises.
+- `test_collect_validation_misses_empty_file` → empty vec.
+
+In commands_risk_report.rs tests module, add:
+- `test_format_misses_report_mixed_event`: misses containing `src/update.rs` + `DAY_COUNT` → assert both present.
+- `test_format_misses_report_no_misses`: empty → "no misses" line.
+- `test_format_misses_report_recurring_blind_spot`: two events both with `src/update.rs` → appears in "recurring blind spots" summary.
+
+Let me check the commands_risk.rs test module location to add tests. Let me find `#[cfg(test)] mod tests` in commands_risk.rs.
+
+Also I need to expose `parse_validation_misses` for tests or test via `collect_validation_misses` with temp file. The report tests will construct `ValidationMiss` directly (like format_validation_report tests construct ValidationResult). ValidationMiss is pub(crate) so accessible from report module tests.
+
+Let me also check deps: tempfile is used in commands_risk_report tests already. Good.
+
+For clippy: `sort()` on Vec<&String> — fine. But let me be careful about `recurring.sort()` on Vec<(&str, u32)> — tuples sort by first element then second, fine, and clippy might suggest `sort_unstable`? For tuples of (&str, u32) there is `sort_unstable` yes. Clippy's `unstable_sort` lint only fires on... actually the `unstable_sort` clippy lint suggests sort_unstable when the type implements Ord. Since `-- -D warnings` has all lints at deny... clippy default lints — `unstable_sort` is in clippy::all (style). But existing code uses `.sort()` on Vec<String>? Let me check if there's precedent. Actually the lint `unstable_sort` might warn. Let me check existing code for `sort()` usage.
+
+Let me now write the code. First, let me find where in commands_risk.rs to add the helper + tests. And check imports there (serde_json available? yes, used in parse_rich_validation_events; std::collections::HashMap used).
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. Let me check the test module locations and precedent for `sort()` usage:
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "cfg(test)\|mod tests" src… ✓ (5ms)
+
+Now I'll write the tests first. Let me add tests to `commands_risk_report.rs` — but first I need to plan where the collect helper lives. The task says `collect_validation_misses()` in `commands_risk.rs` (next to validation readers) — I'll implement it in `commands_risk_snapshots.rs` next to the validation parsing, then re-export via commands_risk.rs. Let me check the color constants visibility and existing `Color` usage in formats:
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 260,280p src/format/mod.rs … ✓ (5ms)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 268,282p src/format/mod.rs ✓ (3ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 268,300p src/format/mod.rs ✓ (3ms)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "DIM\|YELLOW\|GREEN\|RED\|… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture. Let me implement.
+
+Plan:
+1. **`src/commands_risk_snapshots.rs`**: Add a `ValidationMiss` struct + `collect_validation_misses_from(content)` pure parser (returns `Vec<ValidationMiss>` with day, git_hash_from, git_hash_to, accuracy_pct, surprises). Plus a wrapper `collect_validation_misses()` reading from `RISK_VALIDATION_PATH`. Actually the task says put `collect_validation_misses()` in `commands_risk.rs` (or `commands_risk_report.rs` — keep next to validation readers). I'll put the pure parser + file wrapper in `commands_risk_snapshots.rs` (where the validation readers live), then re-export in `commands_risk.rs`.
+
+Actually let me think about where tests belong. The task says:
+- Unit test for `collect_validation_misses()` against a temp JSONL... construct the JSONL string inline like existing tests in `commands_risk_report.rs` do for `format_validation_report`.
+
+The existing tests in `commands_risk_report.rs` test `prediction_accuracy_summary_from` which is in the report module and takes a path. So I'll:
+- Put `collect_validation_misses_from(path: &Path)` and `ValidationMiss` in `commands_risk_snapshots.rs` (next to other validation readers like `load_validation_history_from`).
+- Also a pure `parse_validation_misses(content: &str)` for testability.
+- `format_misses_report` in `commands_risk_report.rs` taking `&[ValidationMiss]`.
+- Re-export both through `commands_risk.rs` for `handle_risk`.
+
+2. **`handle_risk`**: add `predict --misses` handling. The current `handle_risk` matches `sub == "predict"` exactly. I need to change to check `sub == "predict" || sub == "predict --misses"`. Cleaner: `if sub == "predict" { if sub_rest == "--misses" ... }`. Actually simplest: 
+
+```rust
+if sub.starts_with("predict") {
+    if sub == "predict --misses" {
+        handle_risk_predict_misses();
+    } else {
+        handle_risk_predict();
+    }
+    return;
+}
+```
+
+Wait, but `/"risk predict --misses"` → sub = "predict --misses". Let me write:
+
+```rust
+if sub == "predict" || sub == "predict --misses" {
+    if sub.ends_with("--misses") {
+        handle_risk_predict_misses();
+    } else {
+        handle_risk_predict();
+    }
+    return;
+}
+```
+
+3. **`handle_risk_predict_misses`**: 
+```rust
+fn handle_risk_predict_misses() {
+    let misses = collect_validation_misses();
+    let report = format_misses_report(&misses);
+    print!("{report}");
+}
+```
+
+4. **RISK_SUBCOMMANDS**: add `"predict --misses"`? Tab-completion — it's used by `/risk` completion. Adding "predict --misses" as a candidate is reasonable. The task says "Register the flag in the `/risk` help/subcommand parse (`RISK_SUBCOMMANDS` or the sub-subcommand parser in `handle_risk`)". I'll add `"predict --misses"` to RISK_SUBCOMMANDS.
+
+5. **help_data.rs**: add a usage line `\x20 /risk predict --misses   Surprise files across recent validations` and update the closing prose.
+
+Now the format. Let's design:
+
+```
+  🔮 Risk Prediction Misses
+
+  Day 175  (0.0% accuracy)  b2add4d..4870d10
+    src/update.rs
+
+  Day 172  (66.7% accuracy)  c96395b..ff6b971
+    src/commands_risk_accuracy.rs
+  ...
+```
+
+The task specifics:
+- per-event day + accuracy + the surprise file list
+- surprise `.rs` files first, non-source churn last (dim or grouped)
+- End with a one-line summary: total surprise events, and the .rs-only surprise files seen more than once (recurring blind spots)
+- empty surprises list → "no misses" line, no panic
+
+Let me write `format_misses_report`:
+
+```rust
+/// Render the `/risk predict --misses` report: surprise files across recent
+/// validation events — the "what did the sense organ NOT see" half of the
+/// validation loop.
+pub(crate) fn format_misses_report(misses: &[ValidationMiss]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("\n  🔮 {BOLD}Risk Prediction Misses{RESET}\n\n"));
+    if misses.is_empty() {
+        out.push_str(&format!("  {DIM}No misses recorded yet — every surprise is a calibration signal.{RESET}\n"));
+        return out;
+    }
+
+    // .rs surprises first, then non-source churn (dim) — non-source churn was
+    // de-noised from accuracy in Day 172 and is noise here too.
+    let mut rs: Vec<&str> = Vec::new();
+    let mut non_rs: Vec<&str> = Vec::new();
+    for miss in misses {
+        out.push_str(&format!(
+            "  {}Day {}{}  ({:.1}% accuracy)  {}..{}\n",
+            BOLD, miss.day, RESET, miss.accuracy_pct, miss.git_hash_from, miss.git_hash_to
+        ));
+        ...
+```
+
+Hmm, let me think about how to render per-event surprises with .rs first, non-source dim. Let me build:
+
+```rust
+    let mut event_headings = Vec::new();
+    let mut rs_lines: Vec<String> = Vec::new();
+    let mut churn_lines: Vec<String> = Vec::new();
+    for miss in misses {
+        let mut rs: Vec<&String> = Vec::new();
+        let mut churn: Vec<&String> = Vec::new();
+        for s in &miss.surprises {
+            if is_source_rs(s) { rs.push(s); } else { churn.push(s); }
+        }
+        rs.sort();
+        churn.sort();
+        let heading = format!(
+            "  {}Day {}{}   {:.1}% accuracy   {}..{}\n",
+            BOLD, miss.day, RESET, miss.accuracy_pct, miss.git_hash_from, miss.git_hash_to
+        );
+        out.push_str(&heading);
+        for r in &rs {
+            out.push_str(&format!("    {}{}{}\n", RED? ...
+```
+
+Hmm, should surprises be red/yellow? They're the misses — YELLOW seems appropriate for the surprise half. Let me use YELLOW for .rs surprises and DIM for non-source churn.
+
+Then summary line at the end:
+
+```rust
+    // One-line summary: total surprise events + recurring (≥2) .rs blind spots
+    let mut seen: std::collections::HashMap<&str, u32> = HashMap::new();
+    for miss in misses {
+        for s in &miss.surprises {
+            if is_source_rs(s) {
+                *seen.entry(s.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut recurring: Vec<&str> = seen.iter().filter(|(_, c)| **c >= 2).map(|(f, _)| *f).collect();
+    recurring.sort();
+    if recurring.is_empty() {
+        out.push_str(&format!(
+            "\n  {DIM}{} surprise events — no recurring .rs blind spots yet.{RESET}\n",
+            misses.len()
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n  {DIM}{} surprise events — recurring .rs blind spots: {}{RESET}\n",
+            misses.len(),
+            recurring.join(", ")
+        ));
+    }
+```
+
+Wait, task says "total surprise events, and the .rs-only surprise files seen more than once (recurring blind spots)". OK my design matches.
+
+`is_source_rs`: path starts with "src/" and ends with ".rs". Note the Day-171 event has surprises like `"22f857b Day 172: bump skill-evolve counter (2)"` — commit message churn! Those are non-source churn → grouped last/dim. Good.
+
+What counts as "non-source churn — DAY_COUNT/journal/hash lines"? Those commit-message strings. They'll go to the churn bucket. Good.
+
+For the empty-misses test: `format_misses_report(&[])` → "no misses" line. Let me make it include "no misses" string. Also `collect_validation_misses` with empty/nonexistent file returns `Vec::new()`.
+
+Now, `ValidationMiss` struct:
+
+```rust
+/// A single validation event's surprise files — the "what the sense organ did
+/// NOT predict" half of the validation loop. Each entry is one recorded miss.
+pub(crate) struct ValidationMiss {
+    pub(crate) day: u32,
+    pub(crate) git_hash_from: String,
+    pub(crate) git_hash_to: String,
+    pub(crate) accuracy_pct: f64,
+    pub(crate) surprises: Vec<String>,
+}
+```
+
+Parser in `commands_risk_snapshots.rs`:
+
+```rust
+/// Collect validation misses — validation events with non-empty `surprises` —
+/// from the real JSONL file.
+pub(crate) fn collect_validation_misses() -> Vec<ValidationMiss> {
+    let path = std::path::Path::new(RISK_VALIDATION_PATH);
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_validation_misses(&content)
+}
+
+/// Pure parser (testable without filesystem). 
+pub(crate) fn parse_validation_misses(content: &str) -> Vec<ValidationMiss> {
+    let mut misses = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() { continue; }
+        let val: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let surprises: Vec<String> = val["surprises"].as_array().map(|a| {
+            a.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+        }).unwrap_or_default();
+        if surprises.is_empty() { continue; }
+        let day = val["day"].as_u64().unwrap_or(0) as u32;
+        let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+        let git_hash_from = val["git_hash_from"].as_str().unwrap_or("").to_string();
+        let git_hash_to = val["git_hash_to"].as_str().unwrap_or("").to_string();
+        misses.push(ValidationMiss { day, git_hash_from, git_hash_to, accuracy_pct, surprises });
+    }
+    misses
+}
+```
+
+Wait — should `collect_validation_misses` keep events with empty surprises? No — task says "for each validation event with non-empty `surprises`". Right.
+
+Tests:
+1. `collect_validation_misses_from(path)` — the file-reading wrapper. Let me name it `collect_validation_misses_from(path: &Path)` and `collect_validation_misses()` calling it with RISK_VALIDATION_PATH. Test against temp JSONL.
+
+2. `format_misses_report` tests in `commands_risk_report.rs`:
+   - (a) mixed event with `src/update.rs` and `DAY_COUNT` → both present
+   - (b) empty list → "no misses" line, no panic
+   - (c) recurring .rs surprise across two events → appears in "recurring blind spots" summary
+
+For tests, I need `ValidationMiss` imported in the report module's test scope. It will be `use crate::commands_risk_snapshots::{..., ValidationMiss, ...}`.
+
+But wait, `format_misses_report` lives in `commands_risk_report.rs`, needs `ValidationMiss` type — import at top of module: `use crate::commands_risk_snapshots::{load_validation_history_from, ValidationMiss, RISK_VALIDATION_PATH};`
+
+And `handle_risk` in `commands_risk.rs` needs `collect_validation_misses` and `format_misses_report`. Add to re-exports:
+- `commands_risk_snapshots` re-export: add `collect_validation_misses`
+- `commands_risk_report` re-export: add `format_misses_report`
+
+Let me now also think: does `parse_validation_misses` duplicate `RichValidationEvent` in commands_risk.rs? Yes, similar but adding git hashes. That's fine — the parser preserves git_hash which RichValidationEvent doesn't. Actually, wait — the task says keep `collect_validation_misses()` in `commands_risk.rs` "next to the other validation readers". The validation readers (`load_validation_history_from`, `parse_validation_events`) live in `commands_risk_snapshots.rs` and are re-exported through `commands_risk.rs`. So placing it in `commands_risk_snapshots.rs` alongside them and re-exporting matches the "next to the other validation readers" intent. And the existing `parse_rich_validation_events` in commands_risk.rs parses without hashes; my new parser includes hashes. Could I refactor to reuse? Keep it simple — a focused parser. But duplication... the guidance in the task: "use `parse_validation_events` re-export from `commands_risk_snapshots` if suitable". `parse_validation_events` doesn't return the surprise file lists — it only counts them. So I need a new richer parser. `parse_rich_validation_events` exists but is private in commands_risk.rs and lacks git hashes. I'll write `parse_validation_misses` in commands_risk_snapshots.rs.
+
+Let me write the code now.
+
+For the day-heading format, I want to be consistent with formatting used elsewhere. Let me look at how format_accuracy_report or others do headings... The validation report uses `📊 {BOLD}Risk Prediction Validation{RESET}`. For misses: `🔮 {BOLD}Risk Prediction Misses{RESET}`. Actually predict card — let me check what format_prediction_report heading looks like.
+
+Let me check quickly.
+────────────────────────────────────────────────────────────────────────────────
+Now I have a full picture. Let me check the prediction report heading style for consistency:
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn format_prediction_repo… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me write the implementation. I'll:
+
+1. Add `collect_validation_misses()` in `commands_risk_snapshots.rs` next to the validation readers — it needs file-level surprises + git_hash_from/to + day + accuracy. The existing `parse_validation_events` returns `ValidationEvent` which only has counts, not file lists or hashes. `RichValidationEvent` in commands_risk.rs has file lists but no hashes and is private. I'll create a small struct `ValidationMiss` and a parser in commands_risk_snapshots.rs.
+
+Wait — task says "Add a pure data-prep helper `collect_validation_misses()` in `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers)". Hmm, "keep it next to the other validation readers". The validation readers live in `commands_risk_snapshots.rs` (parse_validation_events, load_validation_history_from). But the task explicitly says `collect_validation_misses()` in `src/commands_risk.rs` (or `commands_risk_report.rs`). Let me put it in `commands_risk_snapshots.rs`? That would require more plumbing. Actually the task says keep it next to the other validation readers — that means commands_risk_snapshots.rs. But it explicitly names commands_risk.rs as option A. Let me re-read:
+
+"Add a pure data-prep helper `collect_validation_misses()` in `src/commands_risk.rs` (or `commands_risk_report.rs` — keep it next to the other validation readers) that reads `.arc/risk_validations.jsonl` (use `parse_validation_events` re-export from `commands_risk_snapshots` if suitable; otherwise `parse_all_snapshots`/`load_validation_history_from`)"
+
+So it wants collect_validation_misses in commands_risk.rs or commands_risk_report.rs. The tests are in commands_risk_report.rs. It doesn't need git hashes necessarily — the ValidationMiss spec: `{day, git_hash_from..to, accuracy_pct, surprises: Vec<String>}`. But parse_validation_events doesn't parse git hashes or surprise file lists. So I need a richer parse. There's `parse_rich_validation_events` in commands_risk.rs (private) which preserves surprises but no git hashes. 
+
+Simplest: write `collect_validation_misses` in commands_risk.rs reading the file directly with serde_json parsing. But then where do the tests go? The task says "Unit test for `collect_validation_misses()` against a temp JSONL" — tests can live in commands_risk.rs tests module (there's one at line 2529). And format_misses_report tests go in commands_risk_report.rs.
+
+Actually — cleaner idea: put `collect_validation_misses` in `commands_risk_report.rs` next to the formatter, since format_misses_report also lives there and the tests for it. But task says "in src/commands_risk.rs (or commands_risk_report.rs — keep it next to the other validation readers)". The validation readers are in commands_risk_snapshots.rs. Hmm.
+
+Given the guidance ambiguity, I'll put `collect_validation_misses()` in `commands_risk.rs` (option A, explicitly named first) next to `parse_rich_validation_events` which is where the surprise-file-list parsing already lives. That's the natural home — `parse_rich_validation_events` is right there. I'll define a `ValidationMiss` struct.
+
+And `format_misses_report()` in `commands_risk_report.rs`, re-exported through `commands_risk.rs` (per established pattern), with tests in `commands_risk_report.rs` tests module.
+
+For collect_validation_misses: I need day, git_hash_from, git_hash_to, accuracy_pct, surprises list. parse_rich_validation_events doesn't parse hashes. I'll write the JSONL parsing inline in collect_validation_misses — it reads .arc/risk_validations.jsonl (RISK_VALIDATION_PATH).
+
+Design:
+
+```rust
+/// A single miss event: one validation run where the scorer failed to flag
+/// files that actually changed/broke. The "what the sense organ did NOT see"
+/// half of the calibration signal.
+pub(crate) struct ValidationMiss {
+    pub(crate) day: u32,
+    pub(crate) git_hash_from: String,
+    pub(crate) git_hash_to: String,
+    pub(crate) accuracy_pct: f64,
+    pub(crate) surprises: Vec<String>,
+}
+
+/// Read `.arc/risk_validations.jsonl` and collect every validation event that
+/// carries at least one surprise file. Pure data-prep for the misses report.
+pub(crate) fn collect_validation_misses() -> Vec<ValidationMiss> {
+    collect_validation_misses_from(std::path::Path::new(RISK_VALIDATION_PATH))
+}
+
+pub(crate) fn collect_validation_misses_from(path: &std::path::Path) -> Vec<ValidationMiss> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    parse_validation_misses(&content)
+}
+
+pub(crate) fn parse_validation_misses(content: &str) -> Vec<ValidationMiss> {
+    ...
+}
+```
+
+Hmm, the task only asked for collect_validation_misses(), but for testing against a temp JSONL I need a `_from(path)` variant like prediction_accuracy_summary_from does. That's the existing pattern (prediction_accuracy_summary_from). Good.
+
+Then format_misses_report in commands_risk_report.rs:
+
+```rust
+pub(crate) fn format_misses_report(misses: &[ValidationMiss]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("\n  {BOLD}🔍 Validation Misses (surprised the scorer){RESET}\n"));
+    if misses.is_empty() {
+        out.push_str("  {DIM}No misses recorded yet — the validation loop has no surprises to show.{RESET}\n");
+        return out;
+    }
+    for m in misses {
+        out.push_str(&format!("  Day {} ({}..{}) — {:.1}% accuracy\n", m.day, m.git_hash_from, m.git_hash_to, m.accuracy_pct));
+        // Split surprises: .rs files first, non-source (noise) last/dim
+        let mut rs: Vec<&String> = m.surprises.iter().filter(|s| s.ends_with(".rs")).collect();
+        let mut other: Vec<&String> = m.surprises.iter().filter(|s| !s.ends_with(".rs")).collect();
+        rs.sort(); other.sort();
+        for f in &rs {
+            out.push_str(&format!("    {YELLOW}{f}{RESET}\n"));
+        }
+        if !other.is_empty() {
+            // dim grouped noise
+            out.push_str(&format!("    {DIM}(non-source churn: {}){RESET}\n", other.join(", ")));
+        }
+    }
+    // summary: total surprise events + .rs-only surprises seen >1 (recurring blind spots)
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for m in misses {
+        for s in &m.surprises {
+            if s.ends_with(".rs") {
+                *counts.entry(s.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    let recurring: Vec<String> = counts.iter().filter(|(_, c)| **c > 1).map(|(f, c)| format!("{f} (×{c})")).collect();
+    ...
+}
+```
+
+The task text uses "/risk predict --misses" phrasing. But `handle_risk_predict` is only called when `sub == "predict"`. `handle_risk` receives input like `"/risk predict --misses"`. Then `sub` = `"predict --misses"`. Currently `if sub == "predict"` would NOT match `"predict --misses"`. So I need to handle that.
+
+Options:
+1. In `handle_risk`, detect `sub == "predict --misses"` or `sub.starts_with("predict ") && sub.contains("--misses")`.
+2. Change `handle_risk_predict` to take a flag.
+
+Task says: "Keep `handle_risk_predict` unchanged for the plain `/risk predict` case — `--misses` is an additive flag, default behavior unchanged." So I should add a separate handler `handle_risk_predict_misses()` or pass through.
+
+In handle_risk:
+```rust
+if sub == "predict" {
+    handle_risk_predict();
+    return;
+}
+if sub == "predict --misses" {
+    handle_risk_predict_misses();
+    return;
+}
+```
+
+Also need to handle `arc risk predict --misses` via dispatch_sub -> build_risk_input produces "/risk predict --misses". Good.
+
+And tab completion: RISK_SUBCOMMANDS doesn't include flags; but there might be a `command_arg_completions` for risk subcommands. Let me check how commands.rs handles risk completion — it maps "/risk" => RISK_SUBCOMMANDS candidates. That's for subcommand names. Adding "predict --misses" there would pollute. Not required.
+
+Now, the format_misses_report signature. Task: `format_misses_report(...)` — takes the misses list. But for testability and to match existing patterns, maybe `format_misses_report_from(path)` that reads the file and formats. Actually the task says format_misses_report is pure and unit-testable, taking the collected misses presumably. Let me have:
+
+```rust
+pub(crate) fn format_misses_report(misses: &[ValidationMiss]) -> String
+```
+
+And the handler:
+```rust
+fn handle_risk_predict_misses() {
+    let misses = collect_validation_misses();
+    let report = format_misses_report(&misses);
+    print!("{report}");
+}
+```
+
+For the format tests: build ValidationMiss structs inline and call format_misses_report directly. 
+
+Now where do collect_validation_misses tests go? commands_risk.rs test module (line 2529). It uses tempfile already? Let me check imports there. The tests in commands_risk.rs — let me check if they use tempfile. The risk report tests in commands_risk_report.rs use `tempfile::tempdir()`. Let me verify tempfile is a dev-dependency.
+
+Let me now write the code. First the collect helper in commands_risk.rs near parse_rich_validation_events (line ~1430). I'll add after parse_rich_validation_events.
+
+Actually wait — do I need the git hashes? The task spec says return `{day, git_hash_from..to, accuracy_pct, surprises}`. Fine, the JSONL has git_hash_from/git_hash_to.
+
+Let me write it.
+────────────────────────────────────────────────────────────────────────────────
+I have the full picture now. Let me check the test module imports in `commands_risk.rs` and verify tempfile usage:
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 2529,2545p src/commands_ris… ✓ (4ms)
+
+
