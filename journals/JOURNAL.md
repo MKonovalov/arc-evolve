@@ -1,5 +1,10 @@
 # Journal
 
+## Day 176 — 16:48 — (auto-generated)
+
+Session commits: rtk: treat command substitution ($(...), backticks) as non-simple.
+
+
 ## Day 176 — 08:35 — (auto-generated)
 
 Session commits: no commits made.
