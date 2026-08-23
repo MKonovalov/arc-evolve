@@ -98,15 +98,24 @@ pub fn parse_dotenv(content: &str) -> std::collections::HashMap<String, String> 
     map
 }
 
-/// Best-effort read of the `.env` file in the current working directory.
+/// Best-effort read of the `.env` file in a given directory.
 ///
-/// Only the CWD is checked (no upward walk, no system dirs). Returns an empty
-/// map when the file is missing or unreadable — `.env` is purely additive.
-pub fn load_cwd_dotenv() -> std::collections::HashMap<String, String> {
-    match std::fs::read_to_string(".env") {
+/// Reads `dir/.env` and parses it with [`parse_dotenv`]. Only that directory is
+/// checked (no upward walk, no system dirs). Returns an empty map when the file
+/// is missing or unreadable — `.env` is purely additive.
+pub fn load_dotenv_from(dir: &std::path::Path) -> std::collections::HashMap<String, String> {
+    match std::fs::read_to_string(dir.join(".env")) {
         Ok(content) => parse_dotenv(&content),
         Err(_) => std::collections::HashMap::new(),
     }
+}
+
+/// Best-effort read of the `.env` file in the current working directory.
+///
+/// Delegates to [`load_dotenv_from`] — kept as a thin wrapper so callers keep
+/// the CWD-scoped contract without touching process state in tests.
+pub fn load_cwd_dotenv() -> std::collections::HashMap<String, String> {
+    load_dotenv_from(std::path::Path::new("."))
 }
 
 /// Resolve a provider API key with dotenv fallback.
@@ -3592,6 +3601,69 @@ no_equals_here
         // inline comments are NOT stripped, values may contain `#`)
         let map = parse_dotenv("KEY=sk-#fragment\n");
         assert_eq!(map.get("KEY").map(String::as_str), Some("sk-#fragment"));
+    }
+
+    #[test]
+    fn test_load_dotenv_from_reads_file() {
+        // Hermetic: exercises the directory-scoped path without touching CWD.
+        let dir = std::env::temp_dir().join(format!("arc-dotenv-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "# a comment\nMY_SECRET=super-secret-value\n",
+        )
+        .unwrap();
+
+        let map = load_dotenv_from(&dir);
+        assert_eq!(
+            map.get("MY_SECRET").map(String::as_str),
+            Some("super-secret-value"),
+            "load_dotenv_from must read a real .env file from the given directory"
+        );
+        assert!(!map.contains_key("comment"));
+
+        // cleanup
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn test_load_dotenv_from_missing_file_returns_empty() {
+        // Nonexistent directory (and thus no .env) -> empty map, no panic.
+        let dir =
+            std::env::temp_dir().join(format!("arc-dotenv-nonexistent-{}", std::process::id()));
+        let map = load_dotenv_from(&dir);
+        assert!(
+            map.is_empty(),
+            "missing .env must yield an empty map, not panic"
+        );
+    }
+
+    #[test]
+    fn test_load_dotenv_from_export_and_quotes_via_file() {
+        // One integration-ish case through a real file: `export ` prefix,
+        // quoted values, and inline `#` in a value all survive the file path.
+        let dir = std::env::temp_dir().join(format!("arc-dotenv-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".env"),
+            "export BAZ='quoted value'\nTOKEN=sk-#fragment\n",
+        )
+        .unwrap();
+
+        let map = load_dotenv_from(&dir);
+        assert_eq!(
+            map.get("BAZ").map(String::as_str),
+            Some("quoted value"),
+            "export prefix should be honored through the real file path"
+        );
+        assert_eq!(
+            map.get("TOKEN").map(String::as_str),
+            Some("sk-#fragment"),
+            "inline # in a value should be kept through the real file path"
+        );
+
+        // cleanup
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

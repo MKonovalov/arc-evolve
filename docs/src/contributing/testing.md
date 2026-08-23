@@ -137,6 +137,8 @@ lost work before the guard was added (see `CLAUDE.md`'s Safety Rules).
   causes flaky races against other tests running in parallel. Pass an
   explicit temp path to `run_git_in_dir()` (or a raw `Command` with
   `.current_dir(...)`) instead.
+- Tests that exercise `.env`-file loading should use `load_dotenv_from(temp_dir)`,
+  never `set_current_dir` — the pure directory-scoped form keeps tests hermetic.
 
 ## Never delete existing tests
 
