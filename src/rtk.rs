@@ -85,15 +85,17 @@ const RTK_SUPPORTED_COMMANDS: &[&str] = &[
     "wget",
 ];
 
-/// Check if a command string is a simple command (no pipes, redirects, or control flow).
+/// Check if a command string is a simple command (no pipes, redirects, control
+/// flow, or command substitution).
 fn is_simple_command(command: &str) -> bool {
-    // Check for shell metacharacters that indicate complex expressions
-    // We only match top-level pipes/redirects (not inside quotes)
+    // Check for shell metacharacters that indicate complex expressions.
+    // We only match top-level pipes/redirects (not inside quotes).
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut prev_char = '\0';
+    let mut chars = command.chars().peekable();
 
-    for ch in command.chars() {
+    while let Some(ch) = chars.next() {
         match ch {
             '\'' if !in_double_quote && prev_char != '\\' => in_single_quote = !in_single_quote,
             '"' if !in_single_quote && prev_char != '\\' => in_double_quote = !in_double_quote,
@@ -103,6 +105,16 @@ fn is_simple_command(command: &str) -> bool {
                 return false;
             }
             '&' if !in_single_quote && !in_double_quote && prev_char != '\\' => return false,
+            // Command substitution (`$(...)` or `` `...` ``) executes a nested
+            // command, so the command is not simple. This is true even inside
+            // double quotes (bash still executes `$(...)` there); only single
+            // quotes make it literal. Plain `$VAR` expansion is still simple.
+            '$' if !in_single_quote && prev_char != '\\' => {
+                if chars.peek() == Some(&'(') {
+                    return false;
+                }
+            }
+            '`' if !in_single_quote && prev_char != '\\' => return false,
             _ => {}
         }
         prev_char = ch;
@@ -224,6 +236,27 @@ mod tests {
         // A real (unescaped) operator after an escaped one must still be detected
         assert!(!is_simple_command("echo foo \\| bar | cat"));
         assert!(!is_simple_command("echo foo \\& bar && echo baz"));
+    }
+
+    #[test]
+    fn test_is_simple_command_rejects_command_substitution() {
+        // `$(...)` and backticks execute a nested command, so they're not simple
+        assert!(!is_simple_command("echo $(date)"));
+        assert!(!is_simple_command("echo $(date +%s)"));
+        assert!(!is_simple_command("cat `ls`"));
+        assert!(!is_simple_command("git log $(git rev-parse HEAD)"));
+        // A backslash-escaped `$(` is a literal arg, so it stays simple
+        assert!(is_simple_command("echo \\$(date)"));
+        // Plain env var expansion is still simple
+        assert!(is_simple_command("echo $HOME"));
+        assert!(is_simple_command("echo $HOME/$USER"));
+        // Command substitution inside single quotes is a literal argument; inside
+        // double quotes bash still executes it, so it stays non-simple
+        assert!(is_simple_command("echo '$HOME'"));
+        assert!(is_simple_command("echo '$(date)'"));
+        assert!(is_simple_command("echo '`ls`'"));
+        assert!(!is_simple_command("echo \"$(date)\""));
+        assert!(!is_simple_command("echo \"`ls`\""));
     }
 
     #[test]
