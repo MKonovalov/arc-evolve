@@ -359,6 +359,8 @@ Degradation is graceful and reported honestly, and the local branch always remai
 - PR creation fails after a successful push → the pushed branch is reported alongside the failure
 - worker made no changes (or no handoff commit) → the PR step is skipped quietly
 
+**`--parallel` manifests**: running `--parallel` also writes a JSON manifest of the fan-out to `.arc/spawn_runs/<run_id>.json` — capturing the task list, spawn ids, and status — so a parallel run is rerunnable and auditable, the first step toward codified orchestration.
+
 > **Automatic sub-agent delegation**: In addition to `/spawn`, the model can autonomously delegate subtasks to a built-in `sub_agent` tool. This happens transparently — the model decides when a subtask benefits from a fresh context window (e.g., researching a codebase section, running a series of tests). You'll see a 🐙 indicator when delegation occurs.
 
 ## Git

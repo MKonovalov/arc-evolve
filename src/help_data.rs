@@ -877,6 +877,7 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
              \x20 /spawn --model <name> <task>    Use a specific model for the subagent\n\
              \x20 /spawn --system <prompt> <task> Custom system prompt for the subagent\n\
              \x20 /spawn --bg -o <f> <task>       Background with output capture\n\
+             \x20 /spawn --pr <task>              Open a draft PR when the handoff lands\n\
              \x20 /spawn collect <id>             Collect a finished background spawn\n\
              \x20 /spawn status                   Show all tracked spawns\n\n\
              Creates a new AI agent with a separate context window to\n\
@@ -893,13 +894,19 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
              /spawn collect <id> to retrieve the result when ready.\n\n\
              Parallel spawns launch all tasks as background agents simultaneously.\n\
              Use /spawn status to monitor and /spawn collect <id> to retrieve\n\
-             results. Maximum 10 parallel tasks.\n\n\
+             results. Maximum 10 parallel tasks. --parallel writes a rerunnable\n\
+             JSON manifest of the fan-out to .arc/spawn_runs/<run_id>.json.\n\n\
+             Use --pr to push the finished handoff branch and open a draft PR via\n\
+             gh (strictly opt-in; degrades gracefully — missing gh, push failure,\n\
+             or PR failure are reported honestly and the local branch remains\n\
+             the result).\n\n\
              Examples:\n\
              \x20 /spawn write unit tests for the parser module\n\
              \x20 /spawn --model claude-haiku-4-5 summarize this file\n\
              \x20 /spawn --system \"You are a security auditor\" review src/safety.rs\n\
              \x20 /spawn --bg analyze test coverage for src/\n\
              \x20 /spawn --bg --model gpt-4o -o report.md review error handling\n\
+             \x20 /spawn --pr fix the flaky retry test in src/prompt_retry.rs\n\
              \x20 /spawn --parallel fix auth tests --- write parser docs --- add error handling\n\
              \x20 /spawn --parallel -m claude-sonnet-4-20250514 task A --- task B\n\
              \x20 /spawn collect 1\n\
