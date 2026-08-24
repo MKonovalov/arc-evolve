@@ -1,0 +1,1640 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to wire surprise-rank context into the watch-failure validation path in `src/commands_risk_snapshots.rs`.
+
+Let me first look at the relevant code:
+1. `auto_validate_after_failure_to` in src/commands_risk_snapshots.rs
+2. `replay_validate_core` in src/commands_risk.rs (around line 2350)
+3. `compute_file_risk_scores()` 
+4. `write_validation_event`
+5. `parse_validation_events`
+
+Let me read the relevant code first.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ search 'auto_validate_after_failure' in src/commands_risk_snapshots.rs ✓ (3ms)
+ ✓ (12ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 678ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `auto_validate_after_failure_to` function and surrounding code.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:200..460 ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `compute_file_risk_scores` and `replay_validate_core` in `src/commands_risk.rs` to understand how rank via `all_ranked` is computed.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at how `compute_file_risk_scores and all_ranked` work in `src/commands_risk.rs`:
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2330..2460  ▶ search 'pub\(crate\) fn compute_file_risk_scores|pub\(crate\) struct…' in src/commands_risk.rs ✓ (5ms)
+ ✓ (5ms)
+  2 tools completed in 1.1s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me search for the compute_file_risk_scores function signature in commands_risk.rs.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'fn compute_file_risk_scores|fn compute_validation|fn learn_w…' in src/commands_risk.rs ✓ (4ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_file_risk_scores\… ✓ (7ms)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1950..2030  ▶ read src/commands_risk.rs:700..740 ✓ (2ms)
+ ✓ (4ms)
+  2 tools completed in 660ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the pattern. `compute_validation` uses `all_ranked` (a sorted list of all scored file paths) and computes 1-based ranks: `ranked.iter().position(|r| r == f).map(|i| i + 1)`.
+
+The task:
+1. In `auto_validate_after_failure_to`, when classifying surprises, include each surprise's rank in the scored universe. Compute the ranked universe from `compute_file_risk_scores()`.
+2. Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible).
+3. No changes to `parse_validation_events`/`compute_accuracy_stats` consumers.
+
+Wait — but `auto_validate_after_failure_to` is in `src/commands_risk_snapshots.rs` while `compute_file_risk_scores` is in `src/commands_risk.rs`. Let me check whether `compute_file_risk_scores` is accessible from `commands_risk_snapshots.rs`. It's `pub(crate)`, so yes.
+
+Let me look at how `write_validation_event` signature looks and what its parameters are. From line 332-344:
+
+```rust
+write_validation_event(
+    validation_path,
+    day,
+    "watch_failure",
+    last.predicted.len(),
+    &hits,
+    &surprises,
+    accuracy_pct_rounded,
+    &last.git_hash,
+    "HEAD",
+    None,
+    None,
+)
+```
+
+And the signature starts at line ~200:
+```rust
+fn write_validation_event(
+    validation_path: &std::path::Path,
+    day: u32,
+    trigger: &str,
+    predicted_count: usize,
+    hits: &[String],
+    surprises: &[String],
+    accuracy_pct: f64,
+    git_hash_from: &str,
+    git_hash_to: &str,
+    total_scored: Option<usize>,
+    scored_broke: Option<usize>,
+) -> std::io::Result<()> {
+```
+
+The `surprises: &[String]` are written as an array of strings:
+```rust
+"surprises": surprises,
+```
+
+The least invasive schema change: fold the rank into the surprise string, e.g., `"src/foo.rs (rank 11)"` or `"rank=11 src/foo.rs"`. But that would break `parse_validation_events` which only reads the count — actually no, `parse_validation_events` reads `val["surprises"].as_array().map(|a| a.len())` — it only takes the length, so folding rank into the string keeps the count intact.
+
+However, wait — the write in `replay_validate_core` also passes surprises as plain file paths. The consumers... let me check `compute_accuracy_stats` — which is in `commands_risk_accuracy.rs`. It probably parses events and only takes counts. Let me check what uses `surprises` strings elsewhere — e.g., does anything extract file paths from the event's surprises array? Let me search.
+
+Also the task says "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+Option A: fold rank into the surprise string, e.g. `"src/foo.rs#11"` or `"src/foo.rs (rank 11)"`. This keeps schema the same (array of strings), count parsing intact.
+
+Option B: extend `write_validation_event` to accept an optional rank map / list of (path, rank) pairs for surprises, and write `surprise_ranks` as a separate field or object. This changes the JSON schema (adds optional field) — parse stays backward compatible since it's only reading scalar counts. But `write_validation_event` is shared with the replay path.
+
+The task explicitly says "pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change."
+
+Let me look at what the surprises array is used for downstream. Let me search for `surprises` usage in commands_risk_accuracy.rs and anywhere else that reads validation events.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the `compute_accuracy_stats` consumer and any other readers of the surprises field:
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "surprises" src/commands_…  ▶ read src/commands_risk_snapshots.rs:180..280 ✓ (2ms)
+ ✓ (6ms)
+  2 tools completed in 742ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check how `compute_validation` handles surprises — the `surprises` are `Vec<(String, Option<usize>)>` with rank. In the replay path, they map to just the file paths. Let me look at how the `ValidationResult.surprises` gets written in the replay path — it's `result.surprises.iter().map(|(f, _)| f.clone()).collect()`, so the rank is discarded there too. But the task says "the replay path (`compute_validation`) already computes and persists via `all_ranked`". Hmm, wait — let me re-read. The task says:
+
+"Its genuine gap: it records the event but **loses the surprise-rank context** — the scored universe rank of a surprise, which the replay path (`compute_validation`) already computes and persists via `all_ranked`."
+
+Hmm, actually looking at replay path, the rank is computed in `compute_validation` but then discarded in `replay_validate_core` when mapping to strings: `result.surprises.iter().map(|(f, _)| f.clone()).collect()`. So actually the replay path also loses the rank in the persisted event. But the task says to mirror how it computes rank and persist it in the watch path. Let me check if there is any place where rank is persisted... Let me search for rank in the validation events.
+
+Actually, the task statement says: "the scored universe rank of a surprise, which the replay path (`compute_validation`) already computes and persists via `all_ranked`." Maybe they mean compute_validation computes it. Let me check if the report shows the rank. Let me look at format_validation_report.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2029..2099  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "surprise_rank\|surprise_… ✓ (3ms)
+ ✓ (5ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 683ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. The `compute_validation` function in `src/commands_risk.rs` already computes surprise ranks via `all_ranked`, returning `Vec<(String, Option<usize>)>` where rank is 1-based.
+
+For the watch path (`auto_validate_after_failure_to` in `src/commands_risk_snapshots.rs`), I need to:
+1. Compute the scored universe ranking via `compute_file_risk_scores()` (like `replay_validate_core`'s wrapper does at line 2468-2469: `let all_risks = compute_file_risk_scores(); let all_ranked: Vec<String> = all_risks.iter().map(|r| r.path.clone()).collect();`)
+2. For each surprise, compute its rank in that universe (1-based position)
+3. Persist the rank as part of the event — least invasive: fold rank into the surprise string? Or add a `surprise_ranks` field?
+
+The task says: "either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+`parse_validation_events` reads `surprises` as `.as_array().map(|a| a.len())` — it only needs the count. So folding the rank into the surprise string (e.g., `"src/foo.rs (rank #12)"`) breaks nothing for the count. But it would change the surprise strings that get displayed... wait, does anything display the surprise strings? In `parse_validation_events`, `ValidationEvent` doesn't store surprise strings at all — only counts. So folding rank into the string is safe for parsers.
+
+But wait — there's a subtlety. The task says "the replay path (`compute_validation`) already computes and persists via `all_ranked`". Let me check: does `compute_validation` fold rank into the surprise string or store a separate field? Looking at the code — `compute_validation` returns `surprises: Vec<(String, Option<usize>)>` — a tuple with file + optional rank. Then in `replay_validate_core`, line 2381: `let surprises: Vec<String> = result.surprises.iter().map(|(f, _)| f.clone()).collect();` — it strips the rank before persisting! So the replay path does NOT actually persist the rank either. Hmm.
+
+Wait, the task says: "records the event but **loses the surprise-rank context** — the scored universe rank of a surprise, which the replay path (`compute_validation`) already computes and persists via `all_ranked`."
+
+Let me re-check. `compute_validation` computes rank, but `replay_validate_core` strips it with `.map(|(f, _)| f.clone())` before `write_validation_event`. So the rank is NOT persisted in the replay path either! Unless there's another path that folds rank into the string.
+
+Hmm wait, maybe I should check `format_validation_report` — it displays `(rank #N)`. But persistence... Let me look more carefully. Actually the task description may be slightly inaccurate, but it doesn't matter — my job is to wire surprise-rank into the watch path. The task says "which the replay path (`compute_validation`) already computes and persists via `all_ranked`" — actually the persists claim seems wrong per my reading, but the goal remains: compute rank in watch path and persist it.
+
+Let me check `ValidationResult` struct and whether rank display happens elsewhere.
+
+Actually, let me look at how the report formats surprises — `format_validation_report` in commands_risk.rs shows `(rank #N)`. But does the watch path summary show ranks? No — the watch path (auto_validate_after_failure_to) just shows the file list without ranks.
+
+So the plan:
+1. In `auto_validate_after_failure_to`, compute `all_ranked: Vec<String>` from `compute_file_risk_scores()` — but wait, is `compute_file_risk_scores` accessible from `commands_risk_snapshots.rs`? Let me check imports. commands_risk re-exports things? Let me check how commands_risk_snapshots.rs imports from commands_risk.rs.
+
+Let me check the module structure — the CLAUDE.md says "re-exported via commands_risk so call sites are unchanged". So `commands_risk_snapshots` uses `crate::commands_risk::...`? Let me check the imports at the top of the file.
+
+Also `learn_weights_from_history` is already called in `auto_validate_after_failure_to` (line 371) — so it already imports from commands_risk. Let me check what's imported.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check the imports in `commands_risk_snapshots.rs` and how it accesses commands_risk items:
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:1..61  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct FileRisk\|pub(crat… ✓ (2ms)
+ ✓ (8ms)
+  2 tools completed in 863ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. `commands_risk_snapshots.rs` imports `compute_file_risk_scores` and `learn_weights_from_history` from `commands_risk`. 
+
+The task: in `auto_validate_after_failure_to`, when classifying surprises, include each surprise's rank in the scored universe (0-based position in the current `compute_file_risk_scores()` ranking, +1 for display). Mirror `replay_validate_core` which uses `all_ranked` computed from `compute_file_risk_scores()`.
+
+Let me think about the least invasive way to persist the rank:
+- Option A: extend the event's surprise representation with a rank field — change `write_validation_event` signature to accept `surprises: &[(String, Option<usize>)]` — but that changes all call sites.
+- Option B: fold the rank into the surprise string — e.g., `"src/foo.rs (rank #11)"` — but that changes the surprise strings, which `parse_validation_events` reads as scalars (it only reads len). And the report fixtures use simple strings. Also `compute_accuracy_stats` — let me check if it reads surprise strings.
+
+The task says: "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)".
+
+Let me check `compute_accuracy_stats` in commands_risk_accuracy.rs to see if it reads surprise strings. Also check the report fixtures at commands_risk_report.rs:393 which use `"surprises":["src/b.rs"]`.
+
+Option B (fold rank into string) would change the string values in the JSONL, and consumers that read surprises as strings (e.g., report) would display "src/b.rs (rank #11)" which is fine-ish but not clean.
+
+Actually wait — the cleanest minimal approach that keeps backward-compat and per-file rank: since `parse_validation_events` only counts surprises, and `compute_accuracy_stats` likely only uses counts, I could add rank into the surprise string. But the concern: consumers that display surprise filenames from the JSONL would then show the rank in the name. Let me check who reads surprise strings from events.
+
+Let me search for consumers reading `surprises` values from parsed events.
+────────────────────────────────────────────────────────────────────────────────
+Let me check who consumes surprise strings from validation events, and look at the existing tests:
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "\.surprises\|surprise_co…  ▶ read src/commands_risk_snapshots.rs:1040..1160 ✓ (1ms)
+ ✓ (6ms)
+  2 tools completed in 1.2s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me plan my implementation:
+
+1. In `auto_validate_after_failure_to`, compute the full ranking via `compute_file_risk_scores()` (which returns `Vec<FileRisk>`, already sorted by score descending). Build `all_ranked: Vec<String>` from it.
+2. For each surprise, compute its rank in the scored universe (1-based position in `all_ranked`).
+3. Persist the rank. The least invasive option: fold rank into the surprise string, e.g. `"src/foo.rs (rank #42)"` — but that changes the string content that consumers see. Let me check what consumers do with surprises strings.
+
+Consumers:
+- `parse_validation_events` reads only counts (array lengths) — fine with either approach.
+- `commands_risk_report.rs` — uses fixture JSON lines, doesn't parse surprises from real events.
+- The stderr summary prints `surprise_list.join(", ")`.
+
+Wait, the task says: "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+Options:
+a) Extend each surprise string with a rank suffix like `src/foo.rs #rank 42`. That's the smallest change — `surprises: Vec<String>` unchanged, `write_validation_event` unchanged, parse unchanged (just array len). But it pollutes the string, and any consumer that compares surprise strings to file paths would break. Let me check who else consumes surprise strings...
+
+Actually wait — `auto_validate_after_failure_to` is in the same file. It writes surprises. `replay_validate_core` writes surprises from `compute_validation` which returns `(String, Option<usize>)` pairs — but converts to `Vec<String>` before `write_validation_event`. So the surprise rank in the replay path is currently dropped too.
+
+Let me check where `compute_validation` surprises ranks are shown: `format_validation_report` shows `(rank #N)` for the report display. But in the JSONL persisted event, replay path too drops rank (only `Vec<String>` is passed).
+
+Hmm, the task says "mirror [replay_validate_core] minimally — the watch path has no `all_ranked` yet, so compute it from `compute_file_risk_scores()`."
+
+So for the watch path, I should:
+1. Compute `all_ranked` from `compute_file_risk_scores()`
+2. For each surprise, compute rank = position + 1 (1-based)
+3. Persist rank in the event.
+
+The task says: "either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible."
+
+The cleanest "smallest schema change": add an optional field `surprise_ranks` to the event: a map or parallel array. But `parse_validation_events` reads only scalar count fields — keep it that way.
+
+Let me think about what's least invasive:
+
+Option A: fold rank into the surprise string: `"src/foo.rs (#42)"`. 
+- `write_validation_event` unchanged ✓
+- `parse_validation_events` unchanged ✓
+- But consumers comparing surprise values to file paths break. Current test: `surprises.contains(&serde_json::json!("src/prompt.rs"))` — would need updating. Also the stderr display prints them fine. But `compute_accuracy_stats` doesn't read surprises. Risk meter? Let me check `compute_risk_meter` and consumers more carefully.
+
+Option B: add optional `surprise_ranks` array field to the event (parallel to surprises).
+- `write_validation_event` gets a new optional param (or the surprises param becomes a paired structure).
+- `parse_validation_events` unchanged (reads only scalar count fields; ignores the new field).
+- Consumers that read `surprises` array values unchanged.
+- The stored data is structured: rank is a number, not folded into a string.
+
+Option B is actually cleaner and more backward-compatible: old events lack the field, new events have it. The `surprises` array values stay pure file paths so all string consumers remain valid. `parse_validation_events` remains unchanged (it won't read rank, but task says "keep it that way unless impossible" — it's possible).
+
+But to pass rank into `write_validation_event`, I need to change its signature. It's `pub(crate)` — called from:
+- `replay_validate_core` (commands_risk.rs) — 1 call
+- `auto_validate_after_failure_to` (commands_risk_snapshots.rs) — 1 call
+- maybe others? Let me grep.
+
+Actually, let me reconsider. The task says "pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+The minimal signature change would be to add an optional `surprise_ranks: Option<&[usize]>` parameter. But that adds a param to a function that already has 12 (clippy::too_many_arguments allowed). Let me check all callers of `write_validation_event`.
+
+Let me grep for write_validation_event calls.
+────────────────────────────────────────────────────────────────────────────────
+Let me see all callers of `write_validation_event` and how the risk meter/accuracy consumers use surprise data:
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "write_validation_event" … ✓ (11ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check how `compute_validation` consumers use surprise ranks — particularly line 1293 in commands_risk_snapshots.rs (compute_validation call in tests) and the accuracy path. Let me look at the test at line 1293 and the compute_accuracy_stats.
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:1240..1360 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure well. Let me think through the design:
+
+**Current state:**
+- `write_validation_event` takes `surprises: &[String]` and writes them as a JSON array of strings.
+- `auto_validate_after_failure_to` classifies changed src files into hits/surprises (plain strings), and passes them to `write_validation_event`.
+- `compute_validation` (replay path) computes `surprises: Vec<(String, Option<usize>)>` — file + optional rank (1-based, from `all_ranked` position + 1).
+- The task: in the watch-failure path (`auto_validate_after_failure_to`), compute the rank of each surprise in the scored universe (via `compute_file_risk_scores()`), and persist that rank.
+
+**Design decision**: The task says "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+So the task explicitly says `parse_validation_events` reads only scalar count fields — it counts `surprises` array length. So I can't change the surprises to be objects (that would break `.as_array().map(|a| a.len())` — actually no, objects in an array still count with len, but the consumers who read surprise strings from `surprises` would change... let me check: `commands_risk_report.rs` line 320/393 uses `surprises` as array of strings in fixtures for accuracy stats. And consumers read surprise strings... Let me check if anything reads the surprise *strings* in the accuracy stats.
+
+Actually the task says: "either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+So option: fold the rank into the surprise string, e.g. `"src/foo.rs#12"`. But that would change what `surprises.contains(&json!("src/prompt.rs"))` checks in the existing test — that test is in commands_risk_snapshots.rs test, which we can update since we're changing this behavior. But `commands_risk_report.rs` fixtures use `surprises:["src/b.rs"]` — those are fed into... let me check what those test fixtures compute — they test `compute_accuracy_stats` which probably just counts. Folding rank into the string wouldn't affect counts.
+
+But folding rank into the string pollutes the data — a consumer who later wants the file path would have to parse it. Hmm. Alternatively, add a separate field `surprise_ranks` — a parallel array or map. That keeps `surprises` as plain strings and is fully backward-compatible; `parse_validation_events` doesn't need to read it (task says keep it that way). The task's preferred option: "extend the event's surprise representation with a rank field" — a parallel array `surprise_ranks` aligned with `surprises` is minimal and clean.
+
+Let me design:
+
+1. In `auto_validate_after_failure_to`:
+   - Compute `all_ranked: Vec<String>` from `compute_file_risk_scores()` (paths in ranked order). `compute_file_risk_scores()` returns `Vec<FileRisk>` sorted by score descending.
+   - For each surprise, compute rank = position in all_ranked + 1 (1-based, mirroring the replay path).
+   - Build `surprise_ranks: Vec<Option<usize>>` aligned with surprises.
+   - Pass to `write_validation_event` — but wait, `auto_validate_after_failure_to` currently passes `&surprises` (Vec<String>). We need to extend the `surprises` representation.
+
+2. Since `write_validation_event` is also called from `replay_validate_core` (commands_risk.rs:2411) and tests (commands_risk_snapshots.rs:1201, 1290-1294), I should be careful about signature changes. The task says "one source file" — `src/commands_risk_snapshots.rs`. But `write_validation_event` is called from `src/commands_risk.rs` too. If I change its signature, I'd need to change commands_risk.rs too, violating "max one source file". 
+
+So the least invasive approach: keep `write_validation_event` signature unchanged, and fold the rank into the surprise string in `auto_validate_after_failure_to` before passing to `write_validation_event`. E.g. `"src/foo.rs@rank=12"`. Hmm, but that pollutes the string for all consumers.
+
+Wait — re-read the task: "Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+Both options happen "as part of the write_validation_event call". The signature change would ripple to commands_risk.rs. Let me check: is `write_validation_event` pub(crate) and re-exported? Yes, commands_risk.rs imports it (line 16). If I add a parameter, I'd need to touch commands_risk.rs.
+
+Alternative: add a NEW optional field to the event without changing the write_validation_event signature — no, the signature determines what's persisted.
+
+Hmm. Option: Add a new optional parameter with a default? Rust doesn't have default parameters. I could add a new function `write_validation_event_with_ranks` in commands_risk_snapshots.rs that wraps... but the task says changes in one file are preferred.
+
+Actually wait — let me reconsider. The cleanest minimal approach that stays in one file:
+
+Fold rank into the surprise string. Format: `"src/foo.rs (rank #12)"` or `"src/foo.rs#12"`. Then:
+- `parse_validation_events` still counts array length → backward compatible. ✓
+- `commands_risk_report.rs` fixtures — count-based, unaffected. ✓
+- The existing test in commands_risk_snapshots.rs (line 1078-1081) checks `surprises.contains(&json!("src/prompt.rs"))` — this test would need updating to check for the rank-suffixed string. That's in the same file, allowed (tests count as part of the change file).
+- Consumers of surprise strings: let me verify none parse surprise paths from real events. compute_accuracy_stats — need to check what it reads. Let me look.
+
+Actually, wait. Let me check `compute_accuracy_stats` and `scored_broke`. Line 541: `let surprises = scored_broke.saturating_sub(e.hit_count);` — that's in compute_risk_meter, using counts, not strings. So surprise strings are only used for: display in reports (which format from in-memory ValidationResult, not from JSONL strings), and counts.
+
+Hmm, is there anything that reads the surprises string paths from the JSONL across the codebase? Let me search more broadly. Actually the search showed only:
+- commands_risk_report.rs fixtures (test data input)
+- commands_risk_snapshots.rs tests
+
+And no production consumer reads surprise path strings from parsed events — `parse_validation_events` only extracts counts: `val["surprises"].as_array().map(|a| a.len())`.
+
+So folding rank into the string is safe for correctness. But is it *good*? The task's example says "fictional rank-5 surprise vs rank-900 surprise both persist without panic" — suggesting persisting rank number. Folding into string like `"src/foo.rs#5"` persists it.
+
+But hmm, polluting the surprise path string is ugly and could confuse future consumers who parse paths back. Let me think about the alternative: extend `write_validation_event` with an optional `surprise_ranks: Option<&[Option<usize>]>` parameter. That requires updating callers in commands_risk.rs. The task says "Files: src/commands_risk_snapshots.rs" and "max one source file" — but that's the Title constraint: "Wire surprise-rank context into the watch-failure validation path (max one source file)". Adding a parameter to a shared function means editing commands_risk.rs too (one call site for `replay_validate_core`).
+
+Hmm — but is touching commands_risk.rs for a one-line call-site update a violation? The constraint says "max one source file". I should respect it strictly. Both the "What" and "Files" sections say one file.
+
+Actually wait, let me reconsider. Can I add the rank persistence in a way that's confined to commands_risk_snapshots.rs?
+
+Idea: Add a small helper `write_validation_event_with_ranks` — no wait, that would duplicate the whole writer.
+
+Better idea: Keep `write_validation_event` unchanged, and in `auto_validate_after_failure_to`, fold ranks into the surprise strings. Then add a doc note. Actually...
+
+Hold on. Alternative clean approach: I can make the surprise strings carry rank via a suffix separator, and ALSO keep them parseable — e.g. keep the surprise array as paths, and add a *second* array field `surprise_ranks` written in the same event. But to persist a second array I still need to touch the writer.
+
+Hmm, what about: after `write_validation_event` writes the line, `auto_validate_after_failure_to` could... no, that's hacky (re-writing JSON by appending fields post-hoc is fragile).
+
+Let me re-read the task constraints once more:
+
+"2. Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+OK so both options are explicitly sanctioned:
+- (a) extend the event's surprise representation with a rank field — e.g. make surprises an array of `{path, rank}` objects, OR add a parallel array. Both require touching the writer.
+- (b) fold the rank into the surprise string.
+
+"Prefer the smallest schema change that keeps parse_validation_events backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+`parse_validation_events` reads `val["surprises"].as_array().map(|a| a.len())` — both (a) with objects and (b) with strings keep `as_array().len()` working. So both keep it backward compatible.
+
+Now, the "max one source file" constraint is in the title. Extending the surprise representation (option a) via changing `write_validation_event`'s signature would require a change in `commands_risk.rs` (the `replay_validate_core` call site). That's 2 files. Even adding an optional param requires updating that call site.
+
+Option (b) — fold rank into the surprise string — requires NO changes to `write_validation_event`'s signature, so NO changes to commands_risk.rs. All changes stay in commands_risk_snapshots.rs. This is the "smallest schema change" and respects the one-file constraint.
+
+But folding into string loses the distinction path vs rank for consumers... currently NO consumer reads surprise path strings from persisted events. The only thing that reads the surprises array is len(). So folding rank into the string is genuinely safe today, and the task explicitly offers it.
+
+However — hmm, I want the data to be clean for the dream milestone: future consumers will want to read rank data. A parallel `surprise_ranks` array would be cleaner data. Let me check if I can add a parallel array WITHOUT changing the writer signature... no, the writer builds the JSON object; it needs the data passed in.
+
+Actually wait — there's another possibility. `write_validation_event` takes `surprises: &[String]`. What if in `auto_validate_after_failure_to` I fold the rank into the string with a machine-readable suffix AND also print it in the stderr summary. Then, for future machine reading, I add a `parse_validation_event_surprise_ranks` helper... but the rank data IS in the string, so parsing it back is possible but ugly.
+
+Let me weigh:
+- Option (b) string folding: `"src/foo.rs (rank #12)"` — human-readable in JSONL, count-safe, one file. But a future consumer extracting paths must strip the suffix. And the accuracy/report fixtures in commands_risk_report.rs still pass (they're count-based).
+- Option (a) parallel array: needs writer change → touches commands_risk.rs (1 call site) → 2 files. Cleaner data.
+
+The title constraint "max one source file" is explicit and repeated in the task. I'm told to respect it. But the "What" section says "either extend the event's surprise representation with a rank field, or fold the rank into the surprise string" — the second option is explicitly sanctioned as the least invasive.
+
+Hmm wait, actually, let me re-examine: "extend the event's surprise representation with a rank field" — could this mean changing the `surprises` array values from strings to objects `{"path": "...", "rank": 12}`? That also requires the writer change.
+
+OR — I could write the rank into the surprises array string in a way that also keeps a separate field: What about adding the rank as a property of... no.
+
+Actually, let me reconsider whether touching commands_risk.rs is so bad. The task file says "Files: src/commands_risk_snapshots.rs". The title says "max one source file". But `write_validation_event` is shared. If I add the rank only in the watch path (which is what the task asks — "Wire surprise-rank context into the watch-failure validation path"), the rank data only exists in auto_validate_after_failure_to. The replay path already persists ranks implicitly? No — replay path computes ranks in compute_validation but `replay_validate_core` maps `result.surprises.iter().map(|(f, _)| f.clone())` — it DISCARDS the rank when persisting! Interesting — so the replay path also loses rank at persistence time. So the whole validation ledger has no rank data today.
+
+The task is scoped: "the watch path can't tell whether a surprise was a near-miss (rank 11) or a cold miss (rank 700+). That difference matters for the calibration readout. This is exactly the fidelity the dream milestone needs." — specifically the watch path.
+
+OK here's my decision: to respect the one-file constraint cleanly, I'll fold the rank into the surprise string in the watch path only, with a clear format, AND add a backward-compatible parser helper + tests in commands_risk_snapshots.rs. Format: `"src/foo.rs#rank=12"`? Or human-friendlier: the replay path's report prints `(rank #12)`. For the ledger, a machine-parseable suffix is better.
+
+Hmm, actually let me think about what a future `compute_accuracy_stats`-style consumer would want: to compute e.g. "average surprise rank" or "surprise rank ≤ 20 rate". They'd parse the JSONL surprises array. If each entry is `"src/foo.rs#12"`, parsing is `rsplit_once('#')`. Fine.
+
+But wait — actually, there's potential collateral: `commands_risk_report.rs` test fixtures are literal JSONL strings fed to `compute_accuracy_stats`. Those fixture surprises are plain `"src/b.rs"`. If a future consumer tries to parse ranks from ALL surprises, plain strings have no rank → None. But `compute_accuracy_stats` doesn't read surprise strings at all (counts only — actually let me verify by reading it).
+
+Let me read compute_accuracy_stats to make sure surprise strings aren't read.
+
+Actually I already grepped — `src/commands_risk_accuracy.rs` had no matches for "surprise". So it reads only counts via parse_validation_events → ValidationEvent fields. Safe.
+
+Now — one more consideration. The existing test `test_auto_validate_watch_failure` at line 1078-1081 asserts surprises contain exact `"src/prompt.rs"` strings. If I fold rank into the string, that test breaks. I'll update it to strip/assert the suffixed format, or assert the prefix. The task says "Existing watch tests (src/watch.rs) stay green — this is additive." — the src/watch.rs tests don't check these strings (they check auto_validate is invoked). The snapshots test I can update since I'm changing behavior in the same file.
+
+Wait, actually, let me re-read: "A fixture watch-failure event: a changed src/foo.rs that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+So the test wants: recorded event includes rank. With string folding, "includes its rank" = the string contains the rank.
+
+Hmm, actually — now I'm reconsidering option (a)-lite: I could change the JSON shape of surprises to objects `{"path": "...", "rank": N}` ONLY in the watch path... but the writer is shared: `write_validation_event` serializes whatever strings are passed. If I pass `"src/foo.rs (rank #12)"` strings, the JSON has strings. If I want objects, the writer must change.
+
+Let me look at how much of a change adding an optional parallel array to the writer would be:
+
+```rust
+pub(crate) fn write_validation_event(
+    ...,
+    surprises: &[String],
+    ...,
+    total_scored: Option<usize>,
+    scored_broke: Option<usize>,
+)
+```
+
+Add `surprise_ranks: Option<&[Option<usize>]>` after scored_broke. Then:
+```rust
+if let Some(ranks) = surprise_ranks {
+    let arr: Vec<serde_json::Value> = ranks.iter().map(|r| match r { Some(n) => json!(n), None => serde_json::Value::Null }).collect();
+    event["surprise_ranks"] = serde_json::json!(arr);
+}
+```
+
+Callers to update:
+1. commands_risk.rs:2411 (replay_validate_core) — add `None` or actually pass ranks! Hmm, but task says don't touch other files.
+2. commands_risk_snapshots.rs:332 (auto_validate_after_failure_to) — pass the ranks.
+3. tests at 1201, 1290.
+
+That's 2 files. Violates "max one source file" in title.
+
+Decision: Go with string folding (option b). It's explicitly sanctioned, keeps one file, keeps parse_validation_events untouched, and the test fixtures elsewhere stay valid.
+
+Format choice: I want it readable AND parseable AND unambiguous. Looking at the replay report format: `(rank #12)`. For the ledger JSONL, I'll use `"src/foo.rs (rank #12)"`? Hmm — but wait, there's a subtlety: surfaces `surprises.contains(&json!("src/prompt.rs"))` in the existing test. If a future test or consumer does exact-match on paths, folding breaks exact matches. But that's inherent to option b, and the task sanctions it.
+
+Actually, hmm, let me reconsider one more time. What about a cleaner hybrid that stays in one file AND keeps the surprises array as pure paths: `auto_validate_after_failure_to` could append the rank info as a separate JSON field by... no, can't without touching writer.
+
+OK wait, actually — let me re-read the task ONE more time to be sure about scope:
+
+"Files: src/commands_risk_snapshots.rs"
+"1. In auto_validate_after_failure_to, when classifying surprises, include each surprise's rank in the scored universe... compute it from compute_file_risk_scores()."
+"2. Persist that rank as part of the write_validation_event call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps parse_validation_events backward-compatible"
+
+Given "Files: src/commands_risk_snapshots.rs" is definitive and the second option is explicitly offered, string folding it is. But let me make the format deliberately machine-friendly. I'll go with `"src/foo.rs#rank=12"`? or simpler `"src/foo.rs#12"`. Hmm, "src/foo.rs#12" could be confused with src line numbers? In this repo files are `src/foo.rs` — a `#12` suffix is unlikely to appear in the path. Let me use a clear suffix: `"src/foo.rs (rank #12)"`. 
+
+For parsing out: future consumers can `strip_suffix` on ` (rank #N)`. I'll also add a small crate-private helper + unit test to document the format.
+
+Hmm wait, actually — one more idea. What about keeping surprises as pure paths AND adding the rank into the accuracy display message? No — task explicitly wants rank persisted in the event.
+
+Actually, hmm, let me reconsider option (a) once more, because clean data matters for the dream milestone. The constraint is "max one source file" — in the Title. But the "What" says "all in src/commands_risk_snapshots.rs, one function". The intent is: don't spread changes. If I add an optional parameter with a default-ish approach... Rust has no defaults. BUT — I could avoid changing the writer signature by *not* using `write_validation_event` for the rank and instead appending it post-hoc to the produced line? That requires reading the file back, modifying, rewriting — fragile and racy. No.
+
+Alternatively: add the rank as part of the surprises string — the sanctioned option. FINAL: string folding with a clear, parseable, documented format.
+
+Wait, actually, hold on. Let me reconsider — is there any consumer TODAY that exact-matches surprise paths from the persisted JSONL? Let me check commands_risk_report.rs line 380-400 more carefully — the fixture at line 392-393 feeds compute_accuracy_stats-style functions. Also check risk meter uses scored_broke. I grepped and found no production reader of surprise path strings. Let me double-check with a broader grep for `["surprises"]`:
+
+I'll verify quickly. Then implement:
+
+**Implementation plan:**
+
+In `auto_validate_after_failure_to`:
+1. After building `surprises: Vec<String>`, compute `all_ranked: Vec<String>` from `compute_file_risk_scores()` (map `.path`).
+2. For each surprise, find rank: `all_ranked.iter().position(|p| p == f).map(|i| i + 1)` → 1-based like replay path.
+3. Replace each surprise string with formatted `format!("{f} (rank #{r})")` when rank known; keep plain path when rank unknown (file not in scored universe — shouldn't happen for src/*.rs, but defensive).
+4. Add a doc comment explaining the format and a helper `surprise_rank_from_path` (or inline parse) — and maybe a `surprise_rank` extractor used by tests.
+5. Update the stderr summary to show ranks too? The task doesn't require, but it's nice. Keep minimal — maybe include in surprise list.
+6. Update existing test at 1078-1081 for new format.
+7. Add new test: fixture surprise with rank 5 (in scored universe position 4) and rank 900 (position 899) — hmm, rank 900 requires a scored universe of ≥900 files. `compute_file_risk_scores()` is repo-dependent and the test would run in this repo, not a sandbox. But `auto_validate_after_failure_to` calls `compute_file_risk_scores()` which reads git history + disk — in this repo during cargo test. That's the existing behavior (it already calls... wait, does auto_validate_after_failure_to already call compute_file_risk_scores? No! It only calls learn_weights_from_history() at the end, which internally calls compute_file_risk_scores. Let me check learn_weights_from_history.
+
+Line 336-345: let me check what learn_weights_from_history_to does — it probably calls compute_file_risk_scores. So the watch path already computes risk scores indirectly. Adding an explicit call is fine.
+
+But wait — in a TEST, `auto_validate_after_failure_to` runs in this real repo (tests use temp paths for snapshots/validations but the function reads real repo state for risk scores — the existing test `test_auto_validate_watch_failure` already calls it and exists fine; learn_weights_from_history() runs and reads git history of the real repo — it works because we're in the repo; that's fine, tests run in the repo dir, and run_git guards only destructive commands).
+
+For the rank test: the scored universe depends on the real repo's git history (≥ this repo's ~150 src files + format files). Rank 900 is fictional — the surprise file won't be found in the scored universe → rank None → persists as plain path (no rank suffix). The task says "a fictional rank-5 surprise vs rank-900 surprise both persist without panic" — i.e., the persistence path must not panic regardless of rank magnitude. So my test should verify: (a) a surprise that IS in the scored universe gets a rank suffix; (b) a surprise NOT in the universe gets no suffix and everything works without panic.
+
+But how do I make (a) deterministic in a test? The scored universe is real-repo-dependent. A changed file like `src/commands_risk_snapshots.rs` is definitely in the universe (it's a src/*.rs on disk). Its rank is whatever the scorer computes — assert the string ends with `(rank #N)` for some N. For a non-existent file like `src/foo.rs` (not on disk, no churn) — it's NOT in the universe → no rank → plain string. Both persist without panic. Good deterministic assertions:
+- surprise `"src/commands_risk_snapshots.rs"` (real file) → recorded string matches `^src/commands_risk_snapshots\.rs \(rank #\d+\)$`.
+- surprise `"src/foo.rs"` (fictional) → recorded as plain `"src/foo.rs"` (or no suffix).
+
+That covers the "rank-5 vs rank-900" spirit: one in-universe near/far-rank, one out-of-universe.
+
+Wait — actually for the "fictional rank-5 vs rank-900" — maybe I should test the helper that formats ranks directly with fictional values. Let me add a pure helper `format_surprise_with_rank(file: &str, rank: Option<usize>) -> String` — testable with rank 5 and rank 900 directly. That's cleaner and satisfies "both persist without panic" via the writer path (already exercised) plus the pure format helper test.
+
+Let me now write the code.
+
+**Code changes:**
+
+```rust
+/// Suffix-appended surprise rank indicator, e.g. `src/foo.rs (rank #12)`.
+/// ...
+```
+
+In auto_validate_after_failure_to:
+
+```rust
+// Rank context: the scored universe (all files the scorer could rank,
+// most-risky first). A surprise's position here tells us whether it was a
+// near-miss (rank just past top-10) or a cold miss (deep in the list).
+let all_ranked: Vec<String> = compute_file_risk_scores()
+    .iter()
+    .map(|r| r.path.clone())
+    .collect();
+
+// Classification as before, then:
+for f in &src_files {
+    if predicted_set.contains(f.as_str()) {
+        hits.push(f.to_string());
+    } else {
+        let rank = all_ranked.iter().position(|p| p == f).map(|i| i + 1); // 1-based
+        surprises.push(format_surprise_with_rank(f, rank));
+    }
+}
+```
+
+Wait — but `hits` is unchanged (plain paths). Only surprises get rank suffixes. And the stderr summary uses `surprise_list.join(", ")` — will now show ranks. Good.
+
+But careful: `total_changed = hits.len() + surprises.len()` — counts still fine.
+
+Also: the existing test asserts `surprises.contains(&json!("src/prompt.rs"))` — must update to match the suffixed format. In the test repo, is `src/prompt.rs` in the scored universe? Yes — real file in this repo → rank computed → suffix appended. But its exact rank number is non-deterministic-ish (depends on git history at test time — but cargo test runs in the repo, and the rank is whatever it is; the format is stable). So assert with a regex or strip suffix and compare prefix.
+
+Let me also double check `compute_file_risk_scores` is `pub(crate)` and re-exported — yes, line 9 imports it already in commands_risk_snapshots.rs. 
+
+Now the helper:
+
+```rust
+/// Render a surprise file path with its scored-universe rank appended, e.g.
+/// `src/watch.rs (rank #12)`. When the rank is unknown (file not in the scored
+/// universe), returns the plain path so consumers that exact-match paths keep
+/// working. The rank is 1-based (rank 1 = most risky), matching the replay
+/// path's `compute_validation` convention.
+fn surprise_with_rank(file: &str, rank: Option<usize>) -> String {
+    match rank {
+        Some(r) => format!("{file} (rank #{r})"),
+        None => file.to_string(),
+    }
+}
+```
+
+Add doc to `write_validation_event`? The surprises doc... I'll add a comment near auto_validate_after_failure_to.
+
+Now the test update — existing test at 1078:
+
+```rust
+let surprises = parsed["surprises"].as_array().unwrap();
+assert_eq!(surprises.len(), 2, "should have 2 surprises");
+// Surprise paths are suffixed with their scored-universe rank
+// (`src/prompt.rs (rank #N)`); check the path prefix so the test is
+// robust to repo-history-dependent rank values.
+let surprise_paths: Vec<&str> = surprises
+    .iter()
+    .map(|s| s.as_str().unwrap().split(" (rank #").next().unwrap())
+    .collect();
+assert!(surprise_paths.contains(&"src/prompt.rs"));
+assert!(surprise_paths.contains(&"src/safety.rs"));
+```
+
+Wait — need to handle the case where rank is NOT the suffix... if a surprise file isn't in the universe, the string is plain. `split(" (rank #").next()` returns the whole string → still matches the path. Good — robust either way.
+
+New test:
+
+```rust
+#[test]
+fn test_auto_validate_watch_failure_records_surprise_rank() {
+    // A changed src/ file that is NOT in the predicted top-10 produces a
+    // surprise whose recorded event includes the file's rank in the scored
+    // universe (suffix `(rank #N)`), mirroring the replay path. An
+    // out-of-universe file persists as a plain path — no panic either way.
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let snap_path = dir.path().join("snapshots.jsonl");
+    let val_path = dir.path().join("validations.jsonl");
+
+    let snapshot = serde_json::json!({
+        "ts": "2025-01-15T12:00:00Z",
+        "day": 100,
+        "git_hash": "abc1234",
+        "top_10": [
+            {"path": "src/main.rs", "score": 0.9, "signals": ["churn"]},
+        ]
+    });
+    std::fs::write(&snap_path, serde_json::to_string(&snapshot).unwrap())
+        .expect("write snapshot");
+
+    // src/commands_risk_snapshots.rs is a real src file, so it IS in the
+    // scored universe and must get a rank suffix. src/foo.rs is fictional
+    // (never on disk, no churn) — out of universe, plain path.
+    let changed = vec![
+        "src/commands_risk_snapshots.rs".to_string(), // surprise, in universe
+        "src/foo.rs".to_string(),                     // surprise, out of universe
+    ];
+
+    auto_validate_after_failure_to(&changed, &snap_path, &val_path);
+
+    let contents = std::fs::read_to_string(&val_path).expect("read validation file");
+    let parsed: serde_json::Value =
+        serde_json::from_str(contents.lines().next().unwrap()).expect("valid JSON");
+    let surprises = parsed["surprises"].as_array().unwrap();
+    assert_eq!(surprises.len(), 2, "should have 2 surprises");
+
+    let in_universe = surprises
+        .iter()
+        .find(|s| s.as_str().unwrap().starts_with("src/commands_risk_snapshots.rs"));
+    assert!(
+        in_universe.is_some_and(|s| {
+            let s = s.as_str().unwrap();
+            let rest = &s["src/commands_risk_snapshots.rs".len()..];
+            rest.starts_with(" (rank #") && rest.ends_with(')') && rest.len() > 9
+        }),
+        "in-universe surprise should carry a (rank #N) suffix, got {:?}",
+        surprises
+    );
+    assert!(
+        surprises
+            .iter()
+            .any(|s| s.as_str() == Some("src/foo.rs")),
+        "out-of-universe surprise should persist as a plain path, got {:?}",
+        surprises
+    );
+}
+```
+
+And a pure helper test for rank 5 vs rank 900 + None:
+
+```rust
+#[test]
+fn test_surprise_with_rank_formats() {
+    assert_eq!(
+        surprise_with_rank("src/foo.rs", Some(5)),
+        "src/foo.rs (rank #5)"
+    );
+    assert_eq!(
+        surprise_with_rank("src/foo.rs", Some(900)),
+        "src/foo.rs (rank #900)"
+    );
+    assert_eq!(surprise_with_rank("src/foo.rs", None), "src/foo.rs");
+}
+```
+
+Also — the stderr summary line: `Surprises (not predicted): ...` will now include ranks via joined strings. Fine.
+
+One more thing: the task says "compute it from compute_file_risk_scores()". Should I call it unconditionally or lazily (only when surprises exist)? compute_file_risk_scores does git calls (file_change_counts ×2) + disk reads — moderately expensive. The watch path already calls learn_weights_from_history() at the end (which also does git calls + scoring). Calling it once more for ranking is acceptable, but I can be frugal: only compute `all_ranked` if there ARE surprises. Since we already loop to classify, I'll compute all_ranked only when the surprises branch is taken... but the loop branches inline. Simpler: compute all_ranked lazily with an Option and compute on first surprise:
+
+Actually simplest clean approach:
+
+```rust
+let mut hits: Vec<String> = Vec::new();
+let mut surprises: Vec<String> = Vec::new();
+// Scored-universe ranking, computed lazily only when a surprise first
+// appears (most sessions have at least one, but avoid the git+disk cost
+// when every change was predicted).
+let mut all_ranked: Option<Vec<String>> = None;
+for f in &src_files {
+    if predicted_set.contains(f.as_str()) {
+        hits.push(f.to_string());
+    } else {
+        let ranked = all_ranked.get_or_insert_with(|| {
+            compute_file_risk_scores().iter().map(|r| r.path.clone()).collect()
+        });
+        let rank = ranked.iter().position(|p| p == f).map(|i| i + 1); // 1-based
+        surprises.push(surprise_with_rank(f, rank));
+    }
+}
+```
+
+That's clean and lazy. 
+
+Now — wait, one concern: `all_ranked.get_or_insert_with` — the closure borrows? No, it returns Vec<String> owned, fine. And `ranked` borrows from all_ranked while `surprises.push` mutates surprises — different variables, fine.
+
+Let me also double-check: `parsed["surprises"]` in the EXISTING test asserts contains plain strings — I'm updating that test. Any other tests that assert on surprise path strings from auto_validate? Let me re-grep. Line 1078-1081 only. And test fixtures in commands_risk_report.rs use literal JSONL with plain strings — those don't go through auto_validate, so unchanged. Good.
+
+Also line 1315 fixture: `"surprises":["src/x.rs"]` — literal, unchanged.
+
+Now, doc updates: task says "If you changed behavior, added features, or modified architecture, update the docs". This is an internal evolve change (opt-in via watch path, no user-visible surface change). The CLAUDE.md mentions `auto_validate_after_failure` in the commands_risk_snapshots description: "records outcomes". Should I update CLAUDE.md? The change is additive to an internal data format — CLAUDE.md's description of auto_validate_after_failure is still accurate ("records outcomes"). The surprise-rank context is a data-format nuance not currently documented in CLAUDE.md. There's a mention: "auto_validate_after_failure records outcomes" — still true. I could add a small note but the docs section is already extremely long. Minimal: no doc change needed since no documented statement becomes false. Actually, let me check if CLAUDE.md documents the validation event shape... The commands_risk_snapshots.md entry mentions "validation event" persistence via `auto_validate_after_failure`. The shape isn't documented. So no doc change strictly needed. I'll skip doc updates (the behavior is additive and matches existing descriptions).
+
+Hmm, wait — actually let me reconsider whether I should ALSO surface the rank in the stderr summary more prominently... The task's "What" only asks for persistence. Keep minimal.
+
+Let me now verify there's no consumer that parses surprise path strings from real events (to make sure the suffix doesn't break anything):
+────────────────────────────────────────────────────────────────────────────────
+Let me verify no production consumer reads surprise path strings from persisted events (only counts), and check `learn_weights_from_history`:
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn '"surprises"' src/ --incl… ✓ (13ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the code. My plan:
+
+1. In `auto_validate_after_failure_to`, compute `all_ranked` from `compute_file_risk_scores()` (like replay path does at line 2468-2469 of commands_risk.rs), and for each surprise, find its rank in the scored universe.
+
+2. Persist that rank. The task says: "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+The minimal schema change options:
+- Extend the event's surprise representation with a rank field
+- Fold the rank into the surprise string
+
+Wait — a key consideration: `compute_validation` in commands_risk.rs already persists `surprises` as plain strings `&[String]` (only file paths, rank computed but discarded at persistence; rank used only in the report). The replay path strips rank: `result.surprises.iter().map(|(f, _)| f.clone())`. So the user *wants* the watch path to persist the rank, unlike the replay path currently does.
+
+The task says: "Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+Folding rank into the surprise string would break consumers that read surprise strings as file paths... but wait, do any production consumers read surprise strings as file paths? Let me check.
+
+- `parse_validation_events` only reads `surprises` array length (line 417).
+- `compute_risk_meter` uses `scored_broke`, `hit_count` — not surprise strings.
+- `compute_accuracy_stats` in commands_risk_accuracy.rs — let me check what it reads. It takes `&[ValidationEvent]` which only has counts. So no path-string reads in production.
+
+The test at line 1078-1081 does `parsed["surprises"].as_array().unwrap()` and `surprises.contains(&serde_json::json!("src/prompt.rs"))`. If I change the surprise representation to objects `{"path": ..., "rank": N}`, this test breaks — but I can update the test. The task says "Existing watch tests (src/watch.rs) stay green — this is additive." The tests in commands_risk_snapshots.rs can be updated.
+
+Which option is least invasive & most honest?
+
+Option A: surprise becomes an array of objects `[{"path": "src/foo.rs", "rank": 5}, ...]`. But that breaks the semantic of `parse_validation_events` reading `val["surprises"].as_array().map(|a| a.len())` — actually that still works, `as_array().len()` counts objects fine. And it's a bigger change to the JSON shape.
+
+Option B: Add an optional top-level field `surprise_ranks` mapping path → rank, e.g. `{"surprises": [...], "surprise_ranks": {"src/foo.rs": 5}}`. This is purely additive — old consumers reading `surprises` array count are unaffected, and `parse_validation_events` doesn't need to change. Actually the task explicitly says "No changes to `parse_validation_events`/`compute_accuracy_stats` consumers." So adding an optional separate field is the cleanest.
+
+But wait — the task says "extend the event's surprise representation with a rank field". Hmm, "extend the event's surprise representation" could mean adding a parallel field to the event (not necessarily re-shaping the surprises array). Given the constraint "pick the least invasive option... Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)", the safest is:
+
+- Add an optional `surprise_ranks` object field to the event JSON: `{"src/foo.rs": 12, "src/bar.rs": 45}` (1-based rank). Only include it when we have the rank computed (watch path). The replay path won't include it (or could also, but task says watch path only — "Files: src/commands_risk_snapshots.rs" — so only touch write_validation_event in that file... but write_validation_event is shared with replay. Adding a new optional arg defaulting to None keeps replay unchanged).
+
+Actually, how does write_validation_event get called? It has 12 args already (with `#[allow(clippy::too_many_arguments)]`). Adding a 13th optional arg `surprise_ranks: Option<&HashMap<String, usize>>` or similar... clippy too_many_arguments is already allowed at the fn, so fine. But there are multiple call sites (commands_risk.rs:2411, snapshots.rs:332, snapshots.rs:1293 test). I'd need to update all call sites with `None`. That's fine and surgical.
+
+Alternatively — fold rank into the surprise string: `"src/foo.rs (rank 12)"`. That changes `surprises.contains(&json!("src/prompt.rs"))` test and would corrupt the path meaning in `compute_validation`-style consumers. But the watch-path consumers don't read the paths... Actually wait, `write_validation_event` is shared: the replay path passes real paths. If the watch path folds ranks into strings, then the JSONL has mixed representations (some events with paths, some with "path (rank N)" strings). `parse_validation_events` only counts — fine. But that's inconsistent data; future consumers reading paths would stumble. The object-per-surprise approach is more honest but heavier.
+
+Given the constraint "No changes to parse_validation_events/compute_accuracy_stats consumers" and "prefer smallest schema change", I'll go with an optional additive field: `surprise_ranks` as a JSON object `{path: 1-based_rank}` included only when ranks are known. Actually, let me reconsider — the task says "extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+Hmm. "extend the event's surprise representation with a rank field" — this reads like the surprises representation gets a rank. But then the least invasive... Let me think about what's genuinely smallest and backward-compatible:
+
+Parallel object field `surprise_ranks`:
+- `parse_validation_events`: untouched ✓
+- Existing JSONL lines (old, no field): parse defensive ✓ (just don't read it)
+- Test at 1078: `parsed["surprises"]` still an array of plain strings ✓ — the existing test stays GREEN unmodified!
+- Accuracy stats: untouched ✓
+- Schema change: additive optional field ✓
+
+This is the smallest change that keeps EVERYTHING backward-compatible, even the existing snapshots.rs tests. Only the new rank info is additive.
+
+But is a `Map<String, usize>` in the JSON a "least invasive" schema? Yes — a single optional field on the event, parallel to `total_scored`/`scored_broke` which already exist as optional fields. This matches the established pattern perfectly (optional lift-measurement fields).
+
+Now for computing the rank: in `auto_validate_after_failure_to`, after classifying surprises:
+
+```rust
+// Compute the scored-universe rank for each surprise (mirror of replay's
+// `all_ranked`). The watch path has no `all_ranked` yet, so build it from the
+// current risk ranking.
+let all_ranked: Vec<String> = compute_file_risk_scores().iter().map(|r| r.path.clone()).collect();
+
+let mut surprise_ranks: Option<std::collections::HashMap<String, usize>> = None;
+if !surprises.is_empty() {
+    let mut ranks = std::collections::HashMap::new();
+    for f in &surprises {
+        if let Some(i) = all_ranked.iter().position(|r| r == f) {
+            ranks.insert(f.clone(), i + 1); // 1-based rank
+        } else {
+            ranks.insert(f.clone(), all_ranked.len() + 1); // unranked: beyond the scored universe?
+        }
+    }
+    surprise_ranks = Some(ranks);
+}
+```
+
+Hmm wait — should I include unranked (not in scored universe)? The task says: "include each surprise's rank in the scored universe (0-based position in the current `compute_file_risk_scores()` ranking, +1 for display if available)." And "the watch path can't tell whether a surprise was a near-miss (rank 11) or a cold miss (rank 700+)". 
+
+In the watch path, surprises are already filtered to `src/` files. But `compute_file_risk_scores()` only returns `src/**/*.rs` files. So a changed `src/foo.rs` that's not on disk anymore... edge case. If a surprise isn't in the ranked list, we could omit it from the map (Option semantics — "rank if available"), mirroring compute_validation's `rank: Option<usize>` (None when not in all_ranked). That's the cleanest mirror: only include ranks we actually know.
+
+Wait, but there's a price: `compute_file_risk_scores()` runs git commands (file_change_counts). It's already called in this code path (`learn_weights_from_history` -> reads files, and elsewhere). It's cheap enough — the replay path also calls it (line 2468). Fine.
+
+Now the write call. The current signature:
+
+```rust
+pub(crate) fn write_validation_event(
+    validation_path, day, trigger, predicted_count, hits, surprises, accuracy_pct,
+    git_hash_from, git_hash_to, total_scored: Option<usize>, scored_broke: Option<usize>,
+) -> std::io::Result<()>
+```
+
+Add a 13th param `surprise_ranks: Option<&std::collections::HashMap<String, usize>>` — then in the JSON body:
+
+```rust
+if let Some(ranks) = surprise_ranks {
+    if !ranks.is_empty() {
+        event["surprise_ranks"] = serde_json::json!(ranks);
+    }
+}
+```
+
+Hmm, should I only add when non-empty? total_scored/scored_broke pattern: only persist when Some. For an empty map... there'd be no surprises at all if the map were empty (since we only build ranks for surprises, and surprises non-empty... but if no surprise had a rank, map could be empty with surprises non-empty). Persisting an empty map `{}` is harmless but adds noise. Given backward-compat with the scoring consumers reading `total_scored`/`scored_broke`, I'll persist whenever `Some` and non-empty.
+
+Wait, actually — cleaner: only include the field when `Some(map)` and `!map.is_empty()`. If all surprises failed to rank (None case in compute_validation mirror), we pass None.
+
+Now — the third call site (test at 1293) needs a `None` added. And commands_risk.rs:2411 (replay path) needs `None`. Let me check if there are other callers... grep showed: snapshots.rs:332 (watch path), snapshots.rs:1293 (test), commands_risk.rs:2411 (replay). Three sites.
+
+Actually, wait — should the replay path also pass ranks? The task says "Files: src/commands_risk_snapshots.rs, one function" — the scope is the watch path. The replay path already has rank info in `result.surprises` but strips it. Task doesn't ask to change replay. Adding the param with `None` at replay keeps it minimal. (Could be a follow-up.)
+
+Now the test. The task's test requirement: "A fixture watch-failure event: a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+But wait — `compute_file_risk_scores()` runs on the ACTUAL repo (git commands, reads src/ dir). In a test, that's the real repo working dir... The existing test `test_auto_validate_after_failure_write` uses temp paths for snapshot/validation but calls `auto_validate_after_failure_to`, which would now call `compute_file_risk_scores()` against the real repo (cwd = repo root during cargo test). That runs actual git commands — which work in this repo (it IS a git repo). file_change_counts uses run_git... let me check git.rs's run_git guard: "#[cfg(test)] destructive-command guard — calling run_git() with a destructive subcommand from the project root panics". file_change_counts presumably calls `git log` — non-destructive, fine.
+
+But for test determinism: `compute_file_risk_scores()` rank of "src/prompt.rs" depends on the real repo state — not deterministic in a unit test. So the test must not assert specific rank values from the real repo. Instead:
+
+- Test 1: fixture watch-failure where changed includes a non-predicted src file — assert the event includes a `surprise_ranks` field (or the surprise has a rank in the map... but rank value is environment-dependent). Hmm.
+
+How to make it deterministic? The task says "a fictional rank-5 surprise vs rank-900 surprise both persist without panic." That suggests testing `write_validation_event` directly with a crafted `surprise_ranks` map — ranks 5 and 900 — and asserting they persist in the JSONL unpanicked. That's deterministic and tests persistence.
+
+And for the watch-path integration: assert that when a surprise occurs, a `surprise_ranks` field IS present (whatever the real rank). The real rank for e.g. `src/safety.rs` in this repo — is `src/prompt.rs`/`src/safety.rs` in the ranked universe? compute_file_risk_scores returns all src/*.rs files from disk + git churn, so yes, any src/*.rs on disk is in the universe. So the rank map will be non-empty for src/ surprises. Assert `surprise_ranks` present and contains the surprise path.
+
+Wait — but the existing test writes a snapshot that predicts src/main.rs, src/cli.rs, src/watch.rs — and the changed files include src/prompt.rs and src/safety.rs as surprises. After my change, the event should now include `surprise_ranks` with entries for src/prompt.rs and src/safety.rs. The existing assertions (`surprises` array still plain strings, contains check) stay green. I can extend that test to also check `surprise_ranks` presence. That keeps existing tests green AND adds the new assertions.
+
+But hold on — one problem: `auto_validate_after_failure_to` calls `compute_file_risk_scores()` which calls `crate::git::file_change_counts` → `run_git`. In tests, run_git destructive guard only panics on destructive subcommands; `git log`/`git rev-list` are fine. Also `std::fs::read_dir("src")` and `"src/format"` — relative to cwd. In `cargo test`, cwd is the crate root — this repo — so `src/` exists. Deterministic enough (the file exists on disk; rank position may vary but we don't assert the value).
+
+But wait: is there a risk that calling compute_file_risk_scores in a unit test is slow or flaky? It runs git log with different window args. Existing tests in commands_risk.rs already call it (test at 2586, 2645). So it's an established pattern. Fine.
+
+However — there's a subtlety with the existing test `test_auto_validate_after_failure_write` which runs in the real repo: it's fine, but let me also think about the case where src/prompt.rs is NOT in the ranked universe (e.g., it's not on disk? No — src/prompt.rs exists in this repo). OK.
+
+Now let me also double-check: the task says "0-based position in the current `compute_file_risk_scores()` ranking, +1 for display if available". So rank = position + 1 (1-based), mirroring compute_validation's `i + 1`. Good.
+
+Now let me also verify — should the rank be persisted for ALL surprises or just scored ones? The watch path filters to src/ files only, and compute_file_risk_scores covers all src/*.rs. So effectively all surprises get ranks. If one doesn't (deleted file?), we skip it (mirror of Option).
+
+Let me now also double check the "retreat version": "Skip the rank entirely; ship only a comment clarifying the watch path's surprise semantics." I'll aim for the full version.
+
+Let me write a test first (per evolve rules):
+
+Test plan:
+1. Extend `test_auto_validate_after_failure_write` (or add new test) to assert `surprise_ranks` exists for surprises.
+2. New test: `write_validation_event` persists fictional ranks 5 and 900 without panic (deterministic, via direct call with a crafted map).
+
+Actually wait — write_validation_event takes `surprise_ranks` as a HashMap. Let me design the signature: `surprise_ranks: Option<&std::collections::HashMap<String, usize>>`.
+
+Let me now implement. First, the changes to `auto_validate_after_failure_to`:
+
+```rust
+    // Only produce output if there's something meaningful to report
+    if hits.is_empty() && surprises.is_empty() {
+        return;
+    }
+
+    // Surprise-rank context: each surprise's position in the scored universe
+    // (1-based rank in the current `compute_file_risk_scores()` ranking),
+    // mirroring the replay path's `all_ranked`. This lets the calibration
+    // readout distinguish near-misses (rank 11) from cold misses (rank 700+).
+    // Optional: only Some when at least one surprise has a known rank.
+    let surprise_ranks = if surprises.is_empty() {
+        None
+    } else {
+        let all_ranked: Vec<String> = compute_file_risk_scores()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
+        let mut ranks: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for f in &surprises {
+            if let Some(i) = all_ranked.iter().position(|r| r == f) {
+                ranks.insert(f.clone(), i + 1); // 1-based rank
+            }
+        }
+        if ranks.is_empty() { None } else { Some(ranks) }
+    };
+```
+
+Then pass `surprise_ranks.as_ref()` to write_validation_event.
+
+And in write_validation_event:
+
+```rust
+    // Optional surprise-rank context — persisted only when the writer computed
+    // it (watch path), so replay-path events and old readers stay compatible.
+    if let Some(ranks) = surprise_ranks {
+        if !ranks.is_empty() {
+            event["surprise_ranks"] = serde_json::json!(ranks);
+        }
+    }
+```
+
+Update call sites:
+- snapshots.rs:332 watch path — pass `surprise_ranks.as_ref()`
+- commands_risk.rs:2411 replay — pass `None`
+- snapshots.rs:1293 test — pass `None`
+
+And the parse side — task says no changes to parse_validation_events. OK.
+
+Now, should rank be in the `ValidationEvent` struct? Task says "No changes to `parse_validation_events`/`compute_accuracy_stats` consumers." The struct stays. Good.
+
+Let me write a failing test FIRST.
+
+Actually per the evolve skill: "Write a test first if possible". Let me add the test assertions first, watch it fail, then implement. Let me structure:
+
+New test `test_write_validation_event_persists_surprise_ranks`:
+```rust
+#[test]
+fn test_write_validation_event_persists_surprise_ranks() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let path = dir.path().join("validations.jsonl");
+
+    let hits: Vec<String> = vec![];
+    let surprises = vec!["src/near_miss.rs".to_string(), "src/cold_miss.rs".to_string()];
+    let mut ranks = std::collections::HashMap::new();
+    ranks.insert("src/near_miss.rs".to_string(), 5usize);
+    ranks.insert("src/cold_miss.rs".to_string(), 900usize);
+
+    write_validation_event(
+        &path, 177, "watch_failure", 10, &hits, &surprises, 0.0, "aaa", "bbb",
+        None, None, Some(&ranks),
+    )
+    .expect("write validation event with surprise ranks");
+
+    let contents = std::fs::read_to_string(&path).expect("read validation file");
+    let raw: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).expect("valid JSON");
+    assert_eq!(raw["surprise_ranks"]["src/near_miss.rs"], 5);
+    assert_eq!(raw["surprise_ranks"]["src/cold_miss.rs"], 900);
+    // surprises stay plain path strings — backward-compatible shape
+    assert_eq!(raw["surprises"][0], "src/near_miss.rs");
+}
+```
+
+And extend the fixture test to assert `surprise_ranks` contains the surprise paths:
+In `test_auto_validate_after_failure_write`, after existing assertions:
+```rust
+// New: surprise-rank context is persisted (rank values depend on the live
+// repo ranking, so only assert presence).
+let ranks = parsed["surprise_ranks"].as_object().expect("surprise_ranks present");
+assert!(ranks.contains_key("src/prompt.rs"));
+assert!(ranks.contains_key("src/safety.rs"));
+```
+
+Hmm wait — but does compute_file_risk_scores in the test environment include src/prompt.rs? The function reads `src/` dir on disk (real repo) + git churn counts. src/prompt.rs is on disk in this repo. Yes.
+
+But careful: the test writes changed files including src/watch.rs and src/prompt.rs etc. — real files in this repo. OK.
+
+Now — one thing to verify: does `compute_file_risk_scores` return `FileRisk` sorted by score? For rank positioning to be meaningful, `all_ranked` must be in risk order. Let me check the end of compute_file_risk_scores (sorting).
+────────────────────────────────────────────────────────────────────────────────
+I have the full picture. Let me check how `compute_file_risk_scores` sorts (for rank ordering) and confirm the third `write_validation_event` test call site:
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:740..790  ▶ read src/commands_risk_snapshots.rs:1159..1209 ✓ (2ms)
+ ✓ (3ms)
+  2 tools completed in 704ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a complete picture. Let me plan the implementation:
+
+**Task**: Wire surprise-rank context into the watch-failure validation path (`auto_validate_after_failure_to` in `src/commands_risk_snapshots.rs`).
+
+**Design** (least invasive, backward-compatible):
+1. In `auto_validate_after_failure_to`, after classifying surprises, compute the scored universe ranking via `compute_file_risk_scores()`. This gives `Vec<FileRisk>` ordered how? Let me check the sorting — the function is called `compute_file_risk_scores` and `replay_validate_last_snapshot` does `all_risks.iter().map(|r| r.path.clone())` to build `all_ranked`, then `compute_validation` finds `ranked.iter().position(|r| r == f).map(|i| i + 1)` — 1-based. So `compute_file_risk_scores()` returns files in risk-descending order (highest risk first). Let me verify the sort at the end of the function.
+
+2. For each surprise, compute its rank: position in the scored ranking (0-based) + 1 for display.
+
+3. Persist the rank. Options:
+   - a) Extend the surprise representation with a rank field — e.g., surprises become objects `{"path": "...", "rank": N}`. This changes the schema of `surprises` array from `["src/x.rs"]` to `[{"path":..,"rank":..}]`. Consumers: `parse_validation_events` reads `val["surprises"].as_array().map(|a| a.len())` — count only, still works. `commands_risk_report.rs` `compute_accuracy_stats` — count only. `learn_weights_from_history` — reads `val["surprises"]`? Let me check. Actually the grep showed `compute_accuracy_stats` reads ValidationEvent which is count-only. But wait — I must check `learn_weights_from_history_to` more carefully — does it read the surprises array as strings?
+   - b) Fold rank into the surprise string: `"src/foo.rs (rank #5)"`. Then the array stays a list of strings. Consumers that read surprises as paths for something? Let me check `learn_weights_from_history_to`.
+
+Let me look at learn_weights_from_history_to fully, and check how surprises are consumed there. Also check `format_risk_report` etc.
+
+Actually — the requirement says "No changes to `parse_validation_events`/`compute_accuracy_stats` consumers." The cleanest minimal approach that keeps the surprises array as strings (backward-compatible schema, count still works exactly) is:
+
+Option b: fold the rank into the surprise string? But that pollutes the string with display info — if any consumer treats the surprise string as a path, they'd break. Let me check if any consumer uses surprise strings as paths.
+
+Actually option a (objects) is cleaner semantically but changes the JSON structure of `surprises` from array-of-strings to array-of-objects. `parse_validation_events` does `val["surprises"].as_array().map(|a| a.len())` — still fine. `learn_weights_from_history` — need to check what it does with surprises. Let me grep learn_weights_from_history_to body.
+
+Let me read the full function.
+────────────────────────────────────────────────────────────────────────────────
+Let me check `learn_weights_from_history_to` in full — does it read surprise paths as strings?
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:360..480 ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I need to check `parse_detailed_events` - which reads surprise paths as strings to look up signals. Let me check it.
+────────────────────────────────────────────────────────────────────────────────
+Let me check `parse_detailed_events` — it reads surprise paths as strings:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "parse_detailed_events\|st… ✓ (5ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:150..260 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have the full picture:
+
+- `parse_detailed_events` reads `surprise_count = val["surprises"].as_array().map(|a| a.len())` — uses `.len()`, so it doesn't read path strings.
+- Consumers don't read surprise path strings from persisted events.
+
+So my plan:
+1. In `auto_validate_after_failure_to`, when classifying surprises, build a `Vec<(String, Option<usize>)>` of (path, rank). Then pass the second element to `write_validation_event` which adds optional `surprise_ranks` field.
+2. Add optional `surprise_ranks: Option<Vec<usize>>` parameter to `write_validation_event`. Since it's the last param and there are now 3 call sites, I need to update them all, OR keep the signature unchanged and add a new param. Actually the task says "pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+Options:
+a. Add a `surprise_ranks: Option<&[usize]>` param to `write_validation_event` — requires updating all call sites (2 production + 3 test).
+b. Fold rank into surprise string like `"src/foo.rs#11"` — but this breaks `parse_detailed_events`? No, it counts `.len()` of the array and `compute_validation` isn't involved. But wait, consumers that treat surprise strings as paths... let me check. `parse_detailed_events` uses only `.len()`. `parse_validation_events` uses `.len()`. The risk meter uses `scored_broke` not surprises. Nothing reads surprise path strings from persisted JSONL in production. But folding rank into the string is hacky and semantically gross.
+
+Option (a) is cleaner and backward-compatible: add optional `surprise_ranks` field to the JSON, only persisted when present. Existing consumers (`.len()`) work fine. Old events lack the field — fine.
+
+Now, how to compute rank mirroring `compute_validation`:
+```rust
+let all_ranked: Vec<String> = compute_file_risk_scores().iter().map(|r| r.path.clone()).collect();
+// rank = all_ranked.iter().position(|r| r == f).map(|i| i + 1) // 1-based
+```
+And only count surprises that the scorer could rank (`is_scored_file`)? The task says: "include each surprise's rank in the scored universe (0-based position in the current `compute_file_risk_scores()` ranking, +1 for display if available)".
+
+Hmm — the current watch path treats *any* changed `src/` file not in predicted as a surprise. The `compute_validation` path filters to `is_scored_file`. But that's the replay path over git-log churn; the watch path already only considers `src/` files. Almost all src/*.rs files are in the scored universe (compute_file_risk_scores includes all src/*.rs files from disk + git churn). Actually it includes: git churn files (both windows), all src/*.rs from disk, src/format/*.rs. So the scored universe basically covers all .rs files in src. A changed src/file that's not a .rs? Unlikely but the task says minimal.
+
+The task test says: "a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+Hmm — "fictional rank-5 surprise vs rank-900 surprise both persist without panic". Rank 900 means the scored universe has 900+ files. In the test, we can't actually have 900 files. So the test probably needs to construct surprises with ranks directly — i.e., test `write_validation_event` with `surprise_ranks = Some(vec![5, 900])` and verify persistence without panic. OR the rank could be None when the file isn't in the scored universe.
+
+So in `auto_validate_after_failure_to`:
+- compute `all_ranked` from `compute_file_risk_scores()`.
+- for each surprise, rank = position in all_ranked + 1 (1-based, display convention), or None if not present.
+- collect `surprise_ranks: Vec<usize>` corresponding to surprises (only Some values? or align by index?).
+
+Since `surprises` is a Vec<String> and `surprise_ranks` needs to align with it, I'll build them together:
+```rust
+let mut surprises: Vec<String> = Vec::new();
+let mut surprise_ranks: Vec<Option<usize>> = Vec::new();
+for f in &src_files {
+    if predicted_set.contains(f.as_str()) {
+        hits.push(f.to_string());
+    } else {
+        surprises.push(f.to_string());
+        let rank = all_ranked.iter().position(|r| r == f.as_str()).map(|i| i + 1);
+        surprise_ranks.push(rank);
+    }
+}
+```
+
+Wait, but what if a surprise has no rank (None)? The task says "the recorded event includes its rank". For the test fixture with `src/foo.rs` — but `compute_file_risk_scores()` reads the real repo and git. In a test environment that would actually score the real repo's files! Hmm — `auto_validate_after_failure_to` is a testable function taking paths, but calling `compute_file_risk_scores()` inside it will run git commands in the current working directory. This makes the function not hermetic.
+
+Wait, let me re-read: the test fixture writes a snapshot with top_10 including main.rs, cli.rs, watch.rs; changed files are main.rs, cli.rs, prompt.rs, safety.rs, watch.rs. Surprises: prompt.rs, safety.rs. In the test environment (the actual arc repo during `cargo test`), `compute_file_risk_scores()` would compute ranks for the *real* repo files — prompt.rs and safety.rs would probably be in the universe with some rank. The test only asserts `surprises` array contents currently. 
+
+But if I add rank computation calling `compute_file_risk_scores()` in the test, the test becomes dependent on the real git repo state... Actually wait, `cargo test` runs in the repo dir, so git file_change_counts would work (it touches real git). Hmm, the run_git destructive guard only blocks destructive subcommands. `git log` non-destructive is fine.
+
+But the existing test `test_auto_validate_with_snapshots` already calls `auto_validate_after_failure_to` which calls `learn_weights_from_history()` at the end! And that reads REAL `.arc/risk_validations.jsonl` and `.arc/risk_snapshots.jsonl`. That's already non-hermetic but tolerable (it only reads).
+
+Adding `compute_file_risk_scores()` calls git commands and reads the real repo. It's already somewhat non-hermetic via learn_weights. But making the rank depend on real repo state makes the test fragile.
+
+Better approach: make the rank computation injectable or compute ranks lazily. The task says "compute it from `compute_file_risk_scores()`" for the production path and mirror `replay_validate_core` minimally.
+
+For hermetism, I could pass an optional `all_ranked: Option<&[String]>` into `auto_validate_after_failure_to` (defaulting to computing inside `auto_validate_after_failure`). Let me look at the signature: `fn auto_validate_after_failure_to(changed_files, snapshot_path, validation_path)`. I could add a param `ranked: Option<&[String]>` — in production, call with `None` meaning "compute from compute_file_risk_scores()". In tests, pass a synthetic ranked list. That keeps the test hermetic and deterministic.
+
+Actually wait — for the rank-900 test: "a fictional rank-5 surprise vs rank-900 surprise both persist without panic". The current `compute_file_risk_scores()` ranking in the real repo — ranks < 100. To test rank 900 persisting, I'd pass a synthetic `all_ranked` with 900 entries. So making ranked injectable is the cleanest path for testing.
+
+Let me design:
+
+```rust
+fn auto_validate_after_failure_to(
+    changed_files: &[String],
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+) {
+    ...
+    // Compute the scored-universe ranking for surprise ranks (mirrors the
+    // replay path's `all_ranked`). Wrap in a helper so tests can inject a
+    // synthetic universe.
+    let all_ranked: Vec<String> = compute_file_risk_scores()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+    ...
+}
+```
+
+Hmm, but then the test asserts rank of specific files from the real universe — fragile because git churn changes. The simplest hermetic approach: make the surprise-rank computation a pure function + test that pure function with synthetic ranked inputs, plus test `write_validation_event` with surprise_ranks=[5, 900].
+
+Actually let me reconsider. What does the task really require for tests?
+
+"- A fixture watch-failure event: a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+Interpretation: The test harness should verify that
+1. When we write a watch-failure event for changed src/foo.rs (not predicted), the persisted event includes rank info.
+2. Rank 5 and rank 900 values both serialize without panic.
+
+The cleanest hermetic test: test `write_validation_event` with `surprise_ranks = Some(vec![5, 900])` — persists fine, JSON has the field. Plus test the rank-assignment pure helper with synthetic universe.
+
+Let me implement:
+
+1. Add pure helper `surprise_rank_for(file: &str, all_ranked: &[String]) -> Option<usize>` — 1-based as in compute_validation. Actually maybe inline it; but a pure helper is testable. Let me add:
+
+```rust
+/// 1-based rank of `file` in the scored universe (`all_ranked`), or None if
+/// the file couldn't be scored. Mirrors `compute_validation`'s surprise-rank
+/// computation from the replay path.
+fn surprise_rank(file: &str, all_ranked: &[String]) -> Option<usize> {
+    all_ranked.iter().position(|r| r == file).map(|i| i + 1)
+}
+```
+
+2. Modify `auto_validate_after_failure_to`:
+   - compute `all_ranked` from `compute_file_risk_scores()`.
+   - build surprises as Vec<String> and surprise_ranks as Vec<Option<usize>> in parallel.
+   - pass `Some(&surprise_ranks)` to write_validation_event — but only when non-empty? The optional field persists only when Some and non-empty. For hits-only events, pass None.
+
+Wait — but hold on: `compute_file_risk_scores()` on the *watch* path... The watch failure path fires in the actual evolve loop. It runs git commands — that's the production path being honest about the real universe. Good.
+
+But hermeticity concern for `test_auto_validate_with_snapshots`: it calls `auto_validate_after_failure_to` with a snapshot that has top_10 = [main.rs, cli.rs, repl.rs, tools.rs, watch.rs]. The changed files: main.rs (hit), cli.rs (hit), prompt.rs (surprise), safety.rs (surprise), watch.rs (hit). If we compute real ranked from the repo, prompt.rs and safety.rs get real ranks. The existing assertions only check surprises array contents — still fine. And new assertions... I'll add assertions that surprise_ranks is present with 2 entries, each a positive integer (Some). That's still somewhat dependent on the repo having those files — they do exist (they're files in the repo). Good, no panic, arrays match length.
+
+Actually, hmm, is `compute_file_risk_scores` deterministic in a test env? It includes src/*.rs files from disk — src/prompt.rs and src/safety.rs exist. So they'd be in the universe. Fine.
+
+3. Modify `write_validation_event`:
+   - add param `surprise_ranks: Option<&[Option<usize>]>`... hmm, or `Option<&[usize]>` where None-ranks get omitted?
+
+Since surprises might have None rank (file not in universe — should be rare since universe covers all src/*.rs), the JSON should represent each surprise's rank. Options:
+- Extend each surprise entry to an object `{"path": ..., "rank": ...}` — but that breaks `parse_detailed_events` which does `v.as_str().map(String::from)` and `.len()`. `.len()` still fine, but `as_str()` for hits only. Surprises are only counted. Actually changing surprises to objects would break `parse_detailed_events` `.as_array().map(|a| a.len())` — len still works. But it changes the schema of the surprises array, which is a bigger change. The task explicitly says "Prefer the smallest schema change".
+- Add a parallel optional array field `surprise_ranks` with rank per surprise (aligned by index). This is the smallest schema change — surprises stays an array of strings, consumers unchanged.
+
+I'll go with `surprise_ranks: Option<&[usize]>` persisted only when Some. For None-ranks in the parallel vec, I need to represent... Let me instead make the watch path only include ranks for surprises that ARE in the universe, and pass ranks aligned with surprises. If a surprise has no rank, what to put? I could skip persisting ranks entirely when any is None (fail-soft: partial rank info is confusing). Or use `null` entries in the JSON array. JSON supports null; `as_u64()` returns None for null. Cleanest: persist `surprise_ranks` as array of nullable numbers: `[5, null, 900]`. Then consumers reading it later can distinguish. 
+
+But for `write_validation_event` signature, what's cleanest? `Option<&[Option<usize>]>`. serde_json json! handles `Option<usize>` as null. Let me do that.
+
+Backward compat: for the two existing non-watch call sites (replay path in commands_risk.rs:2411, and the test at 1290/1294 + 1201), they pass `None` — the field is omitted; old consumers unchanged. 
+
+Hmm wait, should the replay path also pass ranks? The task says "Watch path has no all_ranked yet, so compute it from compute_file_risk_scores()". The replay path already computes ranks (all_ranked) and passes it through `compute_validation` to get surprises WITH ranks. But then it drops them when writing (`result.surprises.iter().map(|(f, _)| f.clone())`). Should I also persist ranks from the replay path? The task says "Wire surprise-rank context into the watch-failure validation path" — explicitly the watch path. "Persist that rank as part of the `write_validation_event` call". It doesn't ask to change the replay path. But it would be a natural extension... The task says max one source file: src/commands_risk_snapshots.rs. The replay path lives in commands_risk.rs — touching it would violate "max one source file". So keep replay path as-is; only the watch path (and write_validation_event + tests, all in commands_risk_snapshots.rs) changes.
+
+But wait — `replay_validate_core` in commands_risk.rs calls `write_validation_event(...)` with 10 args. If I add an 11th param, I must update that call site too... The task says "Files: src/commands_risk_snapshots.rs" (max one source file). Hmm. If I change `write_validation_event`'s signature, commands_risk.rs needs updating (it's a caller). The task explicitly says "one function" — "What (all in src/commands_risk_snapshots.rs, one function)".
+
+Hmm — "one function" meaning the main change is in one function (`auto_validate_after_failure_to`)? But item 2 says "Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+"fold the rank into the surprise string" — this avoids changing `write_validation_event`'s signature entirely! E.g., surprises could be persisted as `"src/foo.rs (rank 11)"` or `"src/foo.rs#11"`. No signature change, no caller updates. But the surprise string is then not a plain path — consumers only count `.len()`, so it still works.
+
+But folding into string is semantically gross and hurts future consumers who want the rank (they'd have to parse). Hmm. But per the task: "Prefer the smallest schema change that keeps `parse_validation_events` backward-compatible (it currently reads only scalar count fields — keep it that way unless impossible)."
+
+Option (a): add optional field via extra param → changes `write_validation_event` signature → must touch commands_risk.rs caller (a second file). Task says max one source file... "Files: src/commands_risk_snapshots.rs". 
+
+Hmm, let me re-read the exact task line: "Wire surprise-rank context into the watch-failure validation path (max one source file) ... Files: src/commands_risk_snapshots.rs".
+
+And step 2: "Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+So "extend the event's surprise representation with a rank field" — this could be done by *editing the event JSON after the call*, or... Actually `write_validation_event` builds the JSON internally. There's no way to add a field post-hoc without reading the file back (ugly).
+
+Alternatively — fold the rank into the surprise string: `surprises.push(format!("{} (rank {})", f, rank))`. This keeps `write_validation_event` signature untouched — zero call-site changes. Only `auto_validate_after_failure_to` changes (one function!). The JSON surprises array still has the same length; consumers `.len()` fine; `compute_accuracy_stats` fine (only counts). And `parse_detailed_events` counts len. 
+
+Wait, but is folding into the string acceptable long-term? The surprise strings in the JSONL are meant to be paths. Any future consumer reading paths would break. But currently NO production code reads surprise path strings (I verified: `parse_detailed_events` uses only `.len()`; `parse_validation_events` uses `.len()`; risk meter uses counts). The stderr summary uses the in-memory `surprises` (paths), not the persisted strings. So folding is safe today.
+
+But it's a bit of a hack — "src/prompt.rs (rank 12)" in a JSONL data file is lossy/ambiguous. Also, a surprise might have NO rank (not in universe) — then just the path.
+
+Hmm. But there's the backward-compat test at commands_risk_report.rs:393 with `"surprises":["src/b.rs"]` — parsing fine either way.
+
+Alternatively, the cleanest minimal approach that stays in one file: add the rank field by changing `write_validation_event` to accept an optional extra argument... but that requires updating the commands_risk.rs call site (second file). The task header says "max one source file" — that's a hard constraint from the harness (diff-scope guard? Actually the task kind says "Files: src/commands_risk_snapshots.rs"). Let me check if there's a diff-scope guard for this task... The evolve skill normally allows touching multiple files but the task explicitly scopes to one file. I should respect it.
+
+Given the constraint, folding rank into the surprise string is the designated path ("or fold the rank into the surprise string" — the task explicitly offers this as an option). And it keeps everything in one function in one file. 
+
+But wait, what about the "fictional rank-5 surprise vs rank-900 surprise both persist without panic" test? With the string-fold approach, I can test `auto_validate_after_failure_to` with a synthetic ranked universe... but `auto_validate_after_failure_to` computes ranks from `compute_file_risk_scores()` (real repo). To get rank 900, I'd need a synthetic universe — so I should factor the rank computation into a pure helper that takes `all_ranked` and the file:
+
+Actually cleaner: keep `auto_validate_after_failure_to` signature unchanged (3 args), compute `all_ranked` inside from `compute_file_risk_scores()`, but ALSO add a lower-level testable helper `rank_surprise(f: &str, all_ranked: &[String], include_rank_universe...)`. Hmm.
+
+Let me design the watch-path change:
+
+```rust
+// Compute the scored universe once — the current full risk ranking — so a
+// surprise can carry its 1-based rank (mirrors the replay path's `all_ranked`).
+let all_ranked: Vec<String> = compute_file_risk_scores()
+    .iter()
+    .map(|r| r.path.clone())
+    .collect();
+let rank_of = |f: &str| all_ranked.iter().position(|r| r == f).map(|i| i + 1);
+
+let mut hits: Vec<String> = Vec::new();
+let mut surprises: Vec<String> = Vec::new();
+for f in &src_files {
+    if predicted_set.contains(f.as_str()) {
+        hits.push(f.to_string());
+    } else {
+        // Fold the scored-universe rank into the surprise so the ledger keeps
+        // the near-miss-vs-cold-miss distinction (rank 11 vs rank 700+) that
+        // the calibration readout needs. Path-only fallback when the file
+        // isn't in the scored universe.
+        let label = match rank_of(f) {
+            Some(r) => format!("{f} (rank {r})"),
+            None => f.to_string(),
+        };
+        surprises.push(label);
+    }
+}
+```
+
+Hmm wait, but that changes the assertions in the existing test `test_auto_validate_with_snapshots`:
+```rust
+assert!(surprises.contains(&serde_json::json!("src/prompt.rs")));
+assert!(surprises.contains(&serde_json::json!("src/safety.rs")));
+```
+These would now FAIL because surprises contain "src/prompt.rs (rank N)". I'd need to update that test. That's fine — it's within the same file.
+
+Actually hold on. Let me reconsider option (a) once more. The concern is only the "max one source file" constraint. Let me check whether the harness actually enforces "Files:" scope. This is a real evolve task from the session plan; the evaluator checks git diff. If I touch commands_risk.rs (just the one call site to add `None`), is that a violation? The task title literally says "(max one source file)". The planner wrote that. The diff-scope likely is "Files: src/commands_risk_snapshots.rs" — meaning changes should be confined there. Adding an arg to write_validation_event would force a 1-line change in commands_risk.rs — risky against the scope constraint.
+
+Hmm, but is a 1-line conforming change in a caller really "another source file changed"? The constraint says max one source file (probably to keep the change minimal and reviewable). I'll respect it strictly and stay within commands_risk_snapshots.rs.
+
+So: fold rank into surprise string. Hmm, but honestly, adding a rank field is more principled. Let me think about which is more in the spirit of the task...
+
+Task item 2 explicitly gives both options. Given the one-file constraint, the string-fold is the intended one (the planner knew write_validation_event is called from commands_risk.rs). Actually wait — re-reading: "Persist that rank as part of the `write_validation_event` call — pick the least invasive option: either extend the event's surprise representation with a rank field, or fold the rank into the surprise string."
+
+"as part of the write_validation_event call" — i.e., at the call site in auto_validate_after_failure_to. So when building `surprises`, fold rank in. Call `write_validation_event` as before. Yes, string-fold at the call site.
+
+Now — the string format. What convention to use? Let me search whether anything parses surprise strings... Actually let me double check `compute_accuracy_stats` in commands_risk_accuracy.rs — it uses ValidationEvent fields (counts only). And `/risk` report formatting uses events' counts. OK.
+
+One more consideration: the string `"src/foo.rs (rank 11)"` — would `is_scored_file`/path handling break anywhere? The surprises are only written to JSONL. Nothing re-parses them as paths. 
+
+Let me also double-check the test at line 1299-1301 and 320-321 (commands_risk_report.rs) just parse; they don't assert surprise path contents. The report tests at line 329-330 etc. — they parse `"surprises":["src/cli.rs"]` and count them. Fine.
+
+Now the tests I need to write (as required):
+
+Test 1: "a fixture watch-failure event: a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank". With the string-fold, `src/foo.rs` in the scored universe → surprise string contains "(rank N)". But rank comes from `compute_file_risk_scores()` of the REAL repo — src/foo.rs doesn't exist in the real repo, so rank would be None → path-only. That fails the "includes its rank" assertion!
+
+So for hermetic testability, I need the rank universe injectable. Approach: add an optional 4th arg `all_ranked: Option<&[String]>`? But the production signature `auto_validate_after_failure` calls `auto_validate_after_failure_to(changed_files, snap, val)` with 3 args. I can add a 4th param with... Rust has no default args. I'd have to update the 4 internal call sites at lines 1056, 1098, 1131 (tests) — wait those are test calls, and 263 (production).
+
+Call sites of `auto_validate_after_failure_to`:
+- 263: production wrapper
+- 1056, 1098, 1131: tests
+
+If I add a 4th param, I update all 4 call sites (all within commands_risk_snapshots.rs!). The production wrapper passes `None` → computes from real scores. Tests pass synthetic universes. All in one file. 
+
+So: `fn auto_validate_after_failure_to(changed_files, snapshot_path, validation_path, all_ranked: Option<&[String]>)`. When None → compute from `compute_file_risk_scores()`. When Some → use the given list (synthetic).
+
+Hmm, wait: is this over-engineering? Let me re-read the task test spec once more:
+
+"- A fixture watch-failure event: a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+OK so the test wants: fixture snapshot with top_10; changed src/foo.rs; but the rank of foo.rs must be RANK 5 in a synthetic universe (e.g., build an all_ranked vec of 900+ synthetic entries where foo.rs is at index 4 → rank 5). And a rank-900 surprise (another file at index 899 → rank 900). Both persist without panic.
+
+Alternatively, I can test at the `write_validation_event` level if I choose the field approach... but with string-fold, the fold happens in auto_validate_after_failure_to. So the test targets auto_validate_after_failure_to with synthetic all_ranked.
+
+Let me now also decide: should the rank fold happen for ALL surprises regardless of whether in universe? If not in universe, path-only.
+
+Implementation:
+
+```rust
+fn auto_validate_after_failure_to(
+    changed_files: &[String],
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+) {
+    ...
+}
+```
+
+becomes
+
+```rust
+/// Inner implementation with configurable paths (for testing).
+///
+/// `ranked` optionally supplies the scored universe (paths in risk-rank
+/// order) so surprise ranks don't depend on the real repo in tests. When
+/// `None`, the current `compute_file_risk_scores()` ranking is used.
+fn auto_validate_after_failure_to(
+    changed_files: &[String],
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+    ranked: Option<&[String]>,
+) {
+    ...
+    let all_ranked: Vec<String> = match ranked {
+        Some(r) => r.to_vec(),
+        None => compute_file_risk_scores().iter().map(|r| r.path.clone()).collect(),
+    };
+    // 1-based rank, mirroring compute_validation's surprise rank convention.
+    let rank_of = |f: &str| all_ranked.iter().position(|r| r == f).map(|i| i + 1);
+    ...
+    for f in &src_files {
+        if predicted_set.contains(f.as_str()) {
+            hits.push(f.to_string());
+        } else {
+            // Fold the scored-universe rank into the surprise label so the
+            // validation ledger preserves the near-miss vs cold-miss
+            // distinction (rank 11 vs rank 700+). Consumers only count
+            // surprises, so path-with-rank stays backward-compatible.
+            let label = match rank_of(f.as_str()) {
+                Some(r) => format!("{} (rank {})", f, r),
+                None => f.to_string(),
+            };
+            surprises.push(label);
+        }
+    }
+```
+
+Hmm wait, but there's a subtlety: `compute_file_risk_scores()` runs git commands (file_change_counts runs `git log` non-destructively). In `test_auto_validate_with_snapshots` at line 1056 — the test currently passes 3 args, so it'd get the real-ranking branch. In cargo test the real repo is available, git works, no panic. And existing assertions need updating (surprises become "src/prompt.rs (rank N)").
+
+But then the rank in that test depends on real repo state — e.g., is prompt.rs ranked? In the real repo ranking, src/prompt.rs IS a file, so it will always be in the universe (compute_file_risk_scores includes all src/*.rs from disk regardless of churn). rank_of gives Some(N) for some N. The assertion should be "surprise string starts with the path and contains '(rank '" — robust.
+
+For the new fixture test, pass a synthetic ranked universe:
+
+```rust
+#[test]
+fn test_auto_validate_surprise_rank_persisted() {
+    let dir = tempfile::tempdir().unwrap();
+    let snap_path = dir.path().join("snapshots.jsonl");
+    let val_path = dir.path().join("validations.jsonl");
+    let snapshot = serde_json::json!({
+        "ts": "...", "day": 100, "git_hash": "abc1234",
+        "top_10": [{"path": "src/main.rs", "score": 0.9, "signals": ["churn"]}]
+    });
+    std::fs::write(&snap_path, serde_json::to_string(&snapshot).unwrap()).unwrap();
+    let changed = vec![
+        "src/main.rs".to_string(),         // hit
+        "src/foo.rs".to_string(),          // surprise at rank 5
+        "src/zzz.rs".to_string(),          // surprise at rank 900
+    ];
+    // Synthetic scored universe of 900 files: foo.rs at index 4 (rank 5),
+    // zzz.rs at index 899 (rank 900).
+    let mut ranked: Vec<String> = (0..900).map(|i| format!("src/gen_{}.rs", i)).collect();
+    ranked[4] = "src/foo.rs".to_string();
+    ranked[899] = "src/zzz.rs".to_string();
+    auto_validate_after_failure_to(&changed, &snap_path, &val_path, Some(&ranked));
+    let contents = std::fs::read_to_string(&val_path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+    let surprises = parsed["surprises"].as_array().unwrap();
+    assert_eq!(surprises.len(), 2);
+    assert!(surprises.contains(&serde_json::json!("src/foo.rs (rank 5)")));
+    assert!(surprises.contains(&serde_json::json!("src/zzz.rs (rank 900)")));
+}
+```
+
+Wait — but `auto_validate_after_failure_to` also calls `learn_weights_from_history()` at the end which reads REAL `.arc/risk_validations.jsonl` and `.arc/risk_snapshots.jsonl` files — the prod paths are constants. That's existing behavior (both existing tests already tolerate it — the `MIN_VALIDATION_EVENTS` guard prevents writes). Actually it reads and potentially WRITES `.arc/risk_weights.json` — hmm, existing tests already trigger this. It's tolerated. Fine.
+
+Also, note the existing tests at 1056, 1098, 1131 must be updated to pass a 4th arg. They can pass None (real-ranking branch) — but then `test_auto_validate_noop_when_no_snapshots` and `noop_when_no_src_files` take the early-return path before computing ranks, so harmless. But wait — order: should rank computation happen before or after the early returns? Put it after the src_files check and after snapshot loading? The rank computation runs git commands — wasteful for noop cases. Better to compute ranks only when we know we have surprises. Actually compute before the loop but after the "nothing to report" early return? The classification loop needs ranks... Compute all_ranked right before the loop, after `last` is found. That way the noop tests (no snapshots, no src files) return early without git calls. Good — existing noop tests pass None and never reach ranking.
+
+But `test_auto_validate_with_snapshots` (line 1056) DOES reach ranking with None → real repo scoring. That git call in test: `file_change_counts` → runs `git log ...` — non-destructive, allowed. OK.
+
+Alternatively, to keep the existing test hermetic too, I could pass a synthetic universe there as well. The test currently asserts surprises contains "src/prompt.rs" and "src/safety.rs" exactly — with real ranking those become "(rank N)" strings. I'll update the assertions to check prefix + rank suffix, or pass a synthetic ranked universe where both have known ranks. Passing synthetic keeps it deterministic — better. Let me pass `Some(&vec!["src/main.rs", "src/cli.rs", "src/repl.rs", "src/tools.rs", "src/watch.rs", "src/prompt.rs", "src/safety.rs"])` and assert "src/prompt.rs (rank 6)" and "src/safety.rs (rank 7)". Deterministic, hermetic (ranked branch avoids git).
+
+Now — the closure `rank_of` borrows all_ranked; fine.
+
+Now — `learn_weights_from_history()` at the end still runs (prod path). In tests it reads real ledger files. For `test_auto_validate_with_snapshots` — MIN_VALIDATION_EVENTS guard: how many validation events exist in real .arc? Let me check: `.arc/risk_validations.jsonl` exists in the repo (in project files list). If count ≥ MIN_VALIDATION_EVENTS, it computes adjusted weights and writes `.arc/risk_weights.json` — wait does that modify the repo during tests?? It writes to LEARNED_WEIGHTS_PATH. Let me check what that is. If it writes a tracked file, that's a test side effect... but this is PRE-EXISTING behavior (tests already ran learn_weights_from_history). Let me check MIN_VALIDATION_EVENTS and LEARNED_WEIGHTS_PATH.
+
+Actually, let me look at those constants quickly. Also verify DAY_COUNT read etc. But the key point: existing tests already behave this way, so I'm not making it worse. The tests read real ledgers; if the real ledger already has ≥ MIN events, weights get written during test — but CI presumably tolerates this (tests passed before). Since it's pre-existing, leave it.
+
+Now — one more design question: the doc comment on `auto_validate_after_failure` should mention the rank folding. And is there a consumer that formats surprises for display from the JSONL (e.g., `/risk report` shows surprises from persisted event)? That's `format_validation_report` which uses in-memory ValidationResult, not persisted strings. OK.
+
+Also check: does `commands_risk_report.rs` line 320 test parse surprises as plain strings — it just counts. Fine.
+
+Now let me also consider: the task says "(0-based position in the current compute_file_risk_scores() ranking, +1 for display if available)". This matches compute_validation's `position + 1` (1-based). Good.
+
+Let me now check the exact existing test lines that call auto_validate_after_failure_to with 3 args and update them.
+
+Call sites (from earlier grep):
+- 1056 in test_auto_validate_with_snapshots
+- 1098 in test_auto_validate_noop_when_no_snapshots
+- 1131 in test_auto_validate_noop_when_no_src_files
+
+Let me read the full test_auto_validate_with_snapshots to update assertions. I already read 1040-1089. Line 1056: `auto_validate_after_failure_to(&changed, &snap_path, &val_path);` → add `, None` or `, Some(&ranked)`.
+
+I'll pass a synthetic ranked list to keep hermetic AND update assertions to expect "(rank N)".
+
+Let me now check `compute_file_risk_scores` import — already imported in commands_risk_snapshots.rs line 9: `use crate::commands_risk::{compute_file_risk_scores, learn_weights_from_history, FileRisk};`. 
+
+Now write the edits.
+
+First, modify `auto_validate_after_failure_to` signature + add rank computation + fold labels:
+
+Current code (lines 270-372). I'll make these edits:
+
+Edit 1 — signature + doc:
+```rust
+/// Inner implementation with configurable paths (for testing).
+///
+/// `ranked` optionally supplies the scored universe (file paths in
+/// risk-rank order, highest risk first) so a surprise's rank doesn't depend
+/// on the real repo in tests. When `None`, the current
+/// `compute_file_risk_scores()` ranking is used.
+fn auto_validate_after_failure_to(
+    changed_files: &[String],
+    snapshot_path: &std::path::Path,
+    validation_path: &std::path::Path,
+    ranked: Option<&[String]>,
+) {
+```
+
+Edit 2 — after `last` load (line 294), before classification:
+```rust
+    // Scored universe for surprise ranks — mirrors the replay path's
+    // `all_ranked` (see `compute_validation` in commands_risk.rs): the 1-based
+    // position of a surprise in the full risk ranking, which distinguishes a
+    // near-miss (rank 11) from a cold miss (rank 700+). Tests inject a
+    // synthetic universe via `ranked` since the watch path has no `all_ranked`.
+    let all_ranked: Vec<String> = match ranked {
+        Some(r) => r.to_vec(),
+        None => compute_file_risk_scores()
+            .iter()
+            .map(|r| r.path.clone())
+            .collect(),
+    };
+
+    // Classify: which changed src/ files were predicted (hits) vs not (surprises)
+    let predicted_set: std::collections::HashSet<&str> =
+        last.predicted.iter().map(|s| s.as_str()).collect();
+
+    let mut hits: Vec<String> = Vec::new();
+    let mut surprises: Vec<String> = Vec::new();
+    for f in &src_files {
+        if predicted_set.contains(f.as_str()) {
+            hits.push(f.to_string());
+        } else {
+            // Fold the scored-universe rank into the surprise label so the
+            // validation ledger preserves the near-miss vs cold-miss distinction
+            // that the calibration readout needs. Consumers only count surprises
+            // (`.len()`), so "path (rank N)" stays backward-compatible; a file
+            // outside the scored universe falls back to the bare path.
+            let label = match all_ranked.iter().position(|r| r == f.as_str()) {
+                Some(i) => format!("{} (rank {})", f, i + 1),
+                None => f.to_string(),
+            };
+            surprises.push(label);
+        }
+    }
+```
+
+Edit 3 — the stderr summary uses `surprise_list.join(", ")` — fine, now shows ranks. Also the summary line "N changed files were in top-10 predictions" unchanged.
+
+Edit 4 — the existing test at 1056: add synthetic ranked + update assertions:
+
+```rust
+        // Synthetic scored universe so surprise ranks are deterministic and
+        // hermetic (the real repo's ranking would make them churn-dependent).
+        let ranked = vec![
+            "src/main.rs".to_string(),
+            "src/cli.rs".to_string(),
+            "src/repl.rs".to_string(),
+            "src/tools.rs".to_string(),
+            "src/watch.rs".to_string(),
+            "src/prompt.rs".to_string(),
+            "src/safety.rs".to_string(),
+        ];
+        auto_validate_after_failure_to(&changed, &snap_path, &val_path, Some(&ranked));
+        ...
+        let surprises = parsed["surprises"].as_array().unwrap();
+        assert_eq!(surprises.len(), 2, "should have 2 surprises");
+        assert!(surprises.contains(&serde_json::json!("src/prompt.rs (rank 6)")));
+        assert!(surprises.contains(&serde_json::json!("src/safety.rs (rank 7)")));
+```
+
+Hmm wait — `format!("{} (rank {})", f, i + 1)` produces "src/prompt.rs (rank 6)". Yes matches (i+1 where position of prompt.rs in ranked = index 5 → rank 6). 
+
+Edit 5 — noop tests: `auto_validate_after_failure_to(&changed, &snap_path, &val_path)` → add `, None`.
+
+Edit 6 — new test for rank-5 vs rank-900:
+
+```rust
+    #[test]
+    fn test_auto_validate_surprise_rank_near_vs_cold_miss() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let snap_path = dir.path().join("snapshots.jsonl");
+        let val_path = dir.path().join("validations.jsonl");
+
+        let snapshot = serde_json::json!({
+            "ts": "2025-01-15T12:00:00Z",
+            "day": 100,
+            "git_hash": "abc1234",
+            "top_10": [
+                {"path": "src/main.rs", "score": 0.9, "signals": ["churn"]},
+            ]
+        });
+        std::fs::write(&snap_path, serde_json::to_string(&snapshot).unwrap())
+            .expect("write snapshot");
+
+        // Changed files: one hit, plus a near-miss surprise (rank 5) and a
+        // cold-miss surprise (rank 900) in a synthetic scored universe.
+        let changed = vec![
+            "src/main.rs".to_string(),
+            "src/foo.rs".to_string(),
+            "src/zzz.rs".to_string(),
+        ];
+        let mut ranked: Vec<String> = (0..900).map(|i| format!("src/gen_{i}.rs")).collect();
+        ranked[4] = "src/foo.rs".to_string();   // 1-based rank 5
+        ranked[899] = "src/zzz.rs".to_string(); // 1-based rank 900
+
+        auto_validate_after_failure_to(&changed, &snap_path, &val_path, Some(&ranked));
+
+        let contents = std::fs::read_to_string(&val_path).expect("read validation file");
+        let parsed: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).expect("valid JSON");
+        let surprises = parsed["surprises"].as_array().unwrap();
+        assert_eq!(surprises.len(), 2, "should have 2 surprises");
+        assert!(
+            surprises.contains(&serde_json::json!("src/foo.rs (rank 5)")),
+            "near-miss surprise should persist its rank: {surprises:?}"
+        );
+        assert!(
+            surprises.contains(&serde_json::json!("src/zzz.rs (rank 900)")),
+            "cold-miss surprise should persist its rank: {surprises:?}"
+        );
+        // Hits are persisted bare (no rank folding on the predicted side).
+        assert!(parsed["hits"].as_array().unwrap().contains(&serde_json::json!("src/main.rs")));
+    }
+```
+
+Wait — `format!("src/gen_{i}.rs")` — 900 synthetic files each named gen_0..gen_899; ranked[4] = foo, ranked[899] = zzz. But note: if a changed non-surprise file ALSO appears... no, main.rs is a hit. And foo/zzz only in universe. Good.
+
+Also — will `compute_file_risk_scores()` NOT be invoked since ranked is Some? Right, the `ranked` branch avoids git. But `learn_weights_from_history()` at the end still runs — reads real ledgers. In the test env (real repo), risk_validations.jsonl exists... could learn_weights WRITE .arc/risk_weights.json? If MIN_VALIDATION_EVENTS ≤ real count. Let me check the constant and whether existing tests already hit this. Actually — existing tests (test_auto_validate_with_snapshots) already call this path and CI passes, so whatever side effect exists is pre-existing and tolerated. My new test is identical in that regard.
+
+But wait — is `.arc/risk_weights.json` tracked in git? If learn_weights writes it during the test, the test run creates a dirty file. Do existing tests do that? Let me check whether there's already such a file and if CI tolerates. Since existing tests call auto_validate_after_failure_to which ends with learn_weights_from_history() — yes, they already do. So no regression.
+
+Now — check the point: does compute_file_risk_scores() with real repo in the watch path cost? In production watch-failure, yes it runs git; that's exactly what the task wants ("compute it from compute_file_risk_scores()").
+
+Now, doc comment on `auto_validate_after_failure` — update to mention surprise ranks:
+Current:
+```rust
+/// - Appends a validation event to `.arc/risk_validations.jsonl`.
+```
+Add a bullet: "- Each recorded surprise carries its 1-based rank in the scored universe (e.g. `src/foo.rs (rank 11)`), distinguishing near-misses from cold misses."
+
+Also — check that nothing else calls `auto_validate_after_failure_to` — only within this file. Good.
+
+Wait, also `watch.rs` import: does watch.rs call `auto_validate_after_failure` (the pub wrapper)? Yes, presumably. The wrapper signature unchanged. Good.
+
+Now also reconsider: the task says "0-based position ... +1 for display". Our label "rank N" is 1-based for display. Good.
+
+Let me also double-check there's no other place that parses surprise strings as paths from the JSONL — e.g., `format_risk_report` or the risk meter. Search for `as_str()` on surprises... `parse_detailed_events` line 232: `val["surprises"].as_array().map(|a| a.len())` — count only. `parse_validation_events` line 417: count. Risk meter: uses scored_broke/hit_count/predicted_count. Accuracy stats: uses ValidationEvent scalar fields. 
+
+Also `commands_risk_report.rs` tests parse lines with surprises as strings for counts. OK.
+
+One more: after folding, the stderr "Surprises (not predicted): src/prompt.rs (rank 6), src/safety.rs (rank 7)" — that's actually a nice display improvement, showing rank in the watch summary. Good.
+
+Now let me make the edits. First re-read the current section around 270-372 to edit precisely.
+
+I have it from earlier read (lines 270-372). Let me apply edits.
+
+Also update line 258-261 doc comment.
+
+Let me write the edits now.
+────────────────────────────────────────────────────────────────────────────────
+I have the complete picture now. Key findings:
+
+• `write_validation_event` is called from 2 production sites (one in `commands_risk.rs` — the replay path, which the task scopes OUT), and consumers only read surprise *counts* (`.len()`), never surprise path strings.
+• The task constrains me to **one source file** (`src/commands_risk_snapshots.rs`), so the "fold rank into the surprise string" option is the designated path — it keeps `write_validation_event`'s signature untouched and requires zero changes in commands_risk.rs.
+• `compute_validation` (replay path) computes rank as `position + 1` (1-based) — I'll mirror that.
+
+Let me make the edits:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (4 → 7 lines)
+    /// - No-op if no snapshots exist.
+    /// - No-op if no `changed_files` match `src/` paths.
+    /// - Appends a validation event to `.arc/risk_validations.jsonl`.
+  + /// - Each recorded surprise carries its 1-based rank in the scored universe
+  + ///   (e.g. `src/foo.rs (rank 11)`), preserving the near-miss vs cold-miss
+  + ///   distinction the calibration readout needs.
+    /// - Prints a brief 2-3 line stderr summary when there are results.
+ ✓ (409ms)
+    /// - No-op if no snapshots exist.
+    /// - No-op if no `changed_files` match `src/` paths.
+    /// - Appends a validation event to `.arc/risk_validations.jsonl`.
+  + /// - Each recorded surprise carries its 1-based rank in the scored universe
+  + ///   (e.g. `src/foo.rs (rank 11)`), preserving the near-miss vs cold-miss
+  + ///   distinction the calibration readout needs.
+    /// - Prints a brief 2-3 line stderr summary when there are results.
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (13 → 38 lines)
+    // Classify: which changed src/ files were predicted (hits) vs not (surprises)
+        let predicted_set: std::collections::HashSet<&str> =
+            last.predicted.iter().map(|s| s.as_str()).collect();
+  + 
+  +     // Surprise-rank context (dream milestone): the watch path has no
+  +     // `all_ranked` snapshot (that lives in the replay path), so compute the
+  +     // scored universe from the live scorer and record each surprise's 1-based
+  +     // position in it. `compute_file_risk_scores()` returns the full ranking
+  +     // (already sorted by score), so `position + 1` mirrors what
+  +     // `replay_validate_core`'s `all_ranked` provides. This distinguishes a
+  +     // near-miss (rank 11, just off the top-10) from a cold miss (rank 700+).
+  +     let scored: Vec<String> = compute_file_risk_scores()
+  +         .iter()
+  +         .map(|r| r.path.clone())
+  +         .collect();
+    
+        let mut hits: Vec<String> = Vec::new();
+  +     // Surprises are stored as `path (rank N)` so the rank survives persistence
+  +     // without touching the shared writer's signature (`parse_validation_events`
+  +     // and friends read only the array length, so the suffix is invisible to
+  ... (19 more lines)
+ ✓ (407ms)
+    // Classify: which changed src/ files were predicted (hits) vs not (surprises)
+        let predicted_set: std::collections::HashSet<&str> =
+            last.predicted.iter().map(|s| s.as_str()).collect();
+  + 
+  +     // Surprise-rank context (dream milestone): the watch path has no
+  +     // `all_ranked` snapshot (that lives in the replay path), so compute the
+  +     // scored universe from the live scorer and record each surprise's 1-based
+  +     // position in it. `compute_file_risk_scores()` returns the full ranking
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — `scored` computed from `compute_file_risk_scores()` may include `src/format/...` files too. Let me check that `src_files` filter (`f.starts_with("src/")`) matches the scored universe paths (`src/foo.rs` and `src/format/foo.rs`). That's fine — rank lookup just won't find non-scored files, giving rank 0 fallback.
+
+But hold on — there's a subtlety. `compute_file_risk_scores()` runs git commands (file_change_counts, revert_history, etc.) and reads the filesystem — it's invoked even when there are no surprises. That's a cost. But the task explicitly says "compute it from `compute_file_risk_scores()`", so that's the intended design. Still, I could defer the computation until we know there's at least one surprise. Let me restructure to compute lazily — only compute when there's at least one surprise to rank. Actually the task says "compute it from compute_file_risk_scores()" — lazy is fine and more efficient. Let me make it lazy with a closure... Actually simpler: compute scored only if src_files has any non-predicted entry.
+
+Actually, a cleaner approach: compute the `scored` vec lazily via `.unwrap_or_else`. But borrow/lifetime gets awkward. Let me just keep it eager — it's the approach the replay path effectively uses (`replay_validate_last_snapshot` computes `all_risks` eagerly). Also `auto_validate_after_failure` already calls `learn_weights_from_history()` at the end which reads files. One extra `compute_file_risk_scores()` is consistent with how the tool works elsewhere (e.g., `/status` calls `top_risk_files`).
+
+Hmm, but it runs only when there are hits OR surprises and src_files non-empty and snapshots exist. Fine — that's a rare, gated event path.
+
+Now the stderr summary for surprises — with the rank suffix, the print will show `src/foo.rs (rank 11)` which is actually informative. Good.
+
+Now the test: `test_auto_validate_write_validation_event` asserts `surprises.contains(&serde_json::json!("src/prompt.rs"))` — that will now FAIL because the surprise string is `src/prompt.rs (rank N)` where N depends on actual scoring of the live repo. That test needs updating. The task says "Existing watch tests (src/watch.rs) stay green — this is additive" and "Write a test first if possible". The existing test in this file asserts exact string membership — it will break since the string format changed. I need to update it.
+
+Let me look at how the test writes the snapshot — it writes a snapshot with top_10 paths, then calls `auto_validate_after_failure_to` with a temp val_path. The `compute_file_risk_scores()` call reads the **live repo** git history and src/ directory — NOT the temp paths! So the ranks will be real ranks from the actual repo (whatever files src/prompt.rs, src/safety.rs rank in the real repo). This is actually fine and even realistic — a "scored universe" test — but the assertion needs to accept the `(rank N)` suffix.
+
+Wait, there's a subtlety: the temp dir is where snapshot/validation files live, but `compute_file_risk_scores()` reads `src/` and git history from the process CWD — the real repo. In the test environment (cargo test in this repo), src/prompt.rs and src/safety.rs exist in the real repo, so they'll get real ranks.
+
+To make the test robust and not depend on the live repo scoring, I should update it to assert prefix membership: `surprise starts with "src/prompt.rs"` and contains "(rank". And to deterministically verify the rank appears, I can check the raw string has the `(rank N)` pattern.
+
+The task's test requirement: "A fixture watch-failure event: a changed `src/foo.rs` that is NOT in the predicted top-10 produces a surprise; the recorded event includes its rank; a fictional rank-5 surprise vs rank-900 surprise both persist without panic."
+
+So I need a test that:
+1. A changed src/foo.rs not in top-10 → surprise, recorded event includes its rank.
+2. Rank-5 vs rank-900 both persist without panic.
+
+For (1), I'll use the existing test which now needs rank-aware assertions. For (2), hmm — "a fictional rank-5 surprise vs rank-900 surprise both persist without panic" — this tests the persistence of surprises with rank suffixes at various magnitudes. Since rank is computed from the real scorer, "fictional rank-5 / rank-900" suggests directly writing validation events with surprise strings like "src/x.rs (rank 5)" and "src/x.rs (rank 900)" via write_validation_event and asserting parse works (counts unchanged) and both persist. That verifies backward-compat: consumers only read counts.
+
+Actually wait — should surprises with rank suffix be folded as strings, or should write_validation_event get a new parameter? The task said: "Prefer the smallest schema change... either extend the event's surprise representation with a rank field, or fold the rank into the surprise string. Prefer the smallest schema change that keeps parse_validation_events backward-compatible". And constraint: "Files: src/commands_risk_snapshots.rs". Since write_validation_event is called by replay path in commands_risk.rs with plain strings, adding a rank param would force changes in commands_risk.rs (out of scope). So folding into the string is the right call — it's the only option that respects the one-file constraint.
+
+But wait — the replay path (`replay_validate_core` in commands_risk.rs) currently writes surprises as plain paths (it doesn't include rank in the string). Should the watch path's format be consistent? The replay path stores surprises without rank. That's fine — the watch path is a different writer and this task is specifically scoped to the watch path. The rank data in the replay path lives in the report display (rank #N), not the persisted string. The task says the watch path "loses the surprise-rank context... which the replay path already computes and persists via all_ranked" — hmm, "persists via all_ranked" means `all_ranked` is passed to `compute_validation` and used for the report display; `total_scored`/`scored_broke` get persisted. 
+
+OK. Folding rank into the surprise string in the watch path is the minimal change. Let me update the existing test.
+
+Also need to check: line 1078-1081 assertions:
+```rust
+let surprises = parsed["surprises"].as_array().unwrap();
+assert_eq!(surprises.len(), 2, "should have 2 surprises");
+assert!(surprises.contains(&serde_json::json!("src/prompt.rs")));
+assert!(surprises.contains(&serde_json::json!("src/safety.rs")));
+```
+
+I'll update to assert each surprise string starts_with the path and contains " (rank ".
+
+And I should add a new test that verifies rank persistence with fictional ranks 5 and 900 via write_validation_event round trip.
+
+Let me also double-check the `scored` vec — `compute_file_risk_scores()` sorts by score descending? Let me verify the ordering (rank semantics).
+────────────────────────────────────────────────────────────────────────────────
+Now let me verify the ordering of `compute_file_risk_scores` output (rank semantics = sorted by score descending):
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:790..870 ✓ (2ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "sort_by\|sort_unstable\|\… ✓ (5ms)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:975..995 ✓ (1ms)
+
+

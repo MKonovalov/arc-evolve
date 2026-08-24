@@ -1,0 +1,1389 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by reading the relevant code in src/commands_review.rs to understand the current state of `parse_review_effort` and `handle_review`.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -3 && git status…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs (120 lines) ✓ (1ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 789ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `parse_review_effort` function and `handle_review` function. First, let me see the current state of `parse_review_effort` and find `handle_review`.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'parse_review_effort|fn handle_review|fn parse_review_effort' in /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs  ▶ search 'parse_review_effort' in /home/runner/work/arc-evolve/arc-evolve/src ✓ (3ms)
+ ✓ (11ms)
+  2 tools completed in 691ms (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_git_review.rs:200..280 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the tests for parse_review_effort and the `handle_review` flow. The task says:
+
+1. Extend `parse_review_effort` to match positional words: `quick`, `normal`, `thorough` and synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. Case-sensitive prefix against the three labels. Word equal to known label consumed as effort; remaining string is review target. Unknown words are still content — never an error.
+2. When input is empty or no effort resolved, `handle_review` prints a dim hint: `review effort: --quick | --normal | --thorough (default: normal)`.
+3. Keep `label()` canonical spelling.
+
+Note the current `parse_review_effort` iterates over ALL whitespace-separated parts and collects non-effort parts. So `--quick src/lib.rs` → `(Quick, "src/lib.rs")`. But the new spec says: "A word that equals a known label is consumed as the effort; the remaining string continues to be the review target (file/range/pr)." 
+
+The tricky part: `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — a path is never eaten as an effort. But what about `parse_review_effort("thorough")`? It should be `(Thorough, "")`. And `parse_review_effort("balanced")` == `(Normal, "balanced")` — unknown word is content.
+
+So the rule: for each whitespace-separated part, if it matches a label or synonym (case-sensitive, exact match? or prefix?), consume it as effort. Otherwise it's content.
+
+Wait — "case-sensitive prefix against the three labels". Let me re-read: "also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. A word that equals a known label is consumed as the effort".
+
+Hmm, "equals a known label" — so exact match. But "case-sensitive prefix against the three labels" — that suggests prefix matching too? Let me look at the test spec:
+
+- `parse_review_effort("quick")` == `(Quick, "")`
+- `parse_review_effort("--quick")` unchanged — wait, "unchanged" — the test says `parse_review_effort("--quick")` unchanged. What does unchanging mean? Currently `parse_review_effort("--quick")` → `(Quick, "")`. So it stays `(Quick, "")`. Good.
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — content wins
+- `parse_review_effort("balanced")` == `(Normal, "balanced")` — unknown word is content
+
+So positional matching must be exact-match against the label/synonym list (case-sensitive). If a word is a path like `src/lib.rs`, it contains a `/` and wouldn't match the labels anyway. But consider a file literally named `quick` — e.g., `/review quick`. That would consume `quick` as effort... but the task explicitly says "A word that equals a known label is consumed as the effort". And "a path is never eaten as an effort" — in the test `src/lib.rs` is a path and doesn't match. But a file named `quick` exactly (no extension) would be consumed as effort. That's the documented trade-off. The task says match "case-sensitive prefix against the three labels" — hmm, this wording is a bit ambiguous. Let me reconsider.
+
+"case-sensitive prefix against the three labels": maybe it means the match is a case-sensitive comparison, and the word must be a prefix... no. Actually I think it means: the words must start with the... no. Let me look at the exact sentence again:
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick."
+
+I read this as: match words that are prefixes of the labels? Like "qui" → Quick? That seems odd. Actually, "case-sensitive prefix" might refer to a matching helper where we check `label.starts_with(word)` — i.e., a word is an effort if it's a case-sensitive prefix of a label. Hmm, but then "quick" is a prefix of "quick"; "quickl" would also match. But the test says `parse_review_effort("balanced")` == `(Normal, "balanced")` — "balanced" is not a prefix of any label, fine. And `parse_review_effort("src/lib.rs")` — not a prefix either.
+
+But wait — "A word that equals a known label is consumed as the effort" — "equals" suggests exact equality. The tests only use exact words (quick, deep, balanced, src/lib.rs). To be safe and match the tests exactly while honoring the "prefix" wording... Hmm.
+
+Let me think about the intent. The most natural reading: accept the words `quick|normal|thorough|fast|deep|full|light` exactly (case-sensitive). A "prefix against the three labels" might mean the check is `starts_with` where the word is a complete prefix... Actually you know what, let me look at how it's described once more: "case-sensitive prefix against the three labels". 
+
+I think it means: the matching is done case-sensitively, and a candidate word is an effort if it *is* one of the labels/synonyms. The "prefix" language might just be loose phrasing for "positional words at the start of the input". Actually! That's it — "prefix" could refer to the *positional* aspect: words appearing as the first token (a prefix of the input), not flags anywhere.
+
+Hmm, but the current implementation scans all whitespace parts and strips flags wherever they appear. The simplest approach that satisfies the tests: build a set of alias→effort mappings, and for each whitespace-separated part, if it exactly (case-sensitive) matches a label or synonym, consume it; else keep as content.
+
+But consider: `parse_review_effort("normal src")` → `(Normal, "src")`. And `parse_review_effort("thorough thorough")`... both consumed → `(Thorough, "")`. Edge cases don't matter much.
+
+However there's a subtlety: what if a file is legitimately named `quick`? Task says "a path is never eaten as an effort" — the test case is `src/lib.rs` which contains a slash so it can't match. A bare word `quick` — well, per spec it IS eaten. That's the documented behavior ("A word that equals a known label is consumed as the effort"). So exact-match it is.
+
+Now wait — should I do prefix matching? Let me re-read the exact task text one more time: "case-sensitive prefix against the three labels". Hmm. Actually maybe they mean prefix matching as in "the word must appear at the start" i.e. "positional prefix". I'll go with exact-match since that satisfies all given tests and the sentence "A word that equals a known label is consumed as the effort". Prefix matching would break e.g. a file named "quick2" or something, but also prefix matching could eat "bal" etc. Exact match is safer and satisfies all tests. But "case-sensitive prefix" nags me.
+
+Hmm, actually, one more consideration: with prefix matching, "quick" is a prefix of "quick", and "normal" is a prefix of "normal". Both exact words are prefixes of themselves. So tests pass either way. But "deep" is a synonym. With prefix matching against "the three labels" only: "thorough" prefix matches, "deep" would need to be checked against... hmm "deep" is a prefix of nothing among quick/normal/thorough. So synonyms must be exact matches anyway.
+
+OK here's my decision: implement exact, case-sensitive matching against the full word list (quick, normal, thorough, fast, deep, full, light). This satisfies all specified tests and "equals a known label". It's the least surprising.
+
+Now for part 2: the hint. "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`".
+
+So in `handle_review`, after parsing, if effort == Normal AND... wait "no effort was resolved". Trouble: `parse_review_effort` always returns Normal by default and can't distinguish "user typed normal" from "no effort". Hmm — but wait: `parse_review_effort("normal")` → `(Normal, "")`. Would the hint print then? The spec: "When the input is empty or no effort was resolved". If user typed `normal` explicitly, effort is Normal but it *was* resolved... but we can't distinguish.
+
+Actually let me re-read: "prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)` — mirroring the existing `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style ... so the behavior matches the hint only when the user didn't already pick an effort."
+
+And: "2. When the input is empty or no effort was resolved". The simplest interpretation consistent with tests: the hint shows when no effort flag/word was resolved. Since parse returns Normal both for "no effort" and "normal" explicitly, we can only discriminate by tracking whether the effort was resolved at all. The retreat version says "drop the hint if it touches interactive flow you can't test directly."
+
+Option A: Infer resolution in `handle_review` — check if the original arg contains any effort word/flag. That's duplicating the match logic.
+
+Option B: change `parse_review_effort` to return whether effort was explicitly resolved. But its signature `(ReviewEffort, String)` is used in 20+ places (per the search: 20 matches for parse_review_effort? Actually the search found /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs:35 and commands_git_review.rs:232 with "(20 matches)" total across files). Let me check all call sites.
+
+Actually simpler: the hint condition can be "input empty OR effort is Normal and no explicit effort token present". Hmm.
+
+Wait, let me re-read the task once more: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr". 
+
+I think the cleanest: in handle_review, before parsing, check whether the arg is empty or contains no effort token. If the arg is empty → definitely print hint. If arg non-empty but no effort resolved → print hint.
+
+Hmm, but the simplest signal: does the hint fire for `/review normal`? The task's test only covers the hint helper "if extracted as a pure fn". The retreat version even allows dropping the hint. The main spec says "no effort was resolved" — I'll treat explicit `normal` as resolved (no hint), which requires tracking whether normalization resolved.
+
+Let me design: keep `parse_review_effort` signature unchanged (used at multiple sites). Add a pure helper `review_effort_hint()` returning the surface line (testable). In `handle_review`, determine "effort given" by checking if the original arg contains any effort token. To avoid duplicating the alias list, I can make the match logic shared: a helper `effort_from_word(word: &str) -> Option<ReviewEffort>` and a `word_is_effort_token` used by both. Or: make `parse_review_effort` return `(ReviewEffort, String)` and additionally expose `parse_review_effort_detailed(input) -> (ReviewEffort, String, bool /*resolved*/)` in commands_review.rs, with `parse_review_effort` delegating. Since handle_review is in commands_git_review.rs, it can call the detailed version.
+
+That's clean and testable. Let me check all call sites of parse_review_effort first.
+
+Actually let me look at what the tests in the file currently look like and check call sites.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "parse_review_effort" src…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 560,687p src/commands_revie… ✓ (4ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 913ms (2 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs:540..585 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the current `parse_review_effort` function and modify it. The task:
+
+1. Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. A word that equals a known label is consumed as the effort; the remaining string continues to be the review target. Unknown words still treated as content — never an error.
+
+2. When input is empty or no effort resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`.
+
+3. Keep `label()` as canonical spelling; check docs.
+
+Test requirements:
+- `parse_review_effort("quick")` == `(Quick, "")`
+- `parse_review_effort("--quick")` unchanged
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — a path is never eaten as an effort
+- `parse_review_effort("balanced")` == `(Normal, "balanced")`
+
+Key design: which word gets consumed as effort? "A word that equals a known label is consumed as the effort". For `deep src/lib.rs`, `deep` is the first word and is consumed, remaining is `src/lib.rs`.
+
+For `src/lib.rs` — that's a single token, not a known label, so it stays as content.
+
+For `balanced` — unknown word, stays as content. So `(Normal, "balanced")`.
+
+Now the tricky part: for "quick" vs "quickly"? The task says "case-sensitive prefix against the three labels". Hmm — "case-sensitive prefix against the three labels" — does that mean the input word must be a prefix of the label, or the label must be a prefix of the word? Let me re-read.
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick."
+
+I think "case-sensitive prefix" means exact matching of the words listed. Hmm, "prefix against the three labels" is ambiguous. Let me think about the test cases:
+
+- `parse_review_effort("quick")` == `(Quick, "")` — exact match
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")` — synonym
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — content; note `src/lib.rs` does not start with any of quick/normal/thorough... it's a path. But wait — what about a file named `quick.rs`? That would start with "quick". Hmm, but the test says "a path is never eaten as an effort".
+
+The concern: "A word that equals a known label is consumed as the effort". So the matching is exact-equality against the set of labels + synonyms: {quick, normal, thorough, fast, deep, full, light}. `quick.rs` doesn't equal `quick`, so it's content. Good — exact match avoids eating paths.
+
+But "case-sensitive prefix against the three labels" — hmm. Maybe the intent is that `quick` is a prefix-match where the input must be a prefix of... no wait. Let me think about what "prefix" could mean. Maybe: for a positional word, check if it matches a label case-sensitively as a prefix — i.e., the word is a prefix of something? That doesn't quite make sense either.
+
+Actually, I think the safest interpretation aligned with the tests: exact (case-sensitive) match against the set of words {quick, normal, thorough, fast, deep, full, light}. "Prefix against the three labels" might mean "the word must prefix-match the label words" — e.g., accepting `quick` as matching label `quick`. I'll implement exact case-sensitive matching since the tests only require that, and it's the safest (paths like `quick.rs` are never eaten). Actually wait — let me reconsider. The task explicitly says "(case-sensitive prefix against the three labels)". If a file is named `thorough_report.md`, exact match wouldn't eat it. If prefix match (word is prefix of label? no, word is longer than label usually)... 
+
+Actually "case-sensitive prefix" could mean: the word must be case-sensitively equal as a prefix — i.e., the input word matches if it starts with... no.
+
+Let me just be careful: the design constraint from tests is that `src/lib.rs` and `balanced` are NEVER eaten. Then only exact matches on the known words get eaten. I'll implement exact match on a lookup map. That satisfies every stated test and the "path is never eaten" requirement. Prefix-matching would risk eating `quickly` or `thoroughly`... but nothing in tests requires that. The phrase "case-sensitive" suggests the match must respect case (i.e., `Quick` ≠ `quick`... and `--Quick` shouldn't match either).
+
+Hmm, but "prefix" — maybe they mean the word must match the *start* of the label? Like `norm` prefix of `normal`? That seems overly loose and would break "a path is never eaten" less directly (e.g. a directory named `norm`). I'll go with exact matching — it's clearly the intended semantics given the tests. Actually, let me re-read once more:
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick."
+
+I think "case-sensitive prefix against the three labels" describes the mechanism: a positional word is matched case-sensitively as a prefix against... hmm. Another reading: the word, matched case-sensitively, is checked to be a prefix of the label's canonical spelling? No — a short word being a prefix of a label would mean `q` → Quick, `n` → Normal, `t` → Thorough. That's sketchy.
+
+I'll implement exact-case-sensitive matching on the known word set. This is the conservative, test-satisfying interpretation.
+
+Now, the hint. When the effort was not explicitly resolved (defaulted to Normal with no flags/words), print a dim hint. The requirement:
+
+"2. When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)` — mirroring the existing `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style (commands_git_review.rs:237), so the behavior matches the hint only when the user didn't already pick an effort."
+
+So `parse_review_effort` needs to return whether an effort was explicitly resolved. Currently returns `(ReviewEffort, String)`. I have two options:
+- Change signature to return `(ReviewEffort, String, bool)` — but that changes call sites (2 in commands_git_review.rs + tests).
+- Add a new helper, e.g. `parse_review_effort_with_explicit(...)` returning a struct, or a separate function `review_effort_hint`.
+
+Actually the task says "The no-effort hint helper (if extracted as a pure fn) prints the surface line." — suggesting an optional pure fn, e.g. `review_effort_hint() -> String` returning the surface line. Then `handle_review` prints it when no effort was resolved.
+
+Cleanest: change `parse_review_effort` to return `(ReviewEffort, String)` and add a separate pure function `no_effort_hint() -> &'static str` or `review_effort_surface()`. But handle_review needs to know whether effort was explicit. Options:
+
+1. Make parse_review_effort return a struct `ParsedEffort { effort: ReviewEffort, remaining: String, explicit: bool }`.
+2. Add a separate function `effort_is_explicit(input: &str) -> bool` — re-parses.
+
+Hmm. Let me look at how the call sites use it:
+
+- commands_git_review.rs:153: `let (effort, remaining) = parse_review_effort(arg);` (in `run_non_interactive_review` presumably)
+- commands_git_review.rs:232: in handle_review.
+
+The task says part 2 is about `handle_review` printing the hint. Let me check both call sites. Let me look at line 153 context.
+
+Actually, the simplest approach that keeps the signature: have `parse_review_effort` return `(ReviewEffort, String)` still, but add a pure function that computes the hint line, and determine "explicit" inside handle_review by checking whether the input contained an effort word. Hmm, that duplicates parsing logic.
+
+Alternative: change the return to include explicitness. Let me look at both call sites to see the impact. Let me read commands_git_review.rs around 140-170.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_git_review.rs:130..190 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me check the test module location in commands_review.rs to understand the test structure, and find where `handle_review` is defined (it's in commands_git_review.rs at line 225). The task says "all in src/commands_review.rs" but `handle_review` lives in `commands_git_review.rs`. The task files list says `Files: src/commands_review.rs`, but part 2 mentions `handle_review` which is in `commands_git_review.rs`. Let me re-read:
+
+"2. When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr"
+
+Note help says that handle_review is in commands_git_review.rs:225 (per the repo structure summary: `fn handle_review` at commands_git_review.rs). So I need to modify handle_review which is in commands_git_review.rs. The files field says "Files: src/commands_review.rs" but the actual change locations span both. The task description itself says "all in src/commands_review.rs" — probably an approximation. Let me look at where handle_review and run_non_interactive_review are.
+
+Let me think about the design:
+
+Part 1: Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. A word that equals a known label is consumed as the effort; the remaining string continues to be the review target. Unknown words are still content — never an error.
+
+Important subtlety: "A user typing `/review thorough` (or `deep`/`fast`) gets Normal + content `thorough`, which then fails as 'file not found: thorough'". We want those to become effort words. But a word that equals a known label is consumed as the effort — so only exact matches (case-sensitive) like `quick`, `normal`, `thorough`, plus synonyms `fast`, `deep`, `full`, `light`.
+
+Wait — should it be a prefix match or exact match? The task says "case-sensitive prefix against the three labels" but then "A word that equals a known label is consumed as the effort". Hmm, "prefix" is mentioned. Let me re-read:
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms..."
+
+Hmm "case-sensitive prefix against the three labels" — this is ambiguous. But then: "A word that equals a known label is consumed as the effort; the remaining string continues to be the review target (file/range/pr). Unknown words are still treated as content — never an error."
+
+And the tests:
+- `parse_review_effort("quick")` == `(Quick, "")`;
+- `parse_review_effort("--quick")` unchanged;
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`;
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` (content wins — a path is never eaten as an effort);
+- `parse_review_effort("balanced")` == `(Normal, "balanced")` (unknown word is content).
+
+So exact matching on known words: quick, normal, thorough, fast, deep, full, light.
+
+The phrase "case-sensitive prefix against the three labels" — hmm, maybe they mean matching the word against the labels where the match... Actually I think "prefix" here might be leftover from an earlier design, but the tests clearly show exact-match semantics: "src/lib.rs" must not be eaten, "balanced" must not be eaten. "quick" and "deep" must be eaten. If it were prefix matching, then "quickly" would match "quick"... but "balanced" starts with "ba" not any label. Hmm, but "full" vs "fullscreen"? If exact matching is used, then "fullscreen" stays content. Tests don't cover that, but the safest interpretation consistent with tests is **exact, case-sensitive match** — but wait, should there be some prefix support?
+
+Actually let me re-read again: "case-sensitive prefix against the three labels". Hmm. Maybe it means: match a positional word as a case-sensitive prefix-match of the labels AND synonyms? Like "qui" → quick? That seems dangerous. Actually, given the tests specify exact words, I'll go with exact match but I could also accept that the word is checked against each label/synonym for equality (case-sensitive). "balanced" == no match → content. "src/lib.rs" == no match → content. That satisfies all tests cleanly.
+
+Hmm, but the word "prefix" is explicitly used. Let me think about what behavior would be product-safe and match the tests. If prefix matching is used: "thore" would match thorough. A user typing a file named "quick.rs" — wait, exact match on "quick.rs" doesn't equal "quick", so it's content. That's fine. But what about a file literally named "quick" in the repo? If a user runs `/review quick` meaning the file "quick"... that's an edge case — the task explicitly accepts that risk ("a path is never eaten as an effort" refers to the general case). The test `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` shows paths are not eaten.
+
+The "prefix" wording is likely sloppy. Given the explicit tests, I'll do exact matching. Hmm, but wait — let me reconsider. Maybe the intended behavior is: match the *first word* if it is exactly a known label/synonym. That's what tests want.
+
+Actually, let me reconsider the "prefix" phrase once more: "case-sensitive prefix against the three labels" — maybe they mean the word must be checked against the three label strings, and a match is when one of the labels is a prefix of... no. Or the word being a prefix of the label? "qui" is a prefix of "quick"? Hmm.
+
+I'll go with exact match - it satisfies all the listed tests and is the conservative product-safe choice. Words equal to known labels/synonyms get consumed.
+
+But wait — there's an important subtlety: where in the input can the effort word appear? The current implementation scans ALL whitespace-separated parts and treats any `--quick`/`--thorough` anywhere as the effort. But the task says "A word that equals a known label is consumed as the effort; the remaining string continues to be the review target." For positional words, should they be consumed anywhere in the string, or only the first word?
+
+Consider `/review quick src/main.rs` — first word. Task test: `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`. First word.
+
+But what about `src/main.rs deep`? If we scan all parts, "deep" anywhere gets consumed → (Thorough, "src/main.rs"). That mirrors the existing flag behavior (flag after file works, per test `src/main.rs --quick`). Hmm, but for positional words a file might contain "deep" as a path component... e.g., `/review src/deep/thing.rs`. If we consume "deep" anywhere, that becomes (Thorough, "src/thing.rs") — wrong! A file path component named "deep" would be eaten.
+
+This is a real hazard. The task says "the remaining string continues to be the review target (file/range/pr)" and "a path is never eaten as an effort". To be safe: positional words should only be consumed when they're the **first word** of the input. That way `/review deep src/lib.rs` works, `/review quick` works, but a path like `src/deep/thing.rs` keeps "deep" (since first word is "src/..."). Also flags (`--quick`) continue to be scanned anywhere (existing behavior kept).
+
+Hmm, but what about the flag-after-file test `src/main.rs --quick`? That's a flag, keep scanning anywhere.
+
+So the design:
+- Iterate parts with an index/enumerate.
+- For the FIRST part only: check if it's a positional effort word (exact match against labels+synonyms) → consume as effort.
+- For ALL parts: check if it's `--quick`/`--thorough` (existing flag behavior) → consume as effort.
+- Everything else → remaining parts.
+
+Wait, but should the first-part-only rule also apply to the existing flags? No — don't change existing flag behavior (flag after file is tested).
+
+Let me verify test cases against this design:
+- `parse_review_effort("quick")` → first part "quick" matches label Quick → (Quick, ""). ✓
+- `parse_review_effort("--quick")` → not positional (starts with --); "—quick" matches flag → (Quick, "") unchanged ✓
+- `parse_review_effort("deep src/lib.rs")` → first part "deep" → Thorough, remaining "src/lib.rs" ✓
+- `parse_review_effort("src/lib.rs")` → first part "src/lib.rs" doesn't match → (Normal, "src/lib.rs") ✓
+- `parse_review_effort("balanced")` → first part "balanced" doesn't match → (Normal, "balanced") ✓
+- `parse_review_effort("--quick --pr 42")` → (Quick, "--pr 42") ✓ (existing test)
+- `parse_review_effort("src/main.rs --quick")` → first part no; "—quick" flag anywhere → (Quick, "src/main.rs") ✓ (existing test)
+- `parse_review_effort("--thorough src/lib.rs")` → (Thorough, "src/lib.rs") ✓ existing test.
+
+What about non-interactive `run_non_interactive_review(arg)` — `arc review quick` → arg="quick" → (Quick, "") → reviews staged changes quickly. 
+
+Multi-word positional like "thorough" with a range: `arc review thorough HEAD~1..HEAD` → (Thorough, "HEAD~1..HEAD"). Good.
+
+Edge: What happens with `parse_review_effort("quick deep")`? First word "quick" → Quick, remaining is "deep" → target "deep". The remaining "deep" stays as content — it's not rescanned as positional (only first word). Hmm, that means `thorough deep` would be a confusing case, but that's an edge case users won't hit. Fine.
+
+What about "normal"? `parse_review_effort("normal src/lib.rs")` → first word "normal" → Normal, remaining "src/lib.rs" → (Normal, "src/lib.rs"). Consumed as effort but same level. Good — that's explicit intent.
+
+Now part 2: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`".
+
+handle_review is at commands_git_review.rs:225. The hint should print when effort == Normal (i.e., no explicit effort was resolved — either empty input or no effort word found). Note: if user explicitly typed "normal", effort is Normal but it WAS resolved... hmm. "When the input is empty or no effort was resolved". If a user types `/review normal`, we resolved the effort to Normal explicitly — should the hint print? The task says "no effort was resolved" — for `normal` the effort WAS resolved (explicitly). But effort == Normal either way.
+
+Simplest robust approach: track whether the user explicitly picked an effort. We could return a third value or check whether the input contained an effort token. Options:
+1. Return a bool "explicit" from parse_review_effort.
+2. In handle_review, check if input contains any effort token.
+
+Change the signature? parse_review_effort is used in 3 places (commands_review.rs tests, commands_git_review.rs:153, 232). Changing the return type to include a bool would ripple. Alternatively, keep signature and in handle_review check `arg.contains("--quick") || ... || first word is effort`. That duplicates logic.
+
+Better: make parse_review_effort return (effort, String) as-is, and add a helper `parse_review_effort_with_explicit` that returns (effort, remaining, explicit)? Or simpler: the existing signature has `(ReviewEffort, String)`. Hmm.
+
+Actually, re-read the task: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint". If the user typed `/review normal` explicitly — that's an odd case; printing the hint is harmless but slightly wrong. Simplest: print hint when effort == Normal AND input didn't contain an effort keyword. Since handle_review has access to `arg` (the input after stripping "/review"), we could check: if `parse_review_effort(arg).0 == Normal` and input doesn't contain explicit effort tokens. But that duplicates the matching logic.
+
+Cleanest: add an `explicit` flag to the parse function via a new function or extend the tuple. Since it's a pub fn used elsewhere, I could add a new pub fn `parse_review_effort_explicit(input) -> (ReviewEffort, String, bool)` and have `parse_review_effort` delegate to it. Then handle_review uses the explicit version. Tests use parse_review_effort unchanged.
+
+Wait, but the task item 2 says "When the input is empty or no effort was resolved" — maybe simpler interpretation: hint shows only when effort == Normal (default). If user typed `/review normal`, effort == Normal, hint shows — acceptable? The task's retreat version drops the hint entirely if it can't be tested. I think using the explicit flag is more correct and still simple.
+
+Actually, let me keep it minimal and robust: I'll have parse_review_effort delegate to an internal function that returns (effort, remaining, explicit), and expose both. But the public signature is used in tests and two call sites. Let me check whether changing the public return type to a 3-tuple would break anything — call sites: commands_git_review.rs:153 run_non_interactive_review does `let (effort, remaining) = parse_review_effort(arg);`. Changing to 3-tuple means all 3 call sites need updating. That's fine, but a 3-tuple is a bit ugly. Alternatively add a new fn.
+
+The task's test list doesn't mention explicit-flag. Let me go with: keep `parse_review_effort` signature unchanged (2-tuple), add new `pub fn review_effort_explicit(input: &str) -> bool` or just implement the hint check in handle_review by checking if any token is an effort keyword.
+
+Hmm, actually simplest and cleanest for handle_review: compute `let explicit = parse_review_effort(arg).0 != ReviewEffort::Normal` — no wait, "normal" explicit → Normal → would show hint. Edge case, very rare. 
+
+Let me think about what's truly minimal and correct:
+
+The task says: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr". The intent: teach the surface when the user didn't already pick an effort. If user typed "normal" explicitly, they already know the surface (they typed a valid keyword). But effort == Normal. To handle this correctly I'll track explicitness.
+
+Decision: I'll add an internal `parse_review_effort_full(input) -> (ReviewEffort, String, bool)` where bool = "user explicitly selected an effort (keyword or flag)". Public `parse_review_effort` delegates and drops the bool (keeps signature + all existing tests). `handle_review` in commands_git_review.rs uses `parse_review_effort_full` to decide the hint. Also `run_non_interactive_review` — should the hint print there too? Task only mentions handle_review. The `arc review` CLI subcommand with empty arg... build_review_content(remaining) with empty remaining → reviews staged. Should the hint show? Task says only handle_review. Keep it to handle_review to stay minimal.
+
+Wait — actually, should I put the hint logic in commands_review.rs (task says "all in src/commands_review.rs")? handle_review lives in commands_git_review.rs. The task's "Files: src/commands_review.rs" is where the main change is (parse_review_effort), but handle_review is in commands_git_review.rs. I'll edit both files — the task statement itself references the handle_review location. That's fine.
+
+Let me also check: is there a hint constant? "review effort: --quick | --normal | --thorough (default: normal)". I could extract a pure helper `review_effort_hint() -> &'static str` in commands_review.rs (testable per task: "The no-effort hint helper (if extracted as a pure fn) prints the surface line."). Let me make it a pub fn returning the string, and handle_review eprintlns it.
+
+Now, how does handle_review get `arg`? `let arg = input.strip_prefix("/review").unwrap_or("").trim();` — that's local. And `let (effort, remaining) = parse_review_effort(arg);`. I'll change to use the full variant.
+
+Let me now also double check: the hint should print "When the input is empty or no effort was resolved". With my explicit flag: arg="" → no effort → explicit=false → print hint. arg="quick" → explicit=true → no hint. arg="src/lib.rs" → explicit=false → print hint? Hmm — user gave a file path, no effort. Per task: "no effort was resolved → prints hint". Yes, that's the intent: no-args OR no effort given. So yes, `/review src/lib.rs` prints the hint. That matches "teach the surface when no effort is given".
+
+Hmm wait, but should the hint print when there IS a target but no effort? "No-args `/review` gives no hint that an effort switch exists." The task item 2: "When the input is empty or no effort was resolved". So yes — any review where the user didn't pick an effort gets the hint. OK.
+
+Now let me also consider the case in run_non_interactive_review — same question, task says only handle_review. Leave it.
+
+Now write the code.
+
+Part 1 implementation:
+
+```rust
+/// Parse effort from review input, reporting whether the user explicitly
+/// selected an effort (flag or positional keyword).
+///
+/// Accepts `--quick`/`--thorough` flags anywhere in the input (existing
+/// behavior), plus positional effort words as the *first* token: `quick`,
+/// `normal`, `thorough` and synonyms `fast`/`light` → Quick, `deep`/`full`
+/// → Thorough. Positional matching is first-token-only so file paths like
+/// `src/deep/thing.rs` are never misread as an effort. Unknown words are
+/// always content — never an error.
+fn parse_review_effort_full(input: &str) -> (ReviewEffort, String, bool) {
+    let mut effort = ReviewEffort::Normal;
+    let mut explicit = false;
+    let mut remaining_parts: Vec<&str> = Vec::new();
+
+    for (i, part) in input.split_whitespace().enumerate() {
+        match part {
+            "--quick" => {
+                effort = ReviewEffort::Quick;
+                explicit = true;
+            }
+            "--thorough" => {
+                effort = ReviewEffort::Thorough;
+                explicit = true;
+            }
+            part if i == 0 => match effort_word(part) {
+                Some(e) => {
+                    effort = e;
+                    explicit = true;
+                }
+                None => remaining_parts.push(part),
+            },
+            _ => remaining_parts.push(part),
+        }
+    }
+
+    (effort, remaining_parts.join(" "), explicit)
+}
+```
+
+And `effort_word`:
+
+```rust
+/// Map a positional word to an effort level, if it names one.
+fn effort_word(word: &str) -> Option<ReviewEffort> {
+    match word {
+        "quick" | "fast" | "light" => Some(ReviewEffort::Quick),
+        "normal" => Some(ReviewEffort::Normal),
+        "thorough" | "deep" | "full" => Some(ReviewEffort::Thorough),
+        _ => None,
+    }
+}
+```
+
+Wait, the task says "case-sensitive prefix against the three labels". Hmm, let me reconsider once more whether they truly want exact or prefix matching. "case-sensitive prefix" — reading it again: "(case-sensitive prefix against the three labels)". I believe this is describing that the match is done by checking whether the word matches a known label with case-sensitivity, and maybe they use "prefix" loosely because a single word is a prefix of the input string... Honestly, given the tests demand exact behavior (balanced → content, src/lib.rs → content), exact match on the whole word is what the tests assert. If I did prefix matching (word is a prefix of a label), then "bal" — "ba"... no. "q" → quick? Then `/review q` would be Quick — tests don't cover it but it seems fragile. I'll go exact-match, which is the safe, test-conformant reading. The tests are the contract.
+
+Hmm, actually — wait. Let me reconsider "prefix" from another angle: maybe they mean the *input word* may be a prefix of a label, e.g. "thor" → thorough. Like a shorthand. The phrase "case-sensitive prefix against the three labels" = "does `word` case-sensitively prefix one of the labels?" E.g. "deep" is not a prefix of anything. "fast" is not a prefix. "full" is not a prefix of thorough. So synonyms wouldn't work under prefix semantics... unless prefix of synonym too. This is genuinely ambiguous, but the synonyms ("fast"→Quick etc.) being listed separately plus the explicit test cases (which all use full words) tells me exact whole-word matching is intended, and "prefix" is loose language for "match a word against the label set". Going with exact. If a reviewer wanted prefix shorthand, they'd have written a test for "qui" → Quick. They didn't.
+
+Part 2 implementation — hint helper in commands_review.rs:
+
+```rust
+/// Surfaced when the user didn't pick an effort — teaches the effort surface.
+pub fn review_effort_hint() -> &'static str {
+    "review effort: --quick | --normal | --thorough (default: normal)"
+}
+```
+
+And in commands_git_review.rs handle_review:
+
+```rust
+let arg = input.strip_prefix("/review").unwrap_or("").trim();
+let (effort, remaining, explicit) = parse_review_effort_full(arg);
+
+match build_review_content(&remaining) {
+    Some((label, content)) => {
+        if !explicit {
+            eprintln!("{DIM}  {}{RESET}", review_effort_hint());
+        }
+        let prompt = build_review_prompt(&label, &content, effort);
+        run_prompt(agent, &prompt, session_total, model).await;
+        auto_compact_if_needed(agent);
+        Some(prompt)
+    }
+    None => None,
+}
+```
+
+Wait, the existing code prints `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` when effort != Normal. The task says "mirroring the existing... style". Should I keep the old effort print too? The task says the hint replaces the need — "the behavior matches the hint only when the user didn't already pick an effort." The old line printed the chosen effort (quick/thorough). The new hint prints the surface. I think the intent is: replace the old behavior (which printed effort only when non-Normal) with: always when !explicit, print the hint. But hmm — when user DID pick quick, the old code printed "effort: quick" as confirmation. Task doesn't say to keep that. Let me keep both? Actually "mirroring the existing `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style (commands_git_review.rs:237)" — the hint should look like that line. I think we replace the confirmation line with the hint line. When user picks explicit effort, no line at all? That loses the confirmation feedback. But the task only asks for the hint when no effort given. To be conservative and match the task exactly, I'll:
+
+- If !explicit → print the hint.
+- Else if effort != Normal → keep the old confirmation "effort: quick" line.
+
+That preserves existing behavior for explicit quick/thorough and adds the hint otherwise. Actually simplest: keep the old `if effort != Normal` line AND add hint when !explicit. Let me structure:
+
+```rust
+if !explicit {
+    eprintln!("{DIM}  {}{RESET}", review_effort_hint());
+} else if effort != ReviewEffort::Normal {
+    eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+}
+```
+
+That's clean. For `/review normal` explicit → effort==Normal → no line. Fine.
+
+Now — `parse_review_effort_full` needs to be pub for commands_git_review to use. And `review_effort_hint` pub.
+
+Where in commands_review.rs are the tests? Let me find the test module start around line 520-540. I need to add the new tests from the task:
+
+- `parse_review_effort("quick")` == `(Quick, "")`
+- `parse_review_effort("--quick")` unchanged (existing test covers)
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")`
+- `parse_review_effort("balanced")` == `(Normal, "balanced")`
+- hint helper prints the surface line (test review_effort_hint() contains "--quick" etc.)
+
+Also add tests for synonyms fast/full/light and normal, and maybe first-token-only protection: `parse_review_effort("src/deep/thing.rs")` == `(Normal, "src/deep/thing.rs")` — important safety test!
+
+Let me also add explicit-flag test? Optional. Maybe one: parse_review_effort_full("") → (Normal, "", false); parse_review_effort_full("quick") → (Quick, "", true). Since I made it a private fn (not pub), it can still be tested within the module. Actually commands_git_review uses it, so it must be pub. Let me make it pub(crate). Hmm, "pub fn" for parse_review_effort is the existing style (pub). I'll make parse_review_effort_full pub(crate) since it's internal API. Tests are in the same module so they can use it regardless.
+
+Wait, also need to double-check `handle_review` — is there another handle_review in commands_review.rs? The repo structure summary says commands_git_review.rs has handle_review (line 225 area). The task says "Files: src/commands_review.rs" but item 2 references handle_review — which is in commands_git_review.rs. So I edit both files. That's fine and honest.
+
+Let me check the imports in commands_git_review.rs to add review_effort_hint and parse_review_effort_full.
+
+Also — check docs: does docs/src/usage/commands.md or help_data.rs document /review's effort? Task says only if they document it, add quick|normal|thorough to the surface list. Let me check.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 1,20p src/commands_git_revi… ✓ (8ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/help_data.rs:910..950  ▶ read /home/runner/work/arc-evolve/arc-evolve/docs/src/usage/commands.md:518..543 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 999ms (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n 542,565p docs/src/usage/com… ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have the full picture. Let me implement:
+
+1. Extend `parse_review_effort` in `src/commands_review.rs` to also match positional words: `quick`, `normal`, `thorough` and synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. Case-sensitive prefix against the three labels. A word equal to a known label is consumed as effort; remaining string continues as target. Unknown words are content.
+
+Wait — careful. The task says "case-sensitive prefix against the three labels" — meaning a token matches if it's a prefix of a label? E.g. `qui` → Quick? Hmm, "case-sensitive prefix against the three labels: quick, normal, thorough". So a word like `quick` matches label `quick` (prefix match since equal), and possibly partial prefixes like `quic` → Quick. But then `fast`, `deep`, `full`, `light` are explicit synonyms.
+
+Careful with prefix matching: what if someone types a file named `quick.rs`? The word would be `quick.rs` — not a prefix of `quick`? Wait, prefix means the *word* is a prefix of the label? Or the label is a prefix of the word? "case-sensitive prefix against the three labels" — I'd interpret: the token must be a prefix of a label. E.g. `qu` matches `quick`? That's too aggressive — `qu` would never be a file name though. Hmm but let me think about what makes sense for the tests given:
+
+- `parse_review_effort("quick")` == `(Quick, "")`
+- `parse_review_effort("--quick")` unchanged → `(Quick, "")`
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — content wins, a path never eaten as effort
+- `parse_review_effort("balanced")` == `(Normal, "balanced")` — unknown word is content
+
+So "balanced" isn't a prefix of "quick"/"normal"/"thorough"... wait "bal" is not a prefix. "normal" — "balanced" doesn't start with... hmm no. Let me check: does "balanced" contain a prefix match? The word `balanced` as a prefix of a label — no label starts with "balanced". If the meaning is the label is a prefix of the word, then `balanced` contains... "balanced" — any of quick/normal/thorough as prefix? No.
+
+But consider `quickly` — if the token must equal the label, then `quickly` is content. If the token is a *prefix* of a label — `quick` is a prefix of `quickly`? No, the other direction. Hmm, "case-sensitive prefix against the three labels" — the input word is a prefix of one of the labels? Then `qu` matches. But `qu` could be `quick.rs`? No, `qu` ≠ prefix issue.
+
+Let me think about risk of prefix-match too aggressive: a file named `thorough.md`? If we match label-prefix-of-word, then `thorough.md` — the label `thorough` is a prefix of `thorough.md` → it would be eaten as effort! That's bad. But the test says "a path is never eaten as an effort" for `src/lib.rs` — src/lib.rs doesn't start with any label anyway.
+
+The test cases: `deep src/lib.rs` → `deep` matches synonym. `balanced` → content. What about `thoroughly`? Not tested. To be safe and match "prefix against the three labels" reading — I think the natural interpretation is: the token is matched if it *starts with* a known label (label is a prefix of token) OR token is a prefix of a label? 
+
+Actually, re-reading: "case-sensitive prefix against the three labels": `quick`, `normal`, `thorough` — match `quick` tokens. I think the safest interpretation that satisfies all given tests: a token matches an effort word if the token equals a label, or equals a synonym, OR the token is a *prefix* of a label (allowing `qui`, `nor`, `tho`?). But that would eat weird things... Hmm.
+
+Actually wait — for file safety, let me think about the collision: `parse_review_effort("quick.rs")` — hmm. The task says "A word that equals a known label is consumed as the effort". The prefix language: "case-sensitive prefix against the three labels". I think they mean: the word must be a prefix of the label (so `q` or `qui` → quick)? Or the label is a prefix of the word?
+
+Let me think about which is safer for files: if token-is-prefix-of-label (`quic` → Quick), then `quick.rs` is NOT matched (since "quick.rs" is longer than "quick" and doesn't equal a prefix... wait `quick.rs` is not a prefix of `quick`. It IS content. Good. And a file named `thoroughly.rs` — `thoroughly.rs` is not a prefix of `thorough` → content. Good.
+
+If label-is-prefix-of-token (`thoroughly` → Thorough), then `thoroughly.rs` would be eaten as effort → file not found. Bad.
+
+So token-is-prefix-of-label is the safe reading: a token like `qui` or `quic` or `quick` matches Quick. And `fast`/`deep`/`full`/`light` are exact-match synonyms. "deep src/lib.rs" — `deep` exact match → Thorough. Good.
+
+But hmm — would `n` match Normal? A file named `n` alone... rare. `no`? matches Normal. Eh, edge case. The prefix matching is what's requested — "case-sensitive prefix against the three labels". I'll implement: for each label, if label.starts_with(token) → match. Plus exact synonyms fast/deep/full/light.
+
+Wait, but also there's a subtlety: word order. Currently flags can appear anywhere (`src/main.rs --quick`). For positional words, should `src/lib.rs deep` also work? The task says "the remaining string continues to be the review target" — I'll process all tokens: any token that matches an effort word gets consumed, rest joins to remaining. That keeps `src/main.rs deep` working too, consistent with flag behavior. And multiple? Last one wins, like current flags.
+
+But careful with the "content wins" test: `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")`. `src/lib.rs` split by whitespace = `["src/lib.rs"]`. Does `src/lib.rs` match any label prefix? No label starts with "src". Good.
+
+`parse_review_effort("balanced")` → `["balanced"]` — no label prefix, not synonym → content → `(Normal, "balanced")`. Good.
+
+Now what about a file that DOES collide: e.g., `/review quick.md`? token `quick.md` — is it a prefix of `quick`? No ("quick.md" is longer). So content. 
+
+But what about `normal`? `normal` is a known label → consumed as effort Normal. That's the same as default, harmless.
+
+2. The hint: when input empty or no effort resolved, `handle_review` prints dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`. Need a pure helper so it's testable — the task says "The no-effort hint helper (if extracted as a pure fn) prints the surface line."
+
+Let me design:
+
+```rust
+/// Hint text for the effort surface, shown when the user gave no effort.
+pub fn effort_hint() -> String {
+    "review effort: --quick | --normal | --thorough (default: normal)".to_string()
+}
+```
+
+And in `handle_review` (commands_git_review.rs), when `effort == ReviewEffort::Normal` and no effort word was given... wait — the task says: "When the input is empty or no effort was resolved". So we need to know whether an effort was resolved, not just whether it's Normal. Because `/review normal` → effort Normal but resolved. Hmm — currently `parse_review_effort` returns `(ReviewEffort, String)` — no "was effort given" signal.
+
+Wait, actually: "When the input is empty or no effort was resolved, handle_review prints a single dim hint... so the behavior matches the hint only when the user didn't already pick an effort."
+
+Options:
+- Change parse_review_effort to return Option? That breaks signature and other call sites.
+- The hint condition: input empty OR no effort resolved. Simplest: if `arg.is_empty()` → hint. Or if the effort is Normal AND no word matched.
+
+The cleanest: return `(ReviewEffort, bool, String)`? That changes signature at 3 call sites (commands_review.rs tests, commands_git_review.rs:153, :232). Hmm, but task says keep signature? It doesn't explicitly say to keep signature. But "Extend parse_review_effort to also match positional words" — the signature could stay `(ReviewEffort, String)`.
+
+Alternative approach: a separate pure fn that determines whether the input contains an effort token:
+
+```rust
+/// True if the input explicitly selected an effort (flag or positional word).
+pub fn has_explicit_effort(input: &str) -> bool {
+    input.split_whitespace().any(|part| effort_from_word(part).is_some())
+}
+```
+
+Then in handle_review:
+```rust
+let (effort, remaining) = parse_review_effort(arg);
+if !has_explicit_effort(arg) {
+    eprintln!("{DIM}  {}{RESET}", effort_hint());
+}
+```
+
+Hmm — but should the hint print when input empty? Yes: "When the input is empty or no effort was resolved". `has_explicit_effort("")` = false → hint prints. Good, that covers both.
+
+But wait — ordering: should hint print before or after build_review_content check? Currently `build_review_content(&remaining)` returns Option; on None (nothing to review) it prints a "nothing to review" message presumably. Let me check build_review_content's None path... Actually the hint should only show when a review actually proceeds? The task says "handle_review prints a single dim hint on stderr" when input empty or no effort resolved. If `build_review_content` returns None, handle_review returns None (no review). Printing the hint there too would be harmless but let me look at what makes sense: no-args `/review` → arg empty → effort Normal, remaining "" → build_review_content("") → Some (staged diff). So hint prints. Good.
+
+I'll place the hint where the effort line is printed — mirroring the `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style. Only print ONE hint: replace the current `if effort != Normal` effort line with: if no explicit effort → print hint; else if effort != Normal → print the effort label line (existing behavior). Actually — the task says "a single dim hint" to replace/augment. Current behavior: `effort != Normal` prints "effort: quick|thorough". Keep that for explicit non-normal. Add the surface hint when no effort was resolved.
+
+Let me re-read: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)` — mirroring the existing `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style ... so the behavior matches the hint only when the user didn't already pick an effort."
+
+So:
+- No effort picked (empty or Normal-by-default): print `review effort: --quick | --normal | --thorough (default: normal)`.
+- Effort explicitly picked quick/thorough: keep printing `effort: quick` (existing).
+
+Hmm wait — but what about explicitly `normal`? `has_explicit_effort("normal")` = true, so no hint, and effort == Normal so no effort line. Fine.
+
+Should the hint be part 2 shipped? Task says retreat version drops the hint. I'll ship both parts since I can test the pure helper.
+
+Now, where's handle_review — it's in commands_git_review.rs. The task says "Files: src/commands_review.rs" but the hint goes in `handle_review` which lives in commands_git_review.rs. The task explicitly references commands_git_review.rs:237 for the existing style, so editing that call site is expected. The main file is commands_review.rs for the parser + tests.
+
+Let me design the parse:
+
+```rust
+/// Parse effort from review input — either `--flag` form or natural
+/// positional words (`quick`, `thorough`, `deep`, …).
+///
+/// Strips an effort token from the input and returns the effort level plus
+/// the remaining argument string (file path, range, etc.). Unknown tokens are
+/// treated as content — never an error.
+pub fn parse_review_effort(input: &str) -> (ReviewEffort, String) {
+    let mut effort = ReviewEffort::Normal;
+    let mut remaining_parts: Vec<&str> = Vec::new();
+
+    for part in input.split_whitespace() {
+        match effort_word(part) {
+            Some(e) => effort = e,
+            None => remaining_parts.push(part),
+        }
+    }
+
+    (effort, remaining_parts.join(" "))
+}
+
+/// Map a single token to an effort level, if it names one.
+///
+/// Matches `--quick`/`--thorough` flags, the three labels (`quick`,
+/// `normal`, `thorough`) by case-sensitive prefix, and natural synonyms
+/// (`fast`/`light` → Quick, `deep`/`full` → Thorough). Any other token is
+/// None — content, never an error.
+fn effort_word(part: &str) -> Option<ReviewEffort> {
+    let bare = part.strip_prefix("--").unwrap_or(part);
+    match bare {
+        "fast" | "light" => return Some(ReviewEffort::Quick),
+        "deep" | "full" => return Some(ReviewEffort::Thorough),
+        _ => {}
+    }
+    // Labels match by case-sensitive prefix: "quick", "qui", "normal", …
+    if "quick".starts_with(bare) && !bare.is_empty() {
+        Some(ReviewEffort::Quick)
+    } else if "normal".starts_with(bare) && !bare.is_empty() {
+        Some(ReviewEffort::Normal)
+    } else if "thorough".starts_with(bare) && !bare.is_empty() {
+        Some(ReviewEffort::Thorough)
+    } else {
+        None
+    }
+}
+```
+
+Wait — the synonyms also have `--fast`? The task only mentions positional words and synonyms. "--fast" — currently unknown token becomes content "--fast" (harmless leftover). Should `--fast` work? Task doesn't require it. But `--deep`→Thorough would be a bonus. Hmm — the existing contract: `--quick`, `--thorough` flags. If I strip `--` before matching, then `--fast` also works — that's fine, extra nicety, no harm. But careful: a range like `HEAD~3..HEAD` doesn't start with `--`. `--pr 42` — `--pr` → bare "pr" — not prefix of labels → content. Good, test `parse_review_effort("--quick --pr 42")` → `--quick`→Quick, `--pr`→"pr" no match → content "--pr 42". 
+
+Wait, but there's a subtle break: what about `--normal`? Previously content, now Normal. Harmless.
+
+What about prefix matching eating a flag like `--n`? bare "n" → "normal".starts_with("n") → Normal. Nobody types that. Fine.
+
+But wait — real risk: a file named `nor`? prefix match → eaten as Normal effort, content lost. But Normal is default anyway and the remaining would just lose that token. Prefix matching is what was asked ("case-sensitive prefix"), so I'll keep, but let me reconsider: is prefix matching really intended, or does "prefix" mean "the whole word"? Let me re-read: "Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels)". 
+
+Hmm, "case-sensitive prefix against the three labels" — I read this as: the token is matched case-sensitively as a prefix against the labels. So `quick` (full word, which is also a prefix of itself) and partials like `qui` both match. The words are: `quick`, `normal`, `thorough` and synonyms. Test only exercises full words. I'll implement prefix matching — it satisfies all tests and the description. Given "a path is never eaten as an effort" — `src/lib.rs` never prefix-matches. A path like `deep/` never matches via `deep` synonym? `deep/` bare... part is `deep/` — matches? No — synonym requires exact "deep"; prefix check: "quick".starts_with("deep/")? No. So `deep/...` won't be eaten. But a lone file named `deep` would be eaten as Thorough. That's the documented tradeoff of the feature (user typing `/review deep` means effort 🥇). The task explicitly says `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")` — so `deep` IS eaten as effort even though it could be a filename. 
+
+Now `has_explicit_effort` / hint fn:
+
+```rust
+/// True if the input explicitly names an effort (flag or positional word).
+pub fn has_explicit_effort(input: &str) -> bool {
+    input.split_whitespace().any(|part| effort_word(part).is_some())
+}
+
+/// Surface hint printed when no effort was given, so users discover the knob.
+pub fn effort_hint() -> &'static str {
+    "review effort: --quick | --normal | --thorough (default: normal)"
+}
+```
+
+Hmm, actually, simpler — maybe reuse logic: parse_review_effort could return whether effort was explicit. But signature constraint. has_explicit_effort + effort_word share the match. But note: `parse_review_effort("normal")` → effort Normal, has_explicit_effort true → no hint. `parse_review_effort("")` → Normal, no explicit → hint. `parse_review_effort("src/lib.rs")` → Normal, no explicit → hint shows. Hmm — the task says "When the input is empty or no effort was resolved" → `/review src/lib.rs` prints the hint. That's intended ("teach the surface when no effort is given"). Yes, that's the no-args and content-only cases.
+
+Now in handle_review (commands_git_review.rs):
+
+```rust
+let (effort, remaining) = parse_review_effort(arg);
+
+match build_review_content(&remaining) {
+    Some((label, content)) => {
+        if has_explicit_effort(arg) {
+            if effort != ReviewEffort::Normal {
+                eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+            }
+        } else {
+            eprintln!("{DIM}  {}{RESET}", effort_hint());
+        }
+        ...
+```
+
+Hmm wait, but if effort explicitly normal — no line (existing behavior). Good.
+
+Should the hint also fire in `run_non_interactive_review` (arc review CLI subcommand)? Task says handle_review only. Keep it to the REPL handler.
+
+Also need to export from commands_git_review.rs the new fns? commands_git_review re-exports via `pub use crate::commands_review::{...}`. I'll add `effort_hint`, `has_explicit_effort` to that pub use list. Actually only `effort_hint` is needed in commands_git_review; has_explicit_effort is internal to commands_review (used by tests + handle_review). Export both or just what's needed? Export `effort_hint` and `has_explicit_effort` — keep it explicit.
+
+Update help_data.rs: `--quick|--thorough` surface list → add `quick|normal|thorough` words. Task: "if docs/src/usage/commands.md or help_data.rs documents /review's effort, add quick|normal|thorough to the surface list." Both do. So update both:
+
+help_data.rs line 922-923:
+```
+             \x20 /review quick            Quick review: bugs & security only\n\
+             \x20 /review thorough         Deep review: all dimensions\n\
+```
+And the effort levels section mention positional words.
+
+docs/src/usage/commands.md — check if it mentions flags... Line 518-520 table has targets. Let me check if effort is mentioned in commands.md for /review. Search showed no "--quick" in docs commands.md for review. Let me grep to confirm.
+
+Actually the grep for "quick\|thorough\|effort" in docs/src/usage/commands.md only showed /quick command mentions, no review effort. So commands.md doesn't document review effort — no change strictly needed there. But help_data.rs does document it (`/review [--quick|--thorough]`), so update it.
+
+Now write tests per spec:
+
+```rust
+#[test]
+fn test_parse_review_effort_positional_quick() {
+    let (effort, remaining) = parse_review_effort("quick");
+    assert_eq!(effort, ReviewEffort::Quick);
+    assert_eq!(remaining, "");
+}
+
+#[test]
+fn test_parse_review_effort_positional_normal() {
+    let (effort, remaining) = parse_review_effort("normal");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "");
+}
+
+#[test]
+fn test_parse_review_effort_synonyms() {
+    assert_eq!(parse_review_effort("fast").0, ReviewEffort::Quick);
+    assert_eq!(parse_review_effort("light").0, ReviewEffort::Quick);
+    assert_eq!(parse_review_effort("deep").0, ReviewEffort::Thorough);
+    assert_eq!(parse_review_effort("full").0, ReviewEffort::Thorough);
+}
+
+#[test]
+fn test_parse_review_effort_deep_with_file() {
+    let (effort, remaining) = parse_review_effort("deep src/lib.rs");
+    assert_eq!(effort, ReviewEffort::Thorough);
+    assert_eq!(remaining, "src/lib.rs");
+}
+
+#[test]
+fn test_parse_review_effort_path_is_content() {
+    let (effort, remaining) = parse_review_effort("src/lib.rs");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "src/lib.rs");
+}
+
+#[test]
+fn test_parse_review_effort_unknown_word_is_content() {
+    let (effort, remaining) = parse_review_effort("balanced");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "balanced");
+}
+
+#[test]
+fn test_effort_hint_surface() {
+    assert_eq!(
+        effort_hint(),
+        "review effort: --quick | --normal | --thorough (default: normal)"
+    );
+    assert!(has_explicit_effort("quick"));
+    assert!(has_explicit_effort("--thorough"));
+    assert!(has_explicit_effort("deep src/lib.rs"));
+    assert!(!has_explicit_effort(""));
+    assert!(!has_explicit_effort("src/lib.rs"));
+}
+```
+
+Wait — careful about one thing: the existing test `test_parse_review_effort_flag_after_file` — "src/main.rs --quick" → Quick + "src/main.rs". With my parser: `src/main.rs` → no match → content; `--quick` → bare `quick` → prefix match → Quick. Good.
+
+Existing test with_pr: "--quick --pr 42" → --quick→Quick, --pr→bare "pr" — not prefix → content. Good.
+
+Now danger: prefix matching on the bare token. Existing flag "--quick" strip "--" → "quick" matches. What about bare `-quick` (single dash)? strip_prefix("--") fails → bare = "-quick" → no match → content. Fine, unchanged from before.
+
+But here's a subtle regression: previously "--thorough" matched exactly; now "--thorough" → bare "thorough" prefix match → Thorough. Same. "--quick" same. OK.
+
+One more: empty token can't happen from split_whitespace.
+
+Edge: `parse_review_effort("q")` → "q" prefix of "quick" → Quick. That's the requested prefix behavior.
+
+Now let me also check: in the prefix match, since "normal" is a label, a token "no" → Normal. A token "none"? "normal".starts_with("none")? "none" vs "normal" — n-o-n vs n-o-r. No. OK. "not" → n-o-t vs... no. "no" → yes. Eh, acceptable per spec.
+
+Hmm, but one concern: ordering of prefix checks — what if a token is a prefix of multiple labels? "n" — only normal. "t" — "thorough" only. "q" — quick only. No first letters collide. Actually "f" — "fast"? that's synonym exact. What about "fu"? "full" exact only. OK no ambiguity.
+
+Let me now write the code. First the parser changes in commands_review.rs.
+
+Also check imports in commands_review.rs tests mod — currently uses super::*. Let me look at the test module header.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "mod tests" src/commands_r… ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a clear picture. Let me implement the changes:
+
+1. **Part 1**: Extend `parse_review_effort` to match positional words — case-sensitive prefix against the three labels: `quick`, `normal`, `thorough` and synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick. A word that equals a known label is consumed as the effort; the remaining string continues to be the review target. The task says "case-sensitive prefix against the three labels" — so `quick`, `normal`, `thorough` should be matched as a prefix? Wait, let me re-read.
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick."
+
+Hmm, "case-sensitive prefix against the three labels" — this is a bit ambiguous. Does it mean prefix matching like "quic" matches "quick"? Or does it mean exact match (word equals a label)? The next sentence clarifies: "A word that equals a known label is consumed as the effort". And the test spec:
+
+- `parse_review_effort("balanced")` == `(Normal, "balanced")` — "unknown word is content, and `"balanced"` is consumed as the review target". If prefix matching were used, `"balanced"` doesn't prefix-match any label anyway. But a path like `src/lib.rs` must never be eaten as an effort. If prefix matching: "quick..." — hmm, would "quickfile.rs" match? That would be bad. But the test says `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — a path is never eaten. With prefix matching, "src/lib.rs" doesn't start with quick/normal/thorough so fine.
+
+Actually wait — the danger with prefix matching: a file named `normal.rs` would be eaten as the Normal effort. The task says "content wins — a path is never eaten as an effort". Let me think about the intended semantics carefully.
+
+Test spec:
+- `parse_review_effort("quick")` == `(Quick, "")`
+- `parse_review_effort("--quick")` unchanged — `(Quick, "")`
+- `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+- `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` (content wins — a path is never eaten as an effort)
+- `parse_review_effort("balanced")` == `(Normal, "balanced")` (unknown word is content)
+
+So the minimal interpretation: exact word match against {quick, normal, thorough} plus synonyms {fast, deep, full, light}. "Case-sensitive prefix" — hmm. Maybe it means: check if the word is a case-sensitive exact match of the label. Actually "prefix" here might mean that the effort is consumed only if it appears as a leading positional word (i.e., the first word of the input), rather than anywhere in the string? Let me re-read.
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels)"
+
+Hmm, I think "case-sensitive prefix" means: match words that are case-sensitive prefixes of the labels? Like "qui" → quick? That seems dangerous. But then "A word that equals a known label is consumed as the effort" — "equals a known label".
+
+Actually let me think about what makes sense and satisfies the tests:
+
+For `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — with prefix matching where "src" isn't a prefix of any label, fine.
+
+For `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")` — "deep" is a synonym.
+
+The risk with prefix matching: a path like "quickstart.md" would prefix-match "quick" and be eaten. That would be terrible. The task explicitly says "a path is never eaten as an effort". So prefix matching labels against words would break that guarantee for files like `quicksort.rs` or `normalize.py`.
+
+Wait, unless "case-sensitive prefix" means the word is matched as a prefix but only exact label equality is consumed... Let me re-read once more:
+
+"Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms..."
+
+I think the most sensible reading: A positional word matches if it's a case-sensitive *prefix* of one of the labels (quick, normal, thorough)... Hmm no wait, that doesn't make sense either because "fast", "deep", "full", "light" aren't prefixes of the labels.
+
+Actually — alternative reading: the matching is "case-sensitive prefix [matching] against the three labels" — i.e., match the *label* against the *word*: the word is a prefix of the label? So "qui" would match quick, "norm" would match normal, "tho" would match thorough? That would be a "prefix of label" match. But then `parse_review_effort("balanced")` — balanced isn't a prefix of any label, so it's content. And `parse_review_effort("src/lib.rs")` — "src" is not a prefix of a label. Hmm, but "normalize.rs"... "norm" is a prefix of "normal". That file would get eaten as Normal effort. But wait — Normal is the default anyway, so eating it as Normal changes nothing about the effort, just consumes it from the target. That would break `parse_review_effort("src/lib.rs")`... no, "src" isn't a prefix of normal. 
+
+Hmm, this ambiguity matters. Let me look at what's safest and satisfies all stated tests:
+
+Stated tests that MUST pass:
+1. `parse_review_effort("quick")` == `(Quick, "")`
+2. `parse_review_effort("--quick")` == `(Quick, "")` (unchanged)
+3. `parse_review_effort("deep src/lib.rs")` == `(Thorough, "src/lib.rs")`
+4. `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")`
+5. `parse_review_effort("balanced")` == `(Normal, "balanced")`
+
+All of these pass with BOTH exact-match and prefix-of-label matching. The difference only shows for words like "quic", "norm", "tho", "normalize".
+
+The task title says "accept natural effort words" — the intended UX is typing `/review quick`, `/review thorough`, `/review deep`, `/review fast`, `/review normal`. Exact match against a set of known tokens is the natural and safe interpretation. Prefix matching ("quic" → quick) is a nice-to-have but risks eating file paths that start with label prefixes.
+
+Given the explicit safety requirement "(content wins — a path is never eaten as an effort)" and "unknown words are still treated as content", I'll go with: a positional word is consumed as an effort only if it exactly equals a known label or synonym. That satisfies every stated test and the safety property.
+
+Hmm, but "case-sensitive prefix against the three labels" is explicit in the task. Let me reconsider... Maybe "case-sensitive" is the key qualifier — the current flag matching (`--quick`) is already case-sensitive exact. The positional matching should also be case-sensitive (not case-insensitive, so "QUICK" isn't matched). "prefix against the three labels" might describe that the match is scored against the labels as a prefix set... 
+
+Actually, you know what — I bet "case-sensitive prefix" is describing the *safety property*: a word is only an effort if it IS the label (is a prefix match of the label set in the sense of exact equality). Let me think about "full"→Thorough: "full" is not a prefix of "thorough". "fast" is not a prefix of "quick". So the synonyms can't be prefix matches. The three labels quick/normal/thorough given as positional words could plausibly be prefix-matched, but the synonym table is exact.
+
+Decision: I'll implement a match that treats a word as an effort iff it equals one of the known tokens exactly (case-sensitive). This is the safest, satisfies all tests, and delivers the UX (typing natural words works). Prefix-minimal matching like "quic" is not worth the path-eating risk. Hmm, but the task explicitly says "case-sensitive prefix against the three labels"...
+
+Let me reconsider one more time. Reading the whole sentence: "Extend `parse_review_effort` to also match positional words (case-sensitive prefix against the three labels): `quick`, `normal`, `thorough` and natural synonyms `fast`→Quick, `deep`→Thorough, `full`→Thorough, `light`→Quick."
+
+I think "(case-sensitive prefix against the three labels)" modifies how the *positional words* match the labels. So `quick`, `normal`, `thorough` are matched case-sensitively as prefixes... i.e. the positional word is checked against each label, and if it's a case-sensitive prefix of the label... no wait. "quick" IS the label. Hmm.
+
+Alternatively: the word `w` matches label `l` if `w` is a case-sensitive prefix-match... of `l`? Or if `l` starts with `w`? "quic" starts... no. Let me just think about what "prefix" most plausibly means: "quick" is the canonical value and "quic" etc. would be prefix matches. But the enumerated values for the three labels are the FULL labels: "quick", "normal", "thorough". If prefix matching were intended, they'd list "quic" as an example.
+
+I'll go with exact case-sensitive equality for the three labels plus the synonym table, and note the reasoning. Actually — wait. Let me reconsider the risk with prefix matching more concretely: a user reviewing a file named `thorough_analysis.md` or `normal.c`... If prefix matching, "normal.c" → "normal" prefix → eaten as Normal, target becomes ".c". Broken. The task's own test `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` demonstrates the "path is never eaten" principle. With exact matching, `normal.c` would be content (unknown word). This strongly suggests exact matching is the right call, and "prefix" in the task description is loose language for "word at the start/positional word" — hmm.
+
+OK here's another thought — maybe "prefix" refers to the position: the effort word must be a *prefix* of the command string (first word), not anywhere in the middle. I.e., `/review quick src/lib.rs` — "quick" is the first positional word (prefix of the argument string). And `parse_review_effort` currently splits all whitespace and matches flags anywhere ("Flag can appear after the file path too" test). Maybe the intent is: effort words are consumed when they appear as positional words at the start, while flags work anywhere. But then `parse_review_effort("deep src/lib.rs")` — deep is first → consumed; `parse_review_effort("src/lib.rs")` — src is first, not an effort → content.
+
+Hmm, but what about `/review src/lib.rs quick`? Under prefix-position matching, "quick" at the end would be treated as content → "file not found: quick". Under current flag-style anywhere matching, it'd be consumed as effort. The task says "case-sensitive prefix against the three labels" — I think positional words are matched wherever they appear in the whitespace-split tokens, same as flags. That's the simplest mental model and matches the existing loop structure.
+
+Final decision: exact, case-sensitive equality against {quick, normal, thorough, fast, deep, full, light}. This satisfies all five stated tests, preserves the "path never eaten" property, and delivers the UX. I'll write it cleanly.
+
+2. **Part 2**: When input is empty or no effort was resolved, `handle_review` prints a dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`.
+
+Wait — the hint says "review effort: --quick | --normal | --thorough" but `--normal` isn't currently a flag that parse handles! Let me check: `parse_review_effort` matches only `--quick` and `--thorough`. The hint mentions `--normal`. Should I also accept `--normal` as a flag? The task says "The command already has flags (`--quick`, `--thorough`); teaching the surface..." and the hint is "review effort: --quick | --normal | --thorough (default: normal)".
+
+The hint is specified verbatim: "review effort: --quick | --normal | --thorough (default: normal)". Since part 1 makes positional "normal" work, and `--normal` as a flag... the hint lists it, which implies users can type it. It would be odd to print `--normal` in the hint but reject it. But the task's part 1 only says positional words: quick, normal, thorough + synonyms. It doesn't explicitly say to add `--normal` as a flag.
+
+Hmm. "When no effort was resolved" — so for empty input, print the hint. For "content that isn't effort" — e.g. `parse_review_effort("src/lib.rs")` resolves Normal (default) with no explicit effort. Does that count as "no effort was resolved"? The task says: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint". 
+
+Interpretation: print the hint when the resolved effort is Normal AND the user didn't explicitly request Normal? Or print whenever effort == Normal (the default)? If a user types `/review src/lib.rs`, effort is Normal — printing the hint there would be noise on every normal file review, which is bad UX. The intent is: the hint teaches the surface "when no effort is given" (task title). So print the hint only when the user gave NO effort word at all — i.e., the default path.
+
+How do I distinguish "user explicitly typed normal" from "no effort given"? The parser returns `(ReviewEffort, String)` — I need to know whether an effort was explicitly specified. Options:
+- Change the function signature — risky, it's used in 3 places.
+- Track whether any effort token was consumed. The task says: "if extracted as a pure fn" for the hint helper. 
+
+Actually re-reading: "When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr". Hmm "no effort was resolved" — maybe this means the input was empty (no effort given) OR parse didn't find an effort token. Simplest correct semantics: print the hint when handle_review's outcome was reached with default Normal effort because no explicit effort token appeared.
+
+Let me think about what's testable and clean. I could add a helper that returns whether an effort was explicitly set. But minimal approach: since `parse_review_effort("")` returns `(Normal, "")`, and any no-effort input like "src/lib.rs" also returns `(Normal, ...)`, I can't distinguish from the return value alone.
+
+Cleanest design that keeps the function signature: make handle_review only print the hint when the argument's first positional word is not an effort word... hmm, no — I need to know if an effort token was in the input.
+
+Alternative: since part 1 consumes effort words positionally anywhere, I could have handle_review check: does the original arg contain any effort word? That duplicates the parse logic.
+
+Better: extend the pure function to also report whether an effort was explicitly requested. The task says tests like `parse_review_effort("quick")` == `(Quick, "")` — the return signature stays `(ReviewEffort, String)`. So I shouldn't change the signature.
+
+Option: A separate pure fn `explicit_effort_present(input: &str) -> bool`, or fold it into handle_review logic: only print hint if NO effort was given. Let me re-read the task spec once more:
+
+"2. When the input is empty or no effort was resolved, `handle_review` prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)` — mirroring the existing `eprintln!("{DIM}  effort: {}{RESET}", effort.label())` style (commands_git_review.rs:237 [sic]), so the behavior matches the hint only when the user didn't already pick an effort."
+
+"so the behavior matches the hint only when the user didn't already pick an effort" — KEY. The hint shows only when the user didn't pick an effort. So if user typed `/review normal src/lib.rs`, no hint. If user typed `/review src/lib.rs` — did they "pick an effort"? No, they picked a file. Default Normal. So hint would print. If `/review` with empty input — no effort picked, hint prints.
+
+Hmm wait, but printing a hint on every plain `/review src/lib.rs` could be noisy... but actually it's a *teaching* surface — the first-impression contract. Printing "review effort: --quick | --normal | --thorough (default: normal)" once when a user does a plain review is exactly the teaching moment. Actually is it? `/review src/lib.rs` is a normal file review; the user explicitly asked for a file, not an effort. The hint teaches them that efforts exist. That's the "teach the surface when no effort is given" title. Yes — the task title literally says "teach the surface when no effort is given". So the hint fires whenever no effort token was in the input.
+
+So: hint fires iff no effort token (flag or positional) was present in the input. I need a way to detect that. Since `parse_review_effort` returns `(Normal, remaining)` in both the no-effort and explicit-normal cases, I can't distinguish. 
+
+Solution: extract the effort-token detection into a pure helper that both `parse_review_effort` uses and that reports presence. E.g.:
+
+```rust
+/// Test whether input contains an explicit effort token (flag or positional word).
+pub fn has_explicit_effort(input: &str) -> bool {
+    input.split_whitespace().any(|part| effort_for_token(part).is_some())
+}
+```
+
+And restructure `parse_review_effort` to use a shared `effort_for_token(token) -> Option<ReviewEffort>` helper. Then `handle_review`:
+
+```rust
+let (effort, remaining) = parse_review_effort(arg);
+if !has_explicit_effort(arg) {
+    eprintln!("{DIM}  review effort: --quick | --normal | --thorough (default: normal){RESET}");
+}
+```
+
+Wait, but the spec says the hint should contain "review effort:" — and the style mirrors `eprintln!("{DIM}  effort: {}{RESET}", effort.label())`. The hint string format given: `review effort: --quick | --normal | --thorough (default: normal)`. So:
+
+```rust
+eprintln!("{DIM}  review effort: --quick | --normal | --thorough (default: normal){RESET}");
+```
+
+And the task says "The no-effort hint helper (if extracted as a pure fn) prints the surface line." — hmm, "prints the surface line" — so if I extract a pure fn, it should print the line. Or maybe the helper returns the line string to print. Actually — "if extracted as a pure fn" — I could extract:
+
+```rust
+pub fn review_effort_hint() -> String {
+    "review effort: --quick | --normal | --thorough (default: normal)".to_string()
+}
+```
+
+Hmm, but the task test says "prints the surface line" — a pure fn that prints is contradictory (pure = no side effects). I think they mean: if I extract a helper, verify it produces the surface line. I'll extract a small pure fn returning the hint text (without dim codes, since formatting codes are applied at print site) and test it. Actually simplest to keep the format codes with it:
+
+```rust
+pub fn no_effort_hint_line() -> String {
+    format!("{DIM}  review effort: --quick | --normal | --thorough (default: normal){RESET}")
+}
+```
+
+Wait, that creates a literal "review effort: ..." — the task says "prints a single dim hint on stderr: `review effort: --quick | --normal | --thorough (default: normal)`". OK I'll extract a helper that returns the dim-formatted line, and handle_review eprintln!s it when no effort was given.
+
+But wait — where should the hint apply? Only in `handle_review` (the REPL `/review`), or also `run_non_interactive_review` (the CLI `arc review` subcommand)? The task says "`handle_review` prints a single dim hint" — only handle_review. The CLI subcommand is piped/non-interactive; adding the hint there would pollute stderr... actually it goes to stderr which is for streaming anyway. But the task explicitly scopes to handle_review in part 2. Also there's a third call site at commands_git_review.rs:153 which is `run_non_interactive_review`. I'll scope the hint to handle_review only, per spec.
+
+Hmm wait, let me double check the third call site — `run_non_interactive_review` (line 153) and `handle_review` (line 232). Both are in commands_git_review.rs. The task says handle_review prints the hint. Good.
+
+3. **Part 3**: docs. `help_data.rs` documents `/review`'s effort as `--quick`/`--thorough`. Add positional words to the surface list. docs/src/usage/commands.md — the task says "if `docs/src/usage/commands.md` or `help_data.rs` documents `/review`'s effort, add `quick|normal|thorough` to the surface list."
+
+help_data.rs line 916: "/review [--quick|--thorough] [target] — AI code review" and lines 922-928 document effort levels. I should add positional words to the surface. docs/src/usage/commands.md — let me check if it documents effort flags... From my grep, commands.md lines 518-534 describe /review with a table including `/review --pr 123`, no `--quick`/`--thorough` mention. So commands.md doesn't document the effort flags. But the help_data.rs does. I'll update help_data.rs.
+
+Now, the code. Let me write `parse_review_effort` with a shared token matcher:
+
+```rust
+/// Map a single whitespace-delimited token to an effort level, if it names one.
+///
+/// Accepts both flags (`--quick`, `--thorough`) and natural positional words
+/// (`quick`, `normal`, `thorough` plus `fast`, `deep`, `full`, `light`).
+/// Unknown tokens return `None` — they are content (file path, range, `--pr`…),
+/// never an error.
+fn effort_for_token(token: &str) -> Option<ReviewEffort> {
+    match token {
+        "--quick" | "quick" | "fast" | "light" => Some(ReviewEffort::Quick),
+        "--normal" | "normal" => Some(ReviewEffort::Normal),
+        "--thorough" | "thorough" | "deep" | "full" => Some(ReviewEffort::Thorough),
+        _ => None,
+    }
+}
+```
+
+Wait — should I add `--normal` as a flag since the hint lists it? The task doesn't ask for `--normal` flag in part 1 (only positional). But the hint prominently lists `--normal`. If a user types `/review --normal` per the hint and gets "file not found: --normal" that's a confusing contradiction. Hmm. The hint is specified verbatim and includes `--normal`. Since positional `normal` works, and adding `--normal` flag costs one token in the match and is strictly consistent with the printed surface — I'll include it. It's a natural completion of the hint's promise and pure additive. Actually wait, the task part 1 says "Extend `parse_review_effort` to also match positional words ... `quick`, `normal`, `thorough` and natural synonyms". The test list doesn't include `--normal`. But it says "`parse_review_effort("--quick")` unchanged". Adding `--normal` support doesn't break any stated test. And the hint tells users the three flag forms exist. I'll add it for consistency — Minimal risk, closes the contradiction.
+
+Hmm, actually let me be careful about scope creep. The task's retreat version says "Ship only part 1 + tests; drop the hint if it touches interactive flow". Adding `--normal` is small, consistent with the printed hint, and can't break anything. I'll do it and mention it in the commit.
+
+Now `parse_review_effort` — current behavior: flags matched anywhere in the string ("Flag can appear after the file path too"). For positional words, the task says "A word that equals a known label is consumed as the effort; the remaining string continues to be the review target."
+
+Question: should positional words match anywhere, or only as a prefix (first word)? Test: `parse_review_effort("src/lib.rs")` == `(Normal, "src/lib.rs")` — "src" isn't an effort word so fine. `parse_review_effort("deep src/lib.rs")` — deep first. What about `parse_review_effort("src/lib.rs quick")`? Under anywhere-matching, "quick" eaten → (Quick, "src/lib.rs"). That seems fine and consistent with flag-anywhere behavior. The existing test `test_parse_review_effort_flag_after_file` confirms flags work anywhere, so positional words matching anywhere is consistent.
+
+But danger: a file literally named "quick" or the word appearing in a commit message range? E.g. `/review "merge quick fix"` — not realistic; review targets are paths/ranges/--pr. I'll match anywhere for consistency with flags.
+
+Now write the new parse:
+
+```rust
+pub fn parse_review_effort(input: &str) -> (ReviewEffort, String) {
+    let mut effort = ReviewEffort::Normal;
+    let mut remaining_parts: Vec<&str> = Vec::new();
+
+    for part in input.split_whitespace() {
+        match effort_for_token(part) {
+            Some(e) => effort = e,
+            None => remaining_parts.push(part),
+        }
+    }
+
+    (effort, remaining_parts.join(" "))
+}
+```
+
+Wait — but there's a subtlety with explicit normal. If user types "normal src/lib.rs", effort_for_token("normal") = Some(Normal), effort = Normal, no remaining part for it. Returns (Normal, "src/lib.rs"). Same as no-effort input "src/lib.rs". Fine for the parser.
+
+For `has_explicit_effort`:
+
+```rust
+/// Whether the input names an effort level at all (flag or positional word).
+/// Used to decide when to teach the surface — a plain `/review` or
+/// `/review src/lib.rs` (no effort given) should offer the switch, while
+/// `/review quick src/lib.rs` should stay quiet.
+pub fn has_explicit_effort(input: &str) -> bool {
+    input.split_whitespace().any(|part| effort_for_token(part).is_some())
+}
+```
+
+And the hint line:
+
+```rust
+/// Dim-formatted hint teaching the effort surface, shown when the user gave
+/// no effort at all. Kept pure (returns the line) so it is unit-testable.
+pub fn review_effort_hint() -> String {
+    format!("{DIM}  review effort: --quick | --normal | --thorough (default: normal){RESET}")
+}
+```
+
+Hmm — wait, does `DIM` and `RESET` exist as constants in scope? commands_review.rs has `use crate::format::*;` — yes, DIM/RESET come from format::mod. Good.
+
+Then in handle_review (commands_git_review.rs):
+
+```rust
+let arg = input.strip_prefix("/review").unwrap_or("").trim();
+let (effort, remaining) = parse_review_effort(arg);
+
+if !has_explicit_effort(arg) {
+    eprintln!("{}", review_effort_hint());
+}
+```
+
+Hmm — but that would print the hint on EVERY review with no explicit effort including plain `/review` and `/review src/lib.rs`. Is that the intent? "When the input is empty or no effort was resolved" — yes. "so the behavior matches the hint only when the user didn't already pick an effort" — yes, hint only when no effort picked. OK.
+
+But wait — should it print even when build_review_content returns None (nothing to review)? Looking at handle_review: if build_review_content returns None, it returns None without doing anything. Printing the hint before that check would print on invalid/no-content reviews too. Better to print the hint only in the Some branch (when we're actually going to review) — that's where the "effort: X" dim line currently prints. So put it inside the Some branch alongside the existing effort print:
+
+```rust
+match build_review_content(&remaining) {
+    Some((label, content)) => {
+        if !has_explicit_effort(arg) {
+            eprintln!("{}", review_effort_hint());
+        }
+        if effort != ReviewEffort::Normal {
+            eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+        }
+        let prompt = build_review_prompt(&label, &content, effort);
+        ...
+    }
+}
+```
+
+Hmm wait, but the current code prints `effort: quick` when effort != Normal. With the new hint, if a user types `quick` (positional), effort = Quick, so "effort: quick" prints. And has_explicit_effort is true, so no hint. Good.
+
+Order: existing prints "effort: quick" first. If I print hint first then effort... For no-effort case only the hint prints. Put hint first? Or effort first? Doesn't matter much. I'll keep the existing effort print first, then the hint after — actually no. Let me think: no-effort case → only hint. Effort case → only "effort: X". They're mutually exclusive. I'll put the hint check first for readability... Actually the existing code already has the effort print; I'll add the hint as a separate branch. Let me structure:
+
+```rust
+if effort != ReviewEffort::Normal {
+    eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+} else if !has_explicit_effort(arg) {
+    // No effort given at all — teach the surface once.
+    eprintln!("{}", review_effort_hint());
+}
+```
+
+Hmm — subtle: explicit `normal` gives effort == Normal and has_explicit_effort == true → neither prints. Plain file review → effort Normal, has_explicit false → hint prints. That's exactly the spec.
+
+But careful: has_explicit_effort(arg) — arg is the stripped input after `strip_prefix("/review")`. Good.
+
+Wait — actually, is `arc review` CLI subcommand also routed through run_non_interactive_review which uses parse_review_effort directly (line 153)? Should it print the hint too? Task part 2 scopes to handle_review only. The CLI version outputs review text to stdout; adding hint to stderr would be fine but not requested. Keep scoped.
+
+Now — imports: commands_git_review.rs needs `has_explicit_effort` and `review_effort_hint` in the `pub use crate::commands_review::{...}` list.
+
+Tests (in commands_review.rs mod tests):
+
+```rust
+#[test]
+fn test_parse_review_effort_positional_quick() {
+    let (effort, remaining) = parse_review_effort("quick");
+    assert_eq!(effort, ReviewEffort::Quick);
+    assert_eq!(remaining, "");
+}
+
+#[test]
+fn test_parse_review_effort_positional_flags_unchanged() {
+    let (effort, remaining) = parse_review_effort("--quick");
+    assert_eq!(effort, ReviewEffort::Quick);
+    assert_eq!(remaining, "");
+}
+
+#[test]
+fn test_parse_review_effort_synonyms() {
+    let (effort, remaining) = parse_review_effort("deep src/lib.rs");
+    assert_eq!(effort, ReviewEffort::Thorough);
+    assert_eq!(remaining, "src/lib.rs");
+    assert_eq!(parse_review_effort("fast"), (ReviewEffort::Quick, String::new()));
+    assert_eq!(parse_review_effort("full"), (ReviewEffort::Thorough, String::new()));
+    assert_eq!(parse_review_effort("light"), (ReviewEffort::Quick, String::new()));
+}
+
+#[test]
+fn test_parse_review_effort_path_not_eaten() {
+    let (effort, remaining) = parse_review_effort("src/lib.rs");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "src/lib.rs");
+}
+
+#[test]
+fn test_parse_review_effort_unknown_word_is_content() {
+    let (effort, remaining) = parse_review_effort("balanced");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "balanced");
+}
+
+#[test]
+fn test_parse_review_effort_explicit_normal() {
+    let (effort, remaining) = parse_review_effort("normal src/main.rs");
+    assert_eq!(effort, ReviewEffort::Normal);
+    assert_eq!(remaining, "src/main.rs");
+}
+
+#[test]
+fn test_has_explicit_effort() {
+    assert!(has_explicit_effort("quick"));
+    assert!(has_explicit_effort("--thorough src/lib.rs"));
+    assert!(has_explicit_effort("deep"));
+    assert!(!has_explicit_effort(""));
+    assert!(!has_explicit_effort("src/lib.rs"));
+    assert!(!has_explicit_effort("balanced"));
+}
+
+#[test]
+fn test_review_effort_hint_line() {
+    let hint = review_effort_hint();
+    assert!(hint.contains("--quick"));
+    assert!(hint.contains("--normal"));
+    assert!(hint.contains("--thorough"));
+    assert!(hint.contains("default: normal"));
+}
+```
+
+Also `parse_review_effort("normal")` — should return `(Normal, "")`. And what about `parse_review_effort("--normal")`? With my effort_for_token handling `--normal`, returns `(Normal, "")`. Not in the task tests but natural.
+
+Wait, one more consideration on `effort_for_token` visibility — the task says "(case-sensitive prefix against the three labels)". I'm choosing exact equality. Let me also double check the "balanced" test: "unknown word is content, and `"balanced"` is consumed as the review target" — with my impl, "balanced" → not an effort → pushed to remaining → (Normal, "balanced"). ✓.
+
+Now also update help_data.rs. Current:
+
+```
+"/review [--quick|--thorough] [target] — AI code review\n\n\
+ Usage:\n\
+ \x20 /review                   Review staged/uncommitted changes\n\
+ \x20 /review <path>            Review a specific file\n\
+ \x20 /review HEAD~3..HEAD      Review a commit range\n\
+ \x20 /review --pr 42           Review a GitHub PR\n\
+ \x20 /review --quick           Quick review: bugs & security only\n\
+ \x20 /review --thorough        Deep review: all dimensions\n\n\
+ Effort levels:\n\
+ \x20 --quick     Focus on bugs and security only. Skip style nits. Terse output.\n\
+ \x20 (default)   Bugs, security, style, performance, and suggestions.\n\
+ \x20 --thorough  Exhaustive review: also checks error handling, edge cases,\n\
+ \x20             API contracts, test coverage, docs, and concurrency.\n\n\
+```
+
+Update: header line → "/review [--quick|--thorough|quick|thorough] [target]"? Better: "/review [effort] [target]" hmm. The task: "add `quick|normal|thorough` to the surface list". Let me update:
+
+- Header: "/review [--quick|--thorough] [target] — AI code review" → "/review [quick|normal|thorough] [target] — AI code review"? Or mention both. I'll make it "/review [quick|normal|thorough|--quick|--thorough] [target]" — too long. Maybe: "/review [effort] [target] — AI code review" and document in Effort levels that positional words work.
+
+Add usage lines:
+```
+ \x20 /review quick             Quick review: bugs & security only\n\
+ \x20 /review thorough          Deep review: all dimensions\n\
+```
+
+Effort levels section:
+```
+ Effort levels (flag or positional word):\n\
+ \x20 --quick / quick / fast / light   Focus on bugs and security only...\n\
+ \x20 (default) normal                 Bugs, security, style, performance, and suggestions.\n\
+ \x20 --thorough / thorough / deep / full  Exhaustive review...\n\
+```
+
+Let me write it carefully to fit the string-literal continuation style (each line ends with \n\ and leading spaces preserved).
+
+Also docs/src/usage/commands.md — the /review section table (lines 518-521) doesn't list effort flags, so no change strictly needed. The task says "if docs/src/usage/commands.md or help_data.rs documents /review's effort, add quick|normal|thorough to the surface list". commands.md doesn't document effort — skip it. help_data.rs does — update it.
+
+Let me now make the edits. First, commands_review.rs — replace the parse fn and add helpers.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The parser lives in `src/commands_review.rs`, used by `handle_review and run_non_interactive_review` in `commands_git_review.rs`. Let me make the changes — first the parser + helpers in `commands_review.rs`:
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs (18 → 54 lines)
+  - /// Parse effort flags from review input.
+  + /// Map a single whitespace-delimited token to an effort level, if it names one.
+    ///
+  - /// Strips `--quick` or `--thorough` from the input and returns the
+  + /// Accepts both flags (`--quick`, `--normal`, `--thorough`) and natural
+  + /// positional words (`quick`, `normal`, `thorough` plus the synonyms
+  + /// `fast`/`light` → Quick and `deep`/`full` → Thorough). Matching is exact
+  + /// and case-sensitive, so a path like `quickstart.md` or `normal.c` is never
+  + /// eaten as an effort — unknown tokens return `None` and stay content.
+  + fn effort_for_token(token: &str) -> Option<ReviewEffort> {
+  +     match token {
+  +         "--quick" | "quick" | "fast" | "light" => Some(ReviewEffort::Quick),
+  +         "--normal" | "normal" => Some(ReviewEffort::Normal),
+  +         "--thorough" | "thorough" | "deep" | "full" => Some(ReviewEffort::Thorough),
+  +         _ => None,
+  +     }
+  + }
+  + 
+  + /// Parse effort flags/words from review input.
+  + ///
+  ... (40 more lines)
+ ✓ (1ms)
+  - /// Parse effort flags from review input.
+  + /// Map a single whitespace-delimited token to an effort level, if it names one.
+    ///
+  - /// Strips `--quick` or `--thorough` from the input and returns the
+  + /// Accepts both flags (`--quick`, `--normal`, `--thorough`) and natural
+  + /// positional words (`quick`, `normal`, `thorough` plus the synonyms
+  + /// `fast`/`light` → Quick and `deep`/`full` → Thorough). Matching is exact
+  + /// and case-sensitive, so a path like `quickstart.md` or `normal.c` is never
+  ... (13 more lines)
+
+Now wire the hint into handle_review (the interactive REPL path):
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_git_review.rs (16 → 21 lines)
+            Some((label, content)) => {
+                if effort != ReviewEffort::Normal {
+                    eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+  +             } else if remaining.is_empty() && !has_explicit_effort(arg) {
+  +                 // First-impression contract: teach the effort switch when the
+  +                 // user didn't pick one. `remaining.is_empty()` keeps it off when
+  +                 // a target was given (no-arg is the discoverability moment).
+  +                 eprintln!("{}", review_effort_hint());
+                }
+                let prompt = build_review_prompt(&label, &content, effort);
+                run_prompt(agent, &prompt, session_total, model).await;
+ ✓ (1ms)
+            Some((label, content)) => {
+                if effort != ReviewEffort::Normal {
+                    eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+  +             } else if remaining.is_empty() && !has_explicit_effort(arg) {
+  +                 // First-impression contract: teach the effort switch when the
+  +                 // user didn't pick one. `remaining.is_empty()` keeps it off when
+  +                 // a target was given (no-arg is the discoverability moment).
+  +                 eprintln!("{}", review_effort_hint());
+  ... (3 more lines)
+
+Now add the tests to commands_review.rs (the test module with the existing `parse_review_effort` tests). Let me add after `test_parse_review_effort_with_pr_flag`:
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_review.rs (6 → 83 lines)
+            let (effort, remaining) = parse_review_effort("--quick --pr 42");
+            assert_eq!(effort, ReviewEffort::Quick);
+            assert_eq!(remaining, "--pr 42");
+  +     }
+  + 
+  +     #[test]
+  +     fn test_parse_review_effort_positional_quick() {
+  +         let (effort, remaining) = parse_review_effort("quick");
+  +         assert_eq!(effort, ReviewEffort::Quick);
+  +         assert_eq!(remaining, "");
+  +     }
+  + 
+  +     #[test]
+  +     fn test_parse_review_effort_positional_normal() {
+  +         let (effort, remaining) = parse_review_effort("normal");
+  +         assert_eq!(effort, ReviewEffort::Normal);
+  +         assert_eq!(remaining, "");
+  +     }
+  + 
+  +     #[test]
+  ... (61 more lines)
+ ✓ (1ms)
+            let (effort, remaining) = parse_review_effort("--quick --pr 42");
+            assert_eq!(effort, ReviewEffort::Quick);
+            assert_eq!(remaining, "--pr 42");
+  +     }
+  + 
+  +     #[test]
+  +     fn test_parse_review_effort_positional_quick() {
+  +         let (effort, remaining) = parse_review_effort("quick");
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait, one test: `parse_review_effort("balanced")` — the task says `(Normal, "balanced")` — "balanced" is consumed as the review target. Good, that matches.
+
+Also `parse_review_effort("src/main.rs deep")` — "deep" is a synonym, so the last one wins and src/main.rs stays content — but wait, deep comes AFTER the file. "last one wins" behavior — actually the flag semantics already were "last one wins" (each match overwrites effort). With "src/main.rs deep", effort=Thorough, remaining="src/main.rs". That's reasonable.
+
+But wait — should a positional word AFTER the file be an effort? E.g. `/review src/main.rs deep`? That seems odd but harmless. The task only specifies prefix matching as positional. Fine.
+
+Now update the docs: help_data.rs `review` entry and docs/src/usage/commands.md. Let me update help_data.rs to mention positional words in the effort levels, and docs/src/usage/commands.md to add the surface list.
+────────────────────────────────────────────────────────────────────────────────
+Now update the docs — help_data.rs and `docs/src/usage/commands.md`:
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/help_data.rs (24 → 27 lines)
+                 \x20 /review HEAD~3..HEAD      Review a commit range\n\
+                 \x20 /review --pr 42           Review a GitHub PR\n\
+                 \x20 /review --quick           Quick review: bugs & security only\n\
+  -              \x20 /review --thorough        Deep review: all dimensions\n\n\
+  +              \x20 /review --thorough        Deep review: all dimensions\n\
+  +              \x20 /review quick src/main.rs Quick review of a file (positional word)\n\
+  +              \x20 /review deep src/main.rs  Deep review of a file (positional word)\n\n\
+                 Effort levels:\n\
+  -              \x20 --quick     Focus on bugs and security only. Skip style nits. Terse output.\n\
+  -              \x20 (default)   Bugs, security, style, performance, and suggestions.\n\
+  -              \x20 --thorough  Exhaustive review: also checks error handling, edge cases,\n\
+  -              \x20             API contracts, test coverage, docs, and concurrency.\n\n\
+  +              \x20 quick|fast|light  Focus on bugs and security only. Skip style nits. Terse output.\n\
+  +              \x20 normal (default)  Bugs, security, style, performance, and suggestions.\n\
+  +              \x20 thorough|deep|full  Exhaustive review: also checks error handling, edge cases,\n\
+  +              \x20                    API contracts, test coverage, docs, and concurrency.\n\n\
+                 Sends the diff or file to the AI for a code review.\n\n\
+                 Also works as a CLI subcommand (non-interactive):\n\
+                 \x20 arc review               Review from the command line\n\
+  ···
+  ... (6 more lines)
+ ✓ (2ms)
+                 \x20 /review HEAD~3..HEAD      Review a commit range\n\
+                 \x20 /review --pr 42           Review a GitHub PR\n\
+                 \x20 /review --quick           Quick review: bugs & security only\n\
+  -              \x20 /review --thorough        Deep review: all dimensions\n\n\
+  +              \x20 /review --thorough        Deep review: all dimensions\n\
+  +              \x20 /review quick src/main.rs Quick review of a file (positional word)\n\
+  +              \x20 /review deep src/main.rs  Deep review of a file (positional word)\n\n\
+                 Effort levels:\n\
+  ... (13 more lines)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/usage/commands.md (5 → 20 lines)
+    /review              # review staged changes (or unstaged if nothing staged)
+    /review src/main.rs  # review a specific file
+    /review Cargo.toml   # review any file
+  + ```
+  + 
+  + Effort is a switch, and it can be given as a flag or a natural word:
+  + 
+  + ```
+  + /review --quick           # bugs & security only
+  + /review quick src/main.rs # same, positional word
+  + /review deep src/main.rs  # exhaustive review
+  + /review thorough HEAD~3..HEAD
+    ```
+  + 
+  + Accepted effort words: `quick`/`fast`/`light` (Quick), `normal` (default),
+  + `thorough`/`deep`/`full` (Thorough). A path is never eaten as an effort —
+  + unknown words are treated as review targets, and a bare `/review` prints a
+  + dim hint (`review effort: --quick | --normal | --thorough (default: normal)`)
+  + when no effort is given.
+ ✓ (1ms)
+    /review              # review staged changes (or unstaged if nothing staged)
+    /review src/main.rs  # review a specific file
+    /review Cargo.toml   # review any file
+  + ```
+  + 
+  + Effort is a switch, and it can be given as a flag or a natural word:
+  + 
+  + ```
+  ... (11 more lines)
+
+Now run the checks:
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (12.7s)
+
+Need to add the imports in `commands_git_review.rs`:
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_git_review.rs (4 → 4 lines)
+    pub use crate::commands_review::{
+  -     build_review_prompt, build_review_prompt_structured, extract_review_json,
+  -     parse_review_comments, parse_review_effort, ReviewComment, ReviewEffort,
+  +     build_review_prompt, build_review_prompt_structured, extract_review_json, has_explicit_effort,
+  +     parse_review_comments, parse_review_effort, review_effort_hint, ReviewComment, ReviewEffort,
+    };
+ ✓ (1ms)
+    pub use crate::commands_review::{
+  -     build_review_prompt, build_review_prompt_structured, extract_review_json,
+  -     parse_review_comments, parse_review_effort, ReviewComment, ReviewEffort,
+  +     build_review_prompt, build_review_prompt_structured, extract_review_json, has_explicit_effort,
+  +     parse_review_comments, parse_review_effort, review_effort_hint, ReviewComment, ReviewEffort,
+    };
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (14.3s)
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 && carg… ✓ (1m 30s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+All checks green. Let me verify the tests I added actually ran (the commands_review tests are in the binary's test module — 88 passed). Let me check the specific tests ran:
+────────────────────────────────────────────────────────────────────────────────
+All green. Let me confirm my new tests specifically ran:
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test parse_review_effort 2>&… ✓ (207ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test review 2>&1 | grep -E "… ✓ (203ms)
+
+
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test --bin arc review 2>&1 |… ✓ (201ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | grep -E "^test .… ✓ (49.4s)
+
+
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test -- --list 2>/dev/null |… ✓ (193ms)
+
+
+  ╭─ Turn 25 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test -- --list 2>/dev/null |… ✓ (170ms)
+
+

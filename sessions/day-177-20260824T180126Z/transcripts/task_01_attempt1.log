@@ -1,0 +1,1340 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the code. The task is about recovering the risk sense organ's lost early signal by:
+
+1. Persisting per-file hits into the risk snapshot when each validation is generated — add a `flagged` field to the snapshot JSON
+2. New helper `flagged_files_for(day: u64) -> Vec<String>` 
+3. Pair counting using the persistent flagged set
+4. Keep existing fields untouched
+
+Let me look at the relevant files first:
+- `src/commands_risk_snapshots.rs` (1519 lines)
+- `src/commands_risk.rs` (4670 lines)
+
+Key functions mentioned:
+- `build_risk_snapshot_json` (commands_risk_snapshots.rs)
+- `calibration_verdict` (commands_risk_snapshots.rs:512)
+- `compute_validation` (commands_risk.rs:1981)
+- `is_scored_file`
+- `parse_validation_events`
+- `validate_risk_meter`
+
+Let me start reading these files.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:1..121 ✓ (2ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 1.3s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read more of the file to understand the current structure, especially `build_risk_snapshot_json`, `parse_all_snapshots`, `calibration_verdict`, and the validation paths.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:120..320  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:380..530 ✓ (3ms)
+ ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 895ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me continue reading the calibration_verdict and the risk meter computation, plus look at `compute_validation` in commands_risk.rs.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:529..769  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1950,2070p' src/commands_r… ✓ (4ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 916ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the current state. I need to look at more of the code:
+
+1. Where `pairs` is computed in `compute_risk_meter` — currently `validations.iter().filter(|e| e.scored_broke.is_some_and(|n| n > 0)).count()`.
+
+2. The `compute_validation` and `is_scored_file` in commands_risk.rs.
+
+3. The task wants:
+   - Part 1: Add `flagged` field to the snapshot (`build_risk_snapshot_json`) — array of file paths (all scored files? or flagged files?). Wait, let me re-read.
+
+   "Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever."
+
+   Hmm, "flagged" — the files that were predicted high-risk. Wait but the top_10 already covers the predicted files. Let me think about what "flagged" means here. The `predicted` (top_10) is the top 10 by score. But "flagged" might mean a broader set — files with score above some threshold? Let me look at how `compute_file_risk_scores` works, and what `total_scored` means.
+
+Actually wait — re-reading the task:
+
+"**Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+And: "Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances."
+
+So the key insight: `hit_count` counts only files in the top-10 predictions. A source file that broke but was ranked, say, 20th, is a "surprise" — it was scored but not in the top-10. But per the task, that's a valid measurement: either it was flagged (predicted high-risk) OR it was a surprise (in scored universe). Both count as a "matched pair" — the predictor observed a scored file and the outcome is known.
+
+Wait, but actually the "flagged" field in the snapshot — what files does it include? The top_10? All scored files? Let me re-read:
+
+"Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`...). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever."
+
+"2. **New helper** ... `fn flagged_files_for(day: u64) -> Vec<String>` — read the risk snapshot JSONL, filter entries with `day <= given day`, union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)."
+
+Hmm, "filter entries with day <= given day" — so snapshots record flagged files per day. The `flagged` field is per snapshot. When a validation event happens on day N, we look at the flagged files from the snapshot at day <= N.
+
+So what is "flagged"? In the context of the validation: the scorer flags files as high-risk. If we consider top_10 the "predicted" set, and everything else in the scored universe "unflagged"... but then the pair would need any scored file. Hmm.
+
+Wait, let me re-read the goal: "the verdict's pair-count and accuracy must be computed from the same filtered, per-file signal used at write time — recovering the pairs locked in old noisy events instead of discarding them."
+
+And test: "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)."
+
+So the test says: a source file changed, in the scored universe, **flagged in an old snapshot of that day** — so `flagged` in the snapshot is what matters. The flagged set should include the files that were scored (all files in the scored universe? or some subset?).
+
+Hmm, wait. Let me look at the "Day-177 lift work" and `total_scored` + `scored_broke`. Let me search commands_risk.rs for these to understand the semantics.
+
+Actually, let me think about this differently. The task says "the top-N is usually all `src/` anyway" — meaning the predictions (top_10) are all src/ files. The scored universe (`total_scored`) is all src/ files ranked. So "flagged" likely = "in the scored universe" — i.e., files the scorer ranked at all. Because "the scorer flagged" a file = the scorer included it in its ranked population (all src/ files).
+
+Hmm wait, but then "flagged" would be identical to "scored"... and the pair criterion "(a) the file was flagged, (b) a validation event whose changed-files contained that file (hit or surprise)" — a surprise is a changed file in the scored universe not in top-10. So the pair count would become: any validation event where a src/ file changed (hit or surprise).
+
+Actually wait — let me look at the surprise lists of day-171/175 events being "noise-laden (CLAUDE.md, DAY_COUNT, .skill_evolve_counter, commit-subject strings)". Those are non-src/ files. The reason they're in the surprise lists is that `auto_validate_after_failure` (the watch-failure path) adds ALL changed files, not just src/ ones, to surprises? Let me check... Actually from the code above, `auto_validate_after_failure_to` filters to src/ files only, then hits if predicted, else surprises. So surprises there are src-only.
+
+But the `compute_validation` in commands_risk.rs filters surprises through `is_scored_file` — so both paths filter on the surface. The task says: "`compute_validation` (src/commands_risk.rs:1981) already filters surprises through `is_scored_file` (src/ + `.rs`), but `parse_validation_events` and `compute_validation` **do not filter hits**: a hit only counts if the changed file is in the top-N predictions, and the top-N is usually all `src/` anyway."
+
+Hmm OK. So the picture: validations have hits (changed files in top-10) and surprises (changed src/ files not in top-10). Day-171/175 events have noise (CLAUDE.md etc. — maybe from an older format or a different path that didn't filter). 
+
+Wait, actually the day-171/175 surprise lists contain non-src files. That suggests some events were written by a path that doesn't filter src-only. Let me look at the actual risk_validations.jsonl and risk_snapshots.jsonl files.
+
+Let me also check `is_scored_file` and how `total_scored`/`scored_broke` are computed and persisted, to understand "flagged".
+
+Let me read the actual data files.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat .arc/risk_validations.jsonl 2>…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "total_scored\|scored_brok… ✓ (5ms)
+ ✓ (8ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 866ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting. The task says the meter shows `0/5 paired predictions`, but the actual meter shows `pairs: 3`. Let me re-read the task description. It says:
+
+> `.arc/risk_meter.json` shows the meter at `0/5 paired predictions` with `recording_match` tags — the recorded predictions never matched the changed files.
+
+But the current state shows pairs: 3 already. Hmm, but the "verdict" is `calibration: cold start — 3/5 paired predictions, accumulating`. So the meter has already moved off 0 (there are 3 events with scored_broke > 0). Wait but the task says "The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events".
+
+Actually wait — the task's premise from earlier in the day may be stale; the current meter shows 3/5. But the task is about recovering *real matched pairs* — pairs where a changed file was flagged in the snapshot (in the scored universe), regardless of whether it was in the top-10 predicted list.
+
+Let me look at the current definition of pairs. In `compute_risk_meter`:
+```rust
+let pairs = validations
+    .iter()
+    .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+    .count() as u64;
+```
+
+So pairs = count of validation events with scored_broke > 0. Currently that's 3 (days 172, 174, 175). The task says the meter was at 0/5 with `recording_match` tags — maybe that state description was from earlier in the day before today's session accumulated more. Actually the task says "Verified current state (Day 177)" mentions `.arc/risk_validations.jsonl` has 4 events and meter at 0/5 paired predictions... but actually it shows 3/5. Maybe a snapshot happened today. Either way, the real goal: the pair counter should count *real matched pairs* — files that were flagged in a snapshot AND that appear in a validation event's changed files (hits or surprises). Currently pairs counts "events with scored_broke > 0" which is a proxy. The task wants:
+
+3. **Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). 
+
+Wait — "(b) a validation event whose changed-files contained that file (hit or surprise)". Hmm, a *surprise* is a changed file NOT in the predictions. If a file was flagged (in the top-10 of a snapshot, or in `flagged` field per-file) and it shows up as a *surprise* in a validation event... that's a bit odd. Actually the idea: the validation event records changed files. If a source file changed and it was flagged by the snapshot (in the scored universe / top-N), that's a matched pair regardless of whether it was hit or surprise. Actually per the task:
+
+> (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise).
+
+So a pair = a (file, validation event) where the file is in the union of flagged files (from snapshots of day <= event day) and the file is in the event's changed files (hits + surprises). Since day-172 event already had hits in src/commands_risk.rs and src/commands_risk_snapshots.rs, and those files are flagged in snapshot day-172, those ARE matched pairs already... wait no.
+
+Hmm wait. Let me re-read. The task says:
+
+> Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances. Every `fix/revert` of a non-top-10 source file is a missed measurement.
+
+So the pair counter should count predicted-outcome pairs: a file flagged (predicted high-risk) that shows up as changed in a validation event. Currently pairs = events with scored_broke > 0. The task wants pairs = matched (file, event) pairs where file ∈ flagged set (from snapshots) and file ∈ event's changed files.
+
+Hmm wait, but the current `pairs: 3` counts events with scored_broke>0. The task says the verdict pair count should be computed from "the same filtered, per-file signal used at write time". Let me think about what the current data would give.
+
+Events:
+1. day 171: hits [src/commands_risk.rs], surprises [non-src junk], scored_broke absent
+2. day 172: hits [src/commands_risk.rs, src/commands_risk_snapshots.rs], surprises [src/commands_risk_accuracy.rs], scored_broke 3
+3. day 174: hits [src/commands_risk.rs, src/commands_risk_snapshots.rs], surprises [src/cli.rs], scored_broke 3
+4. day 175: hits [], surprises [src/update.rs], scored_broke 1
+
+Snapshot day 172 top_10 — let me check what it flagged. The snapshot at day 172 presumably flagged src/commands_risk.rs and src/commands_risk_snapshots.rs. What about src/commands_risk_accuracy.rs — was it in the top-10 at day 172? From the day-176 snapshot tail, src/commands_risk_accuracy.rs IS in top_10 (score 0.35). Let me check snapshots around day 172.
+
+The point of the task: the snapshot itself carries predictions per-file (top_10 with scores). We want to persist a `flagged` field per snapshot — actually wait, re-read:
+
+1. **Persist per-file hits into the risk snapshot when each validation is generated.** Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`...). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever.
+
+Hmm, "Add a `flagged` field (array of file paths) to the snapshot". But `build_risk_snapshot_json` only has `risks` (the sorted risk scores). The snapshot is written at `/commit` time, not at validation-generation time. Wait, but the task says "when each validation is generated" — hmm, but `build_risk_snapshot_json` is the snapshot builder. OK the intent: the snapshot should persist which files were flagged — not just top-10 but... Actually wait, top_10 already IS the flagged set. Let me re-read.
+
+> Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever.
+
+Hmm, this text is a bit confusing. "includes `predicted`/`top_10`" — the snapshot builder has top_10. So adding a `flagged` field... maybe the flagged field is a *superset of ranked files with scores*, not just the top 10? Actually "the file itself carries what it predicted, forever" — the point is the snapshot records per-file what was predicted, so later when a validation event happens, we can look up whether a changed file was flagged by the snapshot from that era.
+
+Actually, since `top_10` already has per-file paths+scores, maybe the "flagged" field is the same thing but... hmm. Let me look more carefully at the actual current `build_risk_snapshot_json` and `ParsedSnapshot`. 
+
+Current snapshot line:
+```json
+{"day":177,"git_hash":"c075980","top_10":[{"path":"src/commands_risk.rs","score":0.73,...},...],"ts":"..."}
+```
+
+top_10 already includes per-file path + score. So what does `flagged` add? Perhaps it's meant to record — at validation time — the full set of files that the *event* flagged, per the `compute_validation` logic. Wait, re-read point 1: "Persist per-file hits into the risk snapshot when each validation is generated." — "per-file hits into the risk snapshot". Hmm, that's odd wording. "Add a `flagged` field (array of file paths) to the snapshot".
+
+OK here's my interpretation: the snapshot (`.arc/risk_snapshots.jsonl`) already records `top_10` per file with score and rank. The task wants to enrich the snapshot with a `flagged` field that records the per-file flagged status — including files that were *scored* but not in top-10? No wait...
+
+Actually, maybe I should look at the git history to understand the "Day-177 lift work". Let me look at `compute_validation` and how `total_scored`/`scored_broke` are persisted. The lift fields `total_scored` + `scored_broke` are per-validation-event, not per-snapshot. The task description says "includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`" — that phrasing suggests these are fields in the snapshot... but they aren't; they're in validation events. So the phrasing is loose — it's describing what the sense organ accumulates.
+
+Let me look at what makes a "pair" currently and figure out the smallest correct implementation:
+
+The task's core ask (parts 1+2+3):
+1. Snapshot gets a `flagged` field — array of file paths (each with rank/score). This makes the snapshot self-describing: "these files were predicted high-risk at this commit-state."
+2. Helper `flagged_files_for(day) -> Vec<String>` — union of flagged paths from snapshots with day <= given day, ordered by score desc, later snapshots tie-break.
+3. Pair counting in the verdict path counts (file, event) pairs where file ∈ flagged_files_for(event.day) and file ∈ event's changed files (hits ∪ surprises).
+
+Wait, but hold on — a "surprise" is by definition a file NOT in the predicted top-10. If a file is in the flagged set (top-10 of a snapshot of day <= event day) AND appears as a surprise in the event, that can happen when: the snapshot used for the event's prediction was the *last* snapshot (which may be from a later day or earlier day...). Actually the replay path validates *the prior snapshot* against commits since it. So event for day 172 validates snapshot from day ~171 (or 100?). The changed files are compared against the prior snapshot's predicted set. A file could be a surprise in the event (not in the prior snapshot's top-10) but still be flagged in *some* snapshot of day <= 172 (e.g., a snapshot recorded that same day after the predictions). E.g. day-172 event: surprises = [src/commands_risk_accuracy.rs] — was src/commands_risk_accuracy.rs flagged in any snapshot <= day 172? Let me check the snapshots file.
+
+Actually the key insight of the task: "Recover the pairs locked in old noisy events" — the day-172/174 events contain files that broke (changed) which were flagged in snapshots, but the current pair-count via `scored_broke > 0` counts the *event* not the *file*. The task wants per-file matched pairs so the counter moves off 0 — hmm but it's already at 3.
+
+Wait, wait. Let me re-read the task's "Verified current state (Day 177)":
+
+> `.arc/risk_validations.jsonl` has 4 events; `.arc/risk_meter.json` shows the meter at `0/5 paired predictions` with `recording_match` tags — the recorded predictions never matched the changed files.
+
+But the actual meter shows 3/5. Hmm, maybe the task description was written from an earlier state and today's session already advanced it to 3. The task is still valid: it wants the pair counting to be *per-file from persistent flagged set*, which would give a different (better) count. Let me compute what the new counting would give with current data.
+
+Snapshots: I need to check which dates flag which files. Let me look at the snapshot JSONL around days 170-175 to see the top_10 at each day, and check if src/commands_risk_accuracy.rs / src/cli.rs / src/update.rs were flagged in snapshots of day <= respective event days.
+
+Let me also check the git history for "Day-177 lift work" to understand what changed. Actually the task says "since the Day-177 lift work" — and today IS day 177. The lift work added `total_scored`/`scored_broke`. That's already in the code.
+
+Let me now focus on implementation. Let me re-read point 3 carefully:
+
+> 3. **Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). Reuse the snapshot's `flagged` field directly where the snapshot is already loaded. The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events — without ever rewriting `.arc/risk_validations.jsonl` (append-only truth).
+
+So the pair count = number of (file, event) pairs where:
+- file ∈ flagged_files_for(event.day) [file was predicted high-risk in some snapshot of day <= event day]
+- file ∈ event.changed_files (hits ∪ surprises)
+
+Now, with current data:
+- Event day 172: changed = {src/commands_risk.rs, src/commands_risk_snapshots.rs, src/commands_risk_accuracy.rs}. flagged_files_for(172) = union of flagged from snapshots day <= 172. If src/commands_risk_accuracy.rs was in top_10 of a snapshot <= day 172, that's a matched pair. Same for the other two.
+- Event day 174: changed = {src/commands_risk.rs, src/commands_risk_snapshots.rs, src/cli.rs}. If src/cli.rs was flagged <= day 174, that's a pair.
+- Event day 175: changed = {src/update.rs}. If src/update.rs was flagged <= day 175, pair.
+
+The current `pairs` (events with scored_broke>0) = 3. The new count could be higher (counting files, not events). The task's goal "move the N/5 counter off 0" is stale relative to current state (already 3), but the spirit is correct: count real per-file matched pairs.
+
+But hold on — part 1 says the `flagged` field should be ADDED to the snapshot going forward. Note old snapshots don't have `flagged`. So `flagged_files_for` must parse `flagged` when present and fall back to `top_10` when absent (backward compat). Actually the task says "Reuse the snapshot's `flagged` field directly where the snapshot is already loaded" — and for old snapshots, top_10 IS the flagged set. So `flagged_files_for` = union over snapshots with day <= given day of (flagged if present else top_10 paths), with scores.
+
+Wait, but is there a difference between `flagged` and `top_10`? Let me think... The snapshot top_10 is the top-10 predicted files. The scored universe is all ranked files. Maybe `flagged` is meant to be: all files that the scorer would flag — hmm, no. Actually re-reading:
+
+> Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever.
+
+Hmm — "Each entry: the file path + the rank/score it got at snapshot time." So flagged entries = {path, rank or score}. The top_10 already has {path, score, signals}. So `flagged` could literally equal top_10 re-emitted... that seems redundant. Unless `flagged` is meant to include MORE than top 10 — i.e., the full scored universe? But then "flagged" would be meaningless (everything is flagged).
+
+Hmm wait, maybe the intent: at snapshot time, the snapshot stores the top_10 (what's predicted). The `flagged` field would be the *per-file* version of what `compute_validation` uses — i.e., the flag set used for that day's hit/surprise classification. Since `auto_validate_after_failure` uses `last.predicted` (top_10), `flagged` = top_10 paths.
+
+OK you know what, I think the intent is simpler than I'm making it. The `top_10` array already carries per-file path+score. The task wants a *first-class* `flagged` field that survives parsing (ParsedSnapshot already parses predicted from top_10). So maybe:
+
+1. `build_risk_snapshot_json` adds `"flagged": [{"path":..., "score":...}, ...]` (same as top_10, maybe without signals? or full). Actually let me look again — maybe `flagged` should include *all ranked files with risk > threshold*, not just top-10? That would create the "scored universe flagged" — no.
+
+Hmm, actually, let me reconsider. There might be a subtle point: `compute_validation` compares against `predicted` = top_10. A changed file in the scored universe but NOT in top_10 becomes a surprise WITH a rank. The lift fields `scored_broke` = hits + scored surprises. So the "flagged population" = predicted_count = top_10 size. "Pair" should be: a (file, event) where the file was predicted (flagged) and the event confirms it broke.
+
+Given the current data, the day-172 event has surprises = [src/commands_risk_accuracy.rs] which was NOT in the day-171/172 snapshot's top-10 (it's a surprise!). So under strict semantics that's a *miss*, not a pair. But the task explicitly says "(hit **or** surprise)" — a changed file that was flagged counts as a pair even if it was recorded as a *surprise* in the event. Why? Because the event's surprise classification used the *prior snapshot* (last snapshot at event time), but a later snapshot of the same day might have flagged it. E.g., day-172 event validated the prior snapshot (from day 171?) against commits since; the surprise src/commands_risk_accuracy.rs might have been in the top-10 of a *later* day-172 snapshot. The pair logic uses `flagged_files_for(event.day)` — ALL snapshots of day <= 172, so if any snapshot of day 172 or earlier flagged it, it's a "matched pair recovered".
+
+OK so the design:
+- `flagged_files_for(day)`: parse all snapshots; for each with snapshot.day <= day, union of flagged paths (from `flagged` field if present, else `top_10` paths), ordered by highest score first, later snapshot ties break.
+- Pair counting: for each validation event, for each changed file (hits ∪ surprises), if file ∈ flagged_files_for(event.day) → count one pair.
+
+Now hold on — the "changed files" of an event: `parse_validation_events` currently only parses counts (hit_count, total_changed), NOT the actual file lists! To count (file, event) pairs, we need the per-file changed lists from events. So I'll need to parse `hits` and `surprises` arrays into ValidationEvent... but the task says:
+
+> Do not change `parse_validation_events`, `validate_risk_meter`, or any accuracy reader unless a correctness bug is found — prefer additive fields.
+
+Hmm. So I should NOT change parse_validation_events. Additive: add fields `hits: Vec<String>` and `surprises: Vec<String>` (or a combined `changed_files: Vec<String>`) to ValidationEvent, parsed from the JSONL. That's additive — existing consumers keep working.
+
+Wait but actually, for pair counting we need event.changed_files AND the event.day. Currently ValidationEvent has day. Good.
+
+Now the pair-count change: currently `compute_risk_meter` computes pairs = events with scored_broke > 0. The task says "Change the pair-count criteria in the verdict path". But changing `compute_risk_meter`'s pair semantics affects `write_risk_meter_to` and the meter stamp. That's fine — it's the intended behavior change. But it needs snapshot content too now (compute_risk_meter already receives snapshot_content! Great — signature unchanged).
+
+New pairs computation in compute_risk_meter:
+```rust
+let flagged = flagged_files_for_snapshots(&snapshots, event.day) // for each event
+let pairs = validations.iter().filter(|e| ...).count()
+```
+
+Wait more precisely: pairs = count of (file, event) pairs. Could a single event contribute multiple files? Yes, e.g., day-172 event with 3 changed src files all flagged → 3 pairs in one event? Hmm. Let me think about what "paired predictions" means for the ≥5 milestone. The milestone: "accumulate ≥5 matched prediction-outcome pairs so the calibration verdict can judge whether flagged high-risk files actually break more." A pair = one prediction (file flagged) matched with one outcome (that file changed). So counting per-file pairs makes sense: 3 files changed and flagged in one event = 3 pairs.
+
+But hold on — should pairs aggregate across events? "accumulate ≥5 matched prediction-outcome pairs" — yes, cumulative across all events. And the accuracy/lift stats use event aggregates. The verdict's pair count is the accumulative meter.
+
+Hmm, but wait — could this over-count? E.g., the same file flagged in 50 snapshots and changed in one event — that's 1 pair (file, event). The union semantics of flagged_files_for dedups files. So per (file, event) = one pair. Good.
+
+Now, potential problem: day-171 event has surprises including non-src junk (CLAUDE.md, DAY_COUNT, commit subjects). Under flagged_files_for, those files are never flagged (flagged = src/ top-10 files), so they never become pairs. Good — that's the "fixture with non-src churn proves those never become pairs" test.
+
+Let me now check: with real data, what would the new pair count be?
+
+I need to see which of {src/commands_risk.rs, src/commands_risk_snapshots.rs, src/commands_risk_accuracy.rs} (day 172 changed) were flagged in snapshots of day <= 172, and {src/cli.rs} for day 174, and {src/update.rs} for day 175.
+
+Let me grep the snapshot file for these paths before the relevant days. Let me get the data. Also, `flagged_files_for` should be keyed by snapshot.day, not by event day ordering... The union of snapshots day <= event.day.
+
+Let me check current snapshots for the relevant files.
+────────────────────────────────────────────────────────────────────────────────
+Let me look at the actual data state and the relevant code paths more closely.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (25 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2340,2430p' src/commands_r… ✓ (5ms)
+ ✓ (33ms)
+  2 tools completed in 951ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the full picture:
+
+1. `.arc/risk_validations.jsonl` has 4 events. Day 171, 172, 174, 175.
+2. The meter shows 3/5 pairs (using `scored_broke.is_some_and(|n| n > 0)` — days 172, 174, 175 have scored_broke, so 3 pairs).
+3. Wait, the task says "the meter at `0/5 paired predictions`" but actually it shows `pairs: 3`. Hmm, the meter currently shows 3/5. Let me re-read the task.
+
+The task says:
+"Verified current state (Day 177):
+- `.arc/risk_validations.jsonl` has 4 events; `.arc/risk_meter.json` shows the meter at `0/5 paired predictions` with `recording_match` tags — the recorded predictions never matched the changed files."
+
+But the actual meter shows 3/5 and there's no `recording_match` in the meter. The state has evolved a bit since the task description was written. The current meter is at `3/5 paired predictions, accumulating`.
+
+Hmm, so the "goal: move the `N/5 paired predictions, accumulating` counter off 0" — it's already at 3. But the spirit of the task remains: recover real signal from old noisy events. The current pair counting uses `scored_broke.is_some_and(|n| n > 0)` which counts events where scored_broke > 0 — but that counts day 175 (`src/update.rs` was a surprise, `src/update.rs` was NOT in the flagged top-10 union for that day). So one of the 3 pairs may be a "false" pair in the sense that the changed file wasn't flagged.
+
+Let me analyze each event against the persistent flagged set:
+
+Event day 171: changed = {src/commands_risk.rs, .arc/risk_snapshots.jsonl, ..., CLAUDE.md, DAY_COUNT, ...}. matched_flagged = [src/commands_risk.rs]. So 1 clean pair: src/commands_risk.rs was flagged (in the union of top_10 across snapshots ≤171) and it broke. But wait — was src/commands_risk.rs really in the scored universe? Yes, it's a src file, and it's in top_10 of many snapshots.
+
+But hold on — the "hit" in the event was src/commands_risk.rs which was predicted (in the snapshot that replay used). The surprises are non-src noise. However, the concern per the task: "when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances."
+
+Let me check: for day 172: hits = [src/commands_risk.rs, src/commands_risk_snapshots.rs], surprises = [src/commands_risk_accuracy.rs]. All 3 are in the union of flagged ≤ 172? Let me check: src/commands_risk_accuracy.rs — the flagged union for day 172 has 29 files. Let me verify whether commands_risk_accuracy.rs is in there.
+
+From the query output: "day 172: flagged union size=29"? Let me see... I only printed a subset. Let me re-run the analysis more carefully. Actually output shows:
+```
+event day 171: changed=[...] matched_flagged=['src/commands_risk.rs']
+event day 172: ... (truncated, 2 more similar lines)
+```
+The output was cut ("... (2 more similar lines)"). Let me rerun with full output.
+
+Now the important design decision per the task:
+
+1. **Persist per-file hits into the risk snapshot** — add a `flagged` field to `build_risk_snapshot_json` containing ALL scored files with their rank/score (not just top_10). Wait, re-read: "Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever."
+
+Hmm — "flagged" = the scored universe with rank/score annotations? The task title says "persistent per-file hit matrix". And part 2 says `flagged_files_for(day)` — "read the risk snapshot JSONL, filter entries with `day <= given day`, union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)."
+
+Wait, so `flagged` = the whole scored universe (all scored files with rank/score), not just top_10? Let me re-read:
+
+"Add a `flagged` field (array of file paths) to the snapshot ... Each entry: the file path + the rank/score it got at snapshot time."
+
+And the pair counting: "a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise)."
+
+So "flagged" means "in the scored universe" — every file the risk scorer scored. The scored universe is `all_ranked` (all files with a risk score). The old events that lack `total_scored` (day 171) still had a scored universe at snapshot time — the snapshot's top_10 is just the top 10, but the snapshot didn't persist the full scored list.
+
+Hmm wait, but if `flagged` = the full scored universe (all src files with scores), then "flagged_files_for" union would be huge — essentially all src files, and then any changed src file would be a valid pair. But per the test spec: "only `src/` files present" — meaning flagged_files_for only returns src/ files (filtered).
+
+Actually, I think the intent is: the `flagged` field is an array of `{path, score, rank}` for ALL scored files at snapshot time. This is the "per-file hit matrix". Then `flagged_files_for(day)` unions them (highest score first, later snapshots tie-break).
+
+Then a pair = a validation event whose changed files (hit or surprise, filtered to src/, in the scored universe) contain a file that was flagged in a snapshot ≤ the event's day.
+
+Wait, but the events have `hits` which are already the predicted files that broke, and `surprises` which are scored files that broke but weren't predicted. The task says "a validation event whose changed-files contained that file (hit **or** surprise)". So for day 174: hits = [commands_risk.rs, commands_risk_snapshots.rs], surprises = [cli.rs]. All three are src files. Were they in the flagged universe (snapshot's scored population)? Yes, if scored at snapshot time.
+
+Hmm OK. So what is the actual problem being solved?
+
+The day-171 event: `recorded`... wait, day 171's event has surprises that are all non-src noise and hits = [src/commands_risk.rs]. Its scored_broke is missing (no total_scored/scored_broke fields — pre-lift format). So under the current pair counting (scored_broke > 0), day 171 doesn't count.
+
+The current pairs = 3 (days 172, 174, 175). Day 175: hits=[], surprises=[src/update.rs], scored_broke=1. Was src/update.rs in the flagged union for day ≤175? From my truncated output, day 175 matched_flagged=[] — meaning src/update.rs was NOT in top_10 union. But was it in the full scored universe? Probably yes (any src file with any score). Let me check whether update.rs got a score at snapshot time.
+
+Actually, let me look at how `compute_file_risk_scores` works and whether it ranks ALL src files or just a subset.
+
+The deeper question for design: what does the task want the pair count to become? "The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events". So the target is to count pairs from days 172/174 (and 171).
+
+With the current implementation, pairs = 3 (172, 174, 175 via scored_broke). The task claims 0/5, but current state shows 3/5. Regardless, the task wants pair counting to use the persistent flagged set:
+
+For each validation event:
+- (a) file was flagged in some snapshot with day ≤ event.day (i.e., part of the scored population at the event's time)
+- (b) the event's changed-files (hits ∪ surprises) contained that file
+
+Then each such (event, file) that matches = one pair? Or each event counts as one pair if ≥1 clean match?
+
+Re-read: "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events."
+
+The meter's `pairs` field is currently "validations whose scored_broke > 0" — event-level counting. The task wants pair-count to be per-file maybe? "matched prediction-outcome pairs" — each pair = a flagged file that broke. Hmm.
+
+Re-reading "accumulate ≥5 matched prediction-outcome pairs": a pair is a (prediction, outcome) — a file that was flagged (prediction) and then broke (outcome). The DREAM.md milestone: "≥5 matched prediction-outcome pairs". So pairs should be per-file: each flagged file that broke = 1 pair.
+
+The test spec says: "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)." and "Fixture with non-`src/` churn (`CLAUDE.md`, `DAY_COUNT`, commit-subject strings) proves those never become pairs."
+
+So with the fixture, the pair count should be ≥1 — one pair per matched file. If the fixture mimics days 172+174 (each having hits+surprises in the flagged universe), the pair count could be 2+ (one per changed flagged file), or at minimum ≥1.
+
+Let me now figure out the cleanest implementation:
+
+**Part 1: `flagged` field in snapshot JSON.**
+- In `build_risk_snapshot_json`, add a `flagged` array covering ALL scored files: `{path, score, rank}`. But the function signature only takes `risks: &[FileRisk]` (already sorted desc), day, git_hash. `risks` IS the full scored universe (all ranked files). So the `flagged` field = all risks with their rank (1-based) and score.
+- Note: the snapshot is written by `auto_risk_snapshot` and `auto_risk_snapshot_to` using `compute_file_risk_scores()` — full list. And `arc risk snapshot` CLI path — let me check where that calls build_risk_snapshot_json.
+
+Let me check the CLI path (`handle_risk` in commands_risk.rs) for the snapshot subcommand to make sure it passes the full scored list.
+
+**Part 2: `flagged_files_for(day)` helper.**
+- Read `.arc/risk_snapshots.jsonl`, parse entries, filter `day <= given`, union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break).
+- Only `src/` files? Test says "only `src/` files present" — hmm, "flagged_files_for returns the union across snapshots, newest inclusion wins, only `src/` files present". Wait, does the helper filter to src/ only? That seems odd for a general helper but the test asserts it. Actually re-reading: "only `src/` files present" — maybe the fixture only contains src/ files... The task says the helper unions their flagged paths. But should it filter by is_scored_file? The scored universe is all src files anyway (compute_file_risk_scores scores src files). Actually wait — does it? Let me check compute_file_risk_scores. `is_scored_file` checks `f.starts_with("src/") && f.ends_with(".rs")`. Let me check.
+
+Let me look at compute_file_risk_scores.
+
+**Part 3: pair counting.**
+- Change `compute_risk_meter`'s pairs computation: for each validation event, count files in `hits ∪ surprises` (parsed from the event — but `parse_validation_events` only keeps counts, not file lists!) that are in `flagged_files_for(event.day)`.
+
+Hmm — `ValidationEvent` doesn't store the per-file lists. `parse_validation_events` stores only counts. So to count per-file pairs, I need the actual file paths from the events. Options:
+a) Extend `parse_validation_events` to also store hits/surprises file lists — but the task says "Do not change `parse_validation_events`... unless a correctness bug is found — prefer additive fields." Additive = add new fields to `ValidationEvent` without changing existing ones. That would be additive-ish.
+b) Parse the event files separately in `compute_risk_meter` (it already has validation_content) — extract hits/surprises arrays per event and count matches against `flagged_files_for(day)`.
+
+The task says: "**3. Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+"Reuse the snapshot's `flagged` field directly where the snapshot is already loaded" — meaning in paths that already load snapshots (like replay_validate_core?), use the loaded snapshot's flagged field rather than the file-reading helper.
+
+The caution "Do not change `parse_validation_events`, `validate_risk_meter`, or any accuracy reader unless a correctness bug is found — prefer additive fields."
+
+So where is pair-count computed? In `compute_risk_meter` (commands_risk_snapshots.rs:614-628):
+```rust
+let pairs = validations
+    .iter()
+    .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+    .count() as u64;
+```
+
+And also maybe in commands_risk_accuracy.rs `compute_accuracy_stats`. Let me check that. The task says "The verdict's pair-count and accuracy must be computed from the same filtered, per-file signal used at write time". And the meter's `pairs` field is what feeds `calibration_verdict(pairs, validations)`.
+
+Hmm, wait — but the verdict also consumes `validations` for the pooled rates after ≥5 pairs. The verdict line is "N/5 paired predictions, accumulating" currently. The task says the verdict's pair-count must be computed from the persistent flagged set.
+
+Let me think about the cleanest additive design that satisfies:
+1. Persist `flagged` per snapshot (array of {path, score, rank} for the full scored universe).
+2. `flagged_files_for(day)` helper returning union of flagged paths across snapshots with day ≤ given day, ordered (highest score first, later snapshots tie-break), filtered to src/ (the scored universe is already src-only, but the union should apply is_scored_file filtering? Actually "only `src/` files present" — since compute_file_risk_scores only scores src files, all flagged entries will be src/ files. But defensively filter).
+3. Pair counting: for event e, per-file pairs = changed files in e (hits ∪ surprises, i.e. the files that broke) ∩ flagged_files_for(e.day). Count each matched file as one pair? Or count each event with ≥1 match as one pair?
+
+Test: "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)."
+
+"a source file changed, in the scored universe, flagged in an old snapshot of that day" — one source file → pair count ≥ 1. If pair = per-file, one file = 1 pair. If pair = per-event, one event = 1 pair. Both give ≥1. But "matched prediction-outcome pairs" and "≥5 paired predictions" - pairs are per file... I think per-file counting is cleaner and matches "N/5 paired predictions" (each prediction that got an observed outcome is a pair). Let me go with per-file: each (flagged file, broke) = 1 pair.
+
+Hmm, but there's a subtlety: current pair semantics in the meter = events with scored_broke > 0 (3 events: 172, 174, 175). If I switch to per-file pairs with the flagged set:
+- Day 171: changed src files = {commands_risk.rs}. flagged union ≤171 includes commands_risk.rs? Yes (it's top-10 almost every day). → 1 pair.
+- Day 172: changed = {commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs}. All in scored universe (all src files scored). Actually wait — need to check the scores exist for those days. commands_risk_accuracy.rs got a score of 0.35 on day 176 snapshot... For day ≤172, is it in flagged? It's a src file so it's scored. But the flagged field in snapshots before my change doesn't exist — old snapshots only have top_10. So `flagged_files_for` on OLD snapshots = union of top_10 only. Then commands_risk_accuracy.rs might not be in the top_10 union for ≤172... Let me check with a query.
+
+Actually here's the crux: the persistent `flagged` field only exists in NEW snapshots (written after this change). Old snapshots (97 of them) have only top_10. So `flagged_files_for` needs to work with old-format snapshots: for those, use top_10 as the flagged set (fallback). That's essential for "recovering the pairs locked in old noisy events."
+
+So `flagged_files_for`/snapshot parsing: parse both `flagged` (new) and `top_10` (old, fallback). A file is "flagged" at snapshot day if it's in the snapshot's `flagged` (or, old format, `top_10`).
+
+Wait, but that changes semantics: new snapshots flag ALL scored files (the whole universe), old snapshots flag only top_10. Then pairs from days ≤ the migration day use top_10 = "predicted" set; pairs from new events use "all scored" = the universe. Hmm, that makes the flagged set for new days much larger, which means nearly every changed src file is "flagged" → pairs accumulate fast and accuracy is diluted.
+
+Hold on. Let me re-read the task once more:
+
+"2. **New helper** ... `fn flagged_files_for(day: u64) -> Vec<String>` — read the risk snapshot JSONL, filter entries with `day <= given day`, union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)."
+
+"3. **Pair counting using the persistent flagged set.** ... a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise)."
+
+Hmm, so what is `flagged` in the snapshot? "Each entry: the file path + the rank/score it got at snapshot time." It says "array of file paths" but also "the file path + the rank/score". So `flagged` = [{path, score, rank}, ...].
+
+Which files go in `flagged`? "includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`". That phrasing is confusing. It reads like: the snapshot currently includes top_10; and there's total_scored/scored_broke in the *validation events* (lift work). 
+
+Hmm the "Day-177 lift work" — the CLAUDE.md says the lift measurement landed earlier. total_scored = all_ranked.len() — the whole scored population.
+
+Let me think about what makes sense: `flagged` should be the full scored population (all files the scorer ranked), because that's the "per-file hit matrix" — every file carries what it predicted (its rank/score). Then a "matched prediction-outcome pair" = a scored file that broke. That's exactly the lift measurement's denominator concept (total_scored = the scored universe; a file in the universe breaking is an observable outcome regardless of whether it was top-10).
+
+But then for OLD snapshots, the full scored universe wasn't persisted — only top_10. So `flagged_files_for` falls back to top_10 for old snapshots. That's "recovering the pairs locked in old noisy events": e.g., day-174 event had surprise src/cli.rs — under old format, is cli.rs in any snapshot ≤174's top_10? Let me check: day 176 snapshot has cli.rs at rank 3. For ≤174? Let me query.
+
+Actually wait — the purpose is to count pairs where a changed file was *flagged* (predicted high-risk). If `flagged` = ALL scored files, then "flagged" no longer means "predicted high-risk" — it means "in the scored universe". Then the pair count from day 175 (src/update.rs broke, in the universe) = 1 pair, even though update.rs was never flagged high-risk. Is that the intent?
+
+Re-read the task's "Why" section:
+- "Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances. Every `fix/revert` of a non-top-10 source file is a missed measurement."
+
+YES. The intent: a changed source file that was in the scored universe = a valid measurement, even if not top-10. That's the "lift" framing — the scored universe is the measurable population, and any breakage within it is an outcome that can be paired with a prediction (the score). So `flagged` = the full scored population with scores/ranks.
+
+So:
+- `flagged` field in new snapshots = full scored list (path + score + rank).
+- `flagged_files_for(day)` = union of flagged paths across snapshots ≤ day. For old snapshots lacking `flagged`, fall back to `top_10` paths.
+- Pair counting: for each validation event, changed files (hits ∪ surprises) ∩ flagged_files_for(event.day) → each matched file = 1 pair.
+
+Now with the real data:
+- Day 171: changed src = {commands_risk.rs}. Union ≤171 (top_10 fallback) includes commands_risk.rs → 1 pair. ✓
+- Day 172: changed = {commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs}. Union ≤172 (top_10 fallback): commands_risk.rs ✓, commands_risk_snapshots.rs ✓ (in top_10 day 171+?), commands_risk_accuracy.rs ? Let me check.
+- Day 174: changed = {commands_risk.rs, commands_risk_snapshots.rs, cli.rs}. cli.rs in any ≤174 top_10? 
+- Day 175: changed = {update.rs}. In ≤175 top_10 union? Probably not → 0 pairs from day 175 under top_10 fallback. Under new-format flagged (full universe), update.rs would be flagged.
+
+Hmm, that's the "recovered signal": days that a file got a score but wasn't top-10. But old snapshots don't have the full list... so we can't recover those from old snapshots. We can only recover top_10-membership for old days. The task says "recovering the pairs locked in old noisy events instead of discarding them" — the day-172/174 events have surprises like src/commands_risk_accuracy.rs and src/cli.rs. If those were in the top_10 union at their day, they become pairs. Let me verify with a query.
+
+Let me also check day 171: the event's surprises are noise, hits = commands_risk.rs. Under new counting, day 171 gives 1 pair (commands_risk.rs in union).
+
+Current meter = 3 pairs (172, 174, 175 via scored_broke>0). Under new counting:
+- 171: commands_risk.rs in union ≤171 → 1
+- 172: commands_risk.rs ✓, commands_risk_snapshots.rs ✓, commands_risk_accuracy.rs ? 
+- 174: commands_risk.rs ✓, commands_risk_snapshots.rs ✓, cli.rs ?
+- 175: update.rs ?
+
+So new count = probably 5+ if the surprises were flagged. That would push the meter to ≥5 → calibrated verdict! That's the goal: "move the N/5 paired predictions, accumulating counter off 0 by counting real matched pairs recovered from the day-172/174 events."
+
+Let me verify with the actual data whether cli.rs and commands_risk_accuracy.rs appear in top_10 snapshots ≤ 174/172.
+
+Let me run the query. Also check how `compute_file_risk_scores` orders and whether it includes all src files.
+
+Also — the verdict path after ≥5 pairs uses `validations` pooled rates with lift fields (predicted_count, total_scored, scored_broke). Day 171 lacks those fields; it's skipped in pooled computation. Fine.
+
+Also, `calibration_verdict(pairs, validations)` — pairs parameter comes from the meter. So I mainly need to change the `pairs` computation in `compute_risk_meter`.
+
+But note: `compute_risk_meter(snapshot_content, validation_content)` has both contents — so it can compute the flagged union from snapshot_content and per-file changed lists from validation_content. 
+
+For per-file changed lists, `parse_validation_events` only returns counts. I need the actual file lists. Options:
+- Additive: extend `parse_validation_events` to also capture `hits_files`/`surprises_files` in ValidationEvent (new fields). The task says don't change parse_validation_events unless a correctness bug — "prefer additive fields". Adding new optional fields to ValidationEvent and populating them in parse_validation_events IS additive (old code reading the struct... well, adding pub fields to a struct used in tests etc. is additive unless constructed with literals elsewhere).
+
+Let me check where ValidationEvent is constructed — only in parse_validation_events presumably. And where its fields are read: calibration_verdict, compute_accuracy_stats, compute_risk_meter. Adding fields is safe as long as all construction sites are updated (Rust struct literals require all fields).
+
+Alternatively — write a small parser in compute_risk_meter that re-reads the validation JSONL to extract hits/surprises per event. That avoids touching ValidationEvent at all. But then there are two parsing paths — the CLAUDE.md warns "the meter's counts can never drift from what the accuracy readers see" — reusing parsers is the house style. Additive fields on ValidationEvent keep one parser. I'll go additive: add `hits_files: Vec<String>` and `surprises_files: Vec<String>` (or one combined `changed_files`) to ValidationEvent, populated by parse_validation_events. Also maybe `git_hash_from`? Not needed.
+
+Wait, but the task says "Do not change `parse_validation_events`, `validate_risk_meter`, or any accuracy reader unless a correctness bug is found — prefer additive fields." — "prefer additive fields" qualifies this: additive fields on the struct, populated in the same parser, is the "additive" option. I'll add fields to the struct and populate them in the existing parser (that's additive in spirit — no reader behavior changes unless I change the pair computation).
+
+Actually hmm, re-reading again more carefully: "prefer additive fields" refers to the persisted JSONL format being additive. Adding `flagged` to snapshot JSON is additive. Validation events stay untouched. For the pair counting, the concern is per-file identity — the events already have hits/surprises persisted in JSONL; parsing them into ValidationEvent fields is additive on the struct side.
+
+Let me now also check where pairs is used elsewhere: `compute_accuracy_stats` in commands_risk_accuracy.rs:85 — let me check if it computes its own pair count (the task says the verdict's pair-count AND accuracy must be computed from the same filtered per-file signal). Let me read that file.
+
+Also there's `validate_risk_meter` — search for it.
+
+Let me gather all the info.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the accuracy stats reader, the CLI snapshot path, and how the scored universe is computed.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (17 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '2440,2500p' src/commands_r… ✓ (6ms)
+ ✓ (32ms)
+  2 tools completed in 928ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me now understand the full picture clearly.
+
+Current state:
+- 4 validation events: day 171, 172, 174, 175
+- Meter shows pairs=3 (events where scored_broke is present and > 0: days 172, 174, 175 = 3 events)
+- The task says the pair counter should move off 0 by counting real matched pairs recovered from the day-172/174 events.
+
+The task says:
+> Pair counting using the persistent flagged set. Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (flagged_files_for), (b) a validation event whose changed-files contained that file (hit or surprise). Reuse the snapshot's flagged field directly where the snapshot is already loaded. The goal: move the N/5 paired predictions, accumulating counter off 0 by counting real matched pairs recovered from the day-172/174 events.
+
+Hmm, but the meter currently reports 3/5. The task says "The verdict's pair-count must be computed from the same filtered, per-file signal used at write time — recovering the pairs locked in old noisy events instead of discarding them."
+
+Wait — the meter currently shows pairs=3 because compute_risk_meter counts validations with scored_broke > 0. But the task description says the meter shows "0/5 paired predictions with recording_match tags" — that's a slightly different framing from the actual current state. Let me re-read.
+
+"Verified current state (Day 177): `.arc/risk_validations.jsonl` has 4 events; `.arc/risk_meter.json` shows the meter at `0/5 paired predictions` with `recording_match` tags — the recorded predictions never matched the changed files."
+
+Hmm, but the actual meter file shows `"pairs": 3` and verdict "calibration: cold start — 3/5 paired predictions, accumulating". So the state description in the task may be from an earlier check or somewhat idealized. Whatever — the goal is clear: count pairs based on per-file flagged + changed signal, using the persistent flagged set.
+
+Interesting: the current `pairs` count (3) counts events where `scored_broke > 0`. But scored_broke>0 means the EITHER hits or surprises broke — and surprises are files NOT in the predicted top-10. So an event counts as a "paired prediction" even when the actual prediction (top-10) didn't match anything! E.g., day 175: hits=[], surprises=[src/update.rs], scored_broke=1 → counts as a pair, but src/update.rs was NOT in any snapshot's flagged set. That's exactly the "noise" the task complains about: "the recorded predictions never matched the changed files."
+
+So the correct new pair-count semantics:
+- A pair = (flagged file, validation event where that file was changed). Count = number of distinct (file, event) matched pairs? Or number of events where ≥1 flagged file changed? The task says "move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events."
+
+Day 172: changed src files = hits [src/commands_risk.rs, src/commands_risk_snapshots.rs] + surprises [src/commands_risk_accuracy.rs]. The day-172 snapshot... let me check which files were flagged in snapshots <= day 172.
+
+From the python output: day 172 changed_src = [src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs] and in_top10_union — the second line got elided ("... (2 more similar lines)"). Let me check that output fully. Actually the head -20 limited output. Let me just accept: day 172 and day 174 changed files include many src files, and day 175 changed src/update.rs which is not in the union.
+
+The design:
+1. Part 1: Add `flagged` array to snapshot JSON in `build_risk_snapshot_json`. Each entry: file path + score/rank. Since all_ranked is already sorted (highest score first), the index is the rank. Add `"flagged": [{"path": ..., "score": ..., "signals": ...}, ...]` for ALL scored files? Or just the top-10? 
+
+The task says: "Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever."
+
+Hmm — "the file itself carries what it predicted" — the flagged field should be the set of files the scorer flagged (predicted high-risk). The scored universe is larger — `total_scored` = all scored files. So `flagged` = which files were flagged (predicted). Given the snapshot has top_10 (the top 10 predictions)... but "flagged" should include rank/score. The top_10 already has path+score+signals. So what's new in `flagged`? 
+
+Wait, re-reading: "includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`" — this is describing what the snapshot currently includes. So the current snapshot has top_10 (the predictions). The `flagged` field is new: "Add a `flagged` field (array of file paths) to the snapshot". Each entry: file path + rank/score at snapshot time.
+
+Since the top_10 IS the flagged set (the scorer flags the top-10 as high-risk), the `flagged` array would be the same as top_10 in content, just maybe with explicit rank. But actually — is the flagged set == top_10? Looking at the snapshot structure, `predicted` in ParsedSnapshot = top_10 paths. In `write_validation_event`, `predicted_count` = last.predicted.len() = 10 (or whatever). So the flagged population = the top-N predictions.
+
+Hmm, but wait — is the top-10 the full flagged set? The lift measurement in the task says "flagged population = predicted_count". So yes, flagged = predicted = top_10.
+
+So why add a separate `flagged` field that duplicates top_10? The point of the task:
+
+"The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events — without ever rewriting `.arc/risk_validations.jsonl` (append-only truth)."
+
+The problem: `flagged_files_for(day)` reads snapshots with day <= given day and unions their flagged paths. Today's snapshots only have top_10. But the flagged field will now be persisted going forward. However — "recovering the pairs locked in old noisy events" — the old snapshots (day 172/174) only have top_10, which parses fine through the union helper if the helper reads EITHER `flagged` OR falls back to top_10.
+
+Hmm wait. Let me re-read the actual goal more carefully:
+
+"Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances. Every `fix/revert` of a non-top-10 source file is a missed measurement."
+
+So the insight: the current pair counter counts events where scored_broke>0 — but that counts day-175 (change to src/update.rs which wasn't flagged) as a "pair" — misleadingly moving the counter. And yet genuine signal (day-172 events where changed files were in the flagged set at some point) is being... hmm, actually day 172 changed files WERE in the top-10 union.
+
+Wait, let me re-run the python properly to understand. The output was elided. Let me be careful about which days actually have matched signal.
+
+Actually let me reconsider. The current meter pairs=3 counts {172, 174, 175} (events with scored_broke>0). The task's claim of "0/5" refers to "recording_match" tags — maybe an older state. The current actual state is 3/5 with the noise event 175 contributing.
+
+The goal per the task: pairs should count real matched pairs where a flagged file was changed (hit or surprise). Using the persistent flagged set from snapshots (day <= event day).
+
+Day 171 event: changed = src/commands_risk.rs (hit, in top_10 of day-171 snapshot presumably) + noise files. matched = [src/commands_risk.rs] → 1 pair.
+Day 172: changed src files = commands_risk.rs, commands_risk_snapshots.rs (hits) + commands_risk_accuracy.rs (surprise). In day-172 snapshot top_10? Need to check. From trailing snapshots, day 176's top_10 has commands_risk_accuracy.rs at rank 7. For day 172... need to check. The python said matched for day 172. Let me re-run.
+
+Actually the elided output — let me just re-run without head.
+
+Let me also think about what "pairs" should count: distinct (file, event) pairs where file ∈ flagged(day_of_event) and file ∈ changed(event). 
+
+Day 172: commands_risk.rs + commands_risk_snapshots.rs are hits (they were in the day-172 snapshot's top-10 → flagged). commands_risk_accuracy.rs was a surprise — was it flagged in a snapshot ≤ day 172? If yes → another pair. So day 172 contributes up to 3 pairs.
+
+The "recovery" that the task wants: old snapshots only have top_10 — that's fine, flagged_files_for falls back to top_10 for old snapshots. New snapshots get an explicit flagged array with rank/score. This makes the flagged signal persistent and self-describing, decoupled from the top_10 field (which could theoretically change meaning).
+
+Hmm, wait, but actually there's a subtlety. Let me re-read part 2:
+
+"New helper (commands_risk_snapshots.rs, pub(crate), re-exported): fn flagged_files_for(day: u64) -> Vec<String> — read the risk snapshot JSONL, filter entries with day <= given day, union their flagged paths into an ordered set (highest score first; later snapshots tie-break). Used by the replay-validation path and the calibration verdict."
+
+So `flagged_files_for(day: u64) -> Vec<String>` reads from the real RISK_SNAPSHOT_PATH. Hmm — but for testability, maybe it should take content as a parameter? The task says "read the risk snapshot JSONL" — could be `flagged_files_for(content: &str, day: u64)`. But the signature given is `fn flagged_files_for(day: u64) -> Vec<String>`. For tests, I'd want a content-based variant. I'll implement `flagged_files_from(content: &str, day: u64) -> Vec<String>` as the pure core and `flagged_files_for(day: u64)` reading the file, and test the pure one. Actually, keep it simple: the signature must be `flagged_files_for(day: u64) -> Vec<String>` (reads the real file). I'll add a content-based core for tests. Let me check the repo conventions — existing helpers do the same (e.g., `load_validation_history_from(path)` vs `parse_validation_events(content)`).
+
+Part 3: "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (flagged_files_for), (b) a validation event whose changed-files contained that file (hit or surprise). Reuse the snapshot's flagged field directly where the snapshot is already loaded."
+
+The pair-count consumers:
+- `compute_risk_meter` (commands_risk_snapshots.rs:614) — computes `pairs = count of validations with scored_broke > 0`.
+- `compute_accuracy_stats` (commands_risk_accuracy.rs:85) — uses lift_events_used; let me check how that's computed.
+
+The task says "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs)". And "Keep... Do not change parse_validation_events, validate_risk_meter, or any accuracy reader unless a correctness bug is found — prefer additive fields."
+
+Hmm — "validate_risk_meter"? Let me search for that. There might be a function named that. And "the verdict path" = calibration_verdict + compute_risk_meter (which feeds the meter and verdict). The `pairs` value flows: compute_risk_meter → into_risk_meter → calibration_verdict(pairs, validations).
+
+So the change: `compute_risk_meter` should compute pairs from the flagged set + validation events, not just from scored_broke>0.
+
+But wait — compute_risk_meter only has snapshot_content and validation_content. It can get the flagged set from snapshot_content via parse_all_snapshots + flagged field. The validation events' changed files aren't fully persisted! parse_validation_events only extracts hit_count/surprise counts, NOT the paths. The JSONL has `hits` and `surprises` arrays with paths.
+
+So I need to extend `ValidationEvent` (additively) or `parse_validation_events` to include the changed file paths (hits + surprises paths). The task says "Do not change parse_validation_events ... unless a correctness bug is found — prefer additive fields." So additively: add a new field to ValidationEvent like `changed_files: Vec<String>` and populate it in parse_validation_events. That's additive — old readers ignore it, and existing code using ValidationEvent continues to work (I'd add the field with a default when constructing in the test places... let me check where ValidationEvent is constructed).
+
+Also the day-171 event has surprises with junk (commit subjects, CLAUDE.md, DAY_COUNT). The flagged set only contains src/ paths, so junk files won't match — good, the fixture test with non-src churn proves they never become pairs.
+
+Now the pair count semantics: "a paired prediction requires: (a) the file was flagged (flagged_files_for), (b) a validation event whose changed-files contained that file (hit or surprise)."
+
+So pairs = number of distinct (flagged file, event) pairs where the file ∈ changed_files(event) and day(event) >= snapshot day (via flagged_files_for(event.day)).
+
+Wait — flagged_files_for(day) unions snapshots with day <= given day. So it's "the file was flagged at or before the event's day".
+
+Count distinct pairs per (file, event)? Or per (file, day)? Days 172 and 174 both change commands_risk.rs — two events, same file. Each is a separate observation... "matched prediction-outcome pairs" — each event is a separate outcome. I think counting (file, event) pairs is right — day 172 event gives up to 3 pairs (commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs if flagged), day 174 gives its own, etc.
+
+Let me now check the data for day 172/174 to see what the flag sets were.
+
+Let me compute properly.
+
+Also I need to check `validate_risk_meter` — the task mentions not changing it. Search for it.
+
+Let me also check the `handle_risk_snapshot` (commands_risk.rs:1365) — it writes snapshots via build_risk_snapshot_json. And auto_validate_after_failure_to (commands_risk_snapshots.rs) writes validation events with hits/surprises. Those write-time paths already filter surprises via is_scored_file? Let me check auto_validate_after_failure_to — lines 296-308: surprises = src_files not in predicted_set. So surprises there = src/ files not predicted. OK.
+
+And in replay_validate_core (commands_risk.rs), compute_validation filters surprises with is_scored_file. So both write-time paths already filter to scored files. The task statement "parse_validation_events and compute_validation do not filter hits" — hits are predicted files that broke; predicted files are top-10 src files so they're implicitly clean. Surprises in compute_validation are filtered by is_scored_file. In auto_validate_after_failure_to, surprises are filtered by starts_with("src/") only — could include non-scored src files? is_scored_file checks extension .rs. Let me check is_scored_file.
+
+Line 1948: `fn is_scored_file(path: &str) -> bool`. Let me read it.
+
+OK here's my plan:
+
+**Part 1**: `build_risk_snapshot_json` — add `flagged` array: all scored files (the full ranked list) with path + score + rank? Or just top-10? The task says "Add a `flagged` field (array of file paths) to the snapshot ... Each entry: the file path + the rank/score it got at snapshot time."
+
+The flagged set should represent "files the scorer flagged (predicted high-risk)". The ranked list top-N = flagged. But for the union helper to recover signal from NON-top-10 changed files (the whole point: "when a changed source file was NOT in the predicted top-10 but was in the scored universe, it vanishes"), we need... hmm, wait.
+
+Actually re-read the goal once more:
+
+"Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances."
+
+Hmm — "the pair counter never advances" for non-top-10 changed files. But under the NEW pair semantics: "a paired prediction requires (a) the file was flagged (flagged_files_for), (b) a validation event whose changed-files contained that file (hit or surprise)". So a file is flagged if it appears in ANY snapshot ≤ event day. E.g., src/update.rs changed on day 175 — was it flagged in any snapshot ≤ 175? Apparently NOT (matched=[]). So day 175's event should NOT count as a pair. Day 172's changed files (commands_risk.rs, commands_risk_snapshots.rs hits + commands_risk_accuracy.rs surprise) — were they flagged in snapshots ≤ 172? commands_risk_accuracy.rs appears at rank ~7 in recent snapshots; in day-172-era snapshots, we need to check.
+
+So the recovery: the top-10 fields across ALL snapshots ≤ event day form a "has this file EVER been flagged as high-risk" set. The union over days is what recovers signal — a file that was flagged on day 160 and changed on day 172 counts as a matched pair, even if it wasn't in the day-172 snapshot's top-10.
+
+So `flagged` in the new snapshot format = the top-N flagged files with score+rank. For old snapshots, fall back to top_10. The union helper then builds the "ever flagged" set.
+
+Hmm, but should `flagged` be the top-10 only, or all scored files? "Each entry: the file path + the rank/score it got at snapshot time." If flagged = all scored files, then "every fix/revert of a non-top-10 source file" becomes a pair — which would make the set trivially everything and the pair counter would advance on ANY src change. That contradicts "a paired prediction requires the file was flagged". So flagged = the predictions (top-N), not all scored.
+
+But then the flagged field == top_10 in content. Why duplicate? Two reasons: (1) future-proofing — top_10's meaning/shape could change; flagged is the explicit "this is the flagged population" contract with rank; (2) decouple ParsedSnapshot.predicted (paths only) from the richer flagged entries. Actually the task explicitly says "Each entry: the file path + the rank/score it got at snapshot time" — the difference from top_10 is the rank. top_10 has path+score+signals; flagged adds rank.
+
+OK let me design:
+
+```rust
+pub(crate) fn build_risk_snapshot_json(risks: &[FileRisk], day: u32, git_hash: &str) -> String {
+    ...
+    let top_10: Vec<serde_json::Value> = ... (unchanged)
+    let flagged: Vec<serde_json::Value> = risks
+        .iter()
+        .enumerate()
+        .map(|(i, r)| serde_json::json!({
+            "path": r.path,
+            "score": (r.score * 100.0).round() / 100.0,
+            "rank": i + 1, // 1-based
+        }))
+        .collect();
+    let snapshot = serde_json::json!({
+        "ts": ts,
+        "day": day,
+        "git_hash": git_hash,
+        "top_10": top_10,
+        "flagged": flagged,
+    });
+```
+
+Wait — should flagged be ALL scored files or just the top-10? The `flagged` field is meant to be THE flagged set. If we store all scored files there, then the term "flagged" is a misnomer. The top-10 = flagged. Let me store just the predictions (top 10) in `flagged` with rank.
+
+Hmm, actually, hold on. Let me reconsider. Reading once more:
+
+"Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+In `replay_validate_last_snapshot` (commands_risk.rs), it loads `parse_all_snapshots(&content)` → ParsedSnapshot { day, git_hash, predicted }. I'd extend ParsedSnapshot with a `flagged: Vec<String>` (or keep predicted = flagged). "Reuse the snapshot's flagged field directly where the snapshot is already loaded" — so ParsedSnapshot should carry the flagged paths.
+
+OK here's the concrete design:
+
+1. **`build_risk_snapshot_json`**: add `"flagged": [{"path", "score", "rank"}, ...]` covering the ranked predictions (the same top-N as top_10 — the flagged population). Actually, to make `flagged_files_from` meaningful even when top_10 is absent, and to be the authoritative "flagged set", I'll write flagged for the top-10 scored files.
+
+Hmm wait, actually let me reconsider whether flagged should be all scored files. The task's own test spec:
+
+- "`flagged_files_for` returns the union across snapshots, newest inclusion wins, only `src/` files present."
+
+"only src/ files present" — if flagged were all scored files, they'd all be src/ anyway (risks are src files). This test just guards the union output is src-only.
+
+- "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)."
+- "Fixture with non-src/ churn (CLAUDE.md, DAY_COUNT, commit-subject strings) proves those never become pairs."
+
+So flagged contains src files only (top-10 are all src/).
+
+Decision: `flagged` = the ranked predictions (top-N entries) each carrying path + score + rank. This is the persistent, self-describing flagged set. Old snapshots without `flagged` fall back to `top_10`.
+
+2. **New helper**:
+
+```rust
+/// Union of flagged (predicted high-risk) file paths across snapshots with
+/// day <= given day, highest score first; later snapshots tie-break.
+/// Pure core over JSONL content.
+pub(crate) fn flagged_files_from(content: &str, day: u64) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    // iterate in file order (oldest → newest); newest inclusion wins by
+    // inserting at end when not seen; but ordering by score...
+    ...
+}
+```
+
+Hmm, ordering: "union their flagged paths into an ordered set (highest score first; later snapshots tie-break)". So the path order should be by score descending; when a path appears in multiple snapshots, the later snapshot's (score, rank) wins for tie-breaking (i.e., ordering among paths not by score).
+
+Simplest robust approach: collect entries (path, score, snapshot_index) for each snapshot ≤ day, where snapshot_index is the file position (later = higher). Then sort by (score desc, snapshot_index asc/desc?). "highest score first; later snapshots tie-break" — meaning when scores are equal, the later snapshot's position decides. 
+
+Implementation: for each snapshot (in order), for each flagged entry, insert into a map path → (score, idx). Then sort paths by (score desc, idx asc) — newer snapshot index wins ties (its idx is larger; if we sort by idx descending, newer wins). Then dedupe.
+
+Since `flagged_files_from` is used to answer "was this file ever flagged ≤ day", the ordering mostly matters for tests. Keep it deterministic and sensible.
+
+3. **Pair count in the verdict path**:
+
+`compute_risk_meter(snapshot_content, validation_content)`:
+- get flagged set: `flagged_files_from(snapshot_content, each event's day)` — per event day.
+- for each validation event, changed files = hits paths + surprises paths (from extended parse).
+- matched = changed files ∩ flagged(≤ event.day) → count distinct (file, event) pairs. Pairs = sum over events of |matched ∩ flagged(event.day)|.
+
+Wait but hits paths — day 171 event has junk in surprises (commit subjects). flagged_files_from returns only src/ paths from top_10/flagged — junk never matches. 
+
+But hold on — should pairs count only distinct files? E.g., day 172 has commands_risk.rs + commands_risk_snapshots.rs as hits (both flagged) → 2 pairs. day 174 same → 2 more. Day 171: commands_risk.rs hit + flagged → 1. So total might be 5 for days 171+172+174! That would move the meter from 3/5 to ≥5 — the milestone hits! Let me verify with actual data first.
+
+Also need to extend `parse_validation_events` to capture `hits`/`surprises` paths → `changed_files: Vec<String>`. That's additive.
+
+But `calibration_verdict(pairs, validations)` — the signature stays the same, just `pairs` computed differently. However, the calibrated readout uses pooled hit_count/scored_broke from events — unchanged.
+
+4. `compute_accuracy_stats` (commands_risk_accuracy.rs:85) — task says don't change accuracy readers. Only the verdict path's pair count changes. But wait — `handle_risk meter` output uses compute_risk_meter → pairs. And there's a "Pairs: {pairs}/5" in accuracy stats from lift_events_used. Let me check compute_accuracy_stats to see if it computes its own pairs separately — task says don't change it. Fine.
+
+Now, `validate_risk_meter` — search for it. The task mentions "Do not change parse_validation_events, validate_risk_meter, or any accuracy reader". Hmm, maybe it doesn't exist. Let me grep.
+
+Let me also check the `handle_risk meter` / "risk meter" subcommand path to see where compute_risk_meter is called and whether the change is observable via CLI. The task Verify says: "Check `arc risk meter` (or the pure verdict test) shows the pair counter moving off 0."
+
+Note: the current meter already shows 3/5 (from scored_broke). New semantics should give a "real" count from matched flagged×changed pairs. If my analysis is right, that could be 5 (171:1, 172:2, 174:2) → hit the milestone! Let me verify with actual data before designing further.
+
+Let me run the computation over the real data with the NEW semantics (flagged = union of top_10 across snapshots ≤ event day; pair = src changed file ∩ flagged).
+
+Then let me also check how `write_risk_meter_to` currently writes the stamp — it calls compute_risk_meter which I'll change. The verdict line will change accordingly → the .arc/risk_meter.json in the repo will be regenerated... but wait, should I regenerate the meter file? The task says commit code changes; state files (.arc/) — are they tracked? Let me check git status. The .arc/ files: .arc/risk_meter.json is tracked? From the Project Files list: `.arc/risk_meter.json` is listed as a project file, and git status is clean (only "Branch: main" shown, no changes). Let me check git ls-files.
+
+Also `.arc/risk_snapshots.jsonl` has 97 entries — is it tracked? It's listed in Project Files. If tracked and I change the snapshot format via build_risk_snapshot_json, the next snapshot write (during evolve) would add a new line with flagged. I won't manually rewrite old snapshots — append-only. The meter file though — running `arc risk meter` writes it. Since my verification runs the code, the meter might get rewritten. I need to be careful about what gets committed. The task says "git add -A && git commit" — includes state files. But regenerating the meter to show the new pair count is arguably desirable: it's the "check arc risk meter shows the pair counter moving off 0". Hmm, but state files changing might be noise. Let me first see what's tracked.
+
+Let me gather all remaining facts, then write tests first, then implement.
+
+Fact-check list:
+1. is_scored_file impl (commands_risk.rs:1948).
+2. compute_accuracy_stats pairs computation (commands_risk_accuracy.rs).
+3. validate_risk_meter existence.
+4. ValidationEvent construction sites (to add field).
+5. What's tracked in git for .arc/.
+6. Replay test fixtures in commands_risk_snapshots.rs tests (existing tests use compute_risk_meter with fixture content — check they don't break with new pair semantics).
+7. commands_risk.rs tests around validation (line ~2818, ~4430) — these construct ValidationEvent? No — they test compute_validation/write_validation_event. If I add a field to ValidationEvent, construction sites (in tests) need the new field unless I use ..Default.
+
+Let me check.
+────────────────────────────────────────────────────────────────────────────────
+Let me gather the remaining facts: `is_scored_file`, accuracy stats pairs logic, ValidationEvent construction sites, and what's tracked in git.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1940,1960p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "ValidationEvent {" src/ … ✓ (9ms)
+ ✓ (22ms)
+  2 tools completed in 999ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me check `validate_risk_meter` — it doesn't exist as a fn in src (grep found nothing except the task mention). Let me check the `Validi` tests around line 1361 and the meter test at 1505.
+
+Let me check the `ValidationEvent` construction sites (test code):
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1340,1380p' src/commands_r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "flagged\b\|flagged_" src/… ✓ (4ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 947ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a good picture. Let me also check the test at line 1361 in commands_risk_snapshots.rs (ValidationEvent construction in test) and check the `compute_risk_meter` test at 1505 to understand the fixture. Also check the git log to understand whether `.arc/` files are committed (they appear to be tracked).
+
+Let me also verify my plan against the existing tests:
+- `test_write_risk_meter...` fixture: snapshot `{"day":174,"git_hash":"ccc333","top_10":[{"path":"src/c.rs"}]}` + validation `{"day":174,"hits":["src/c.rs"],...}` → meter.pairs == 1. 
+
+With my new pair counting: parse snapshots → day 174 snapshot flags ["src/c.rs"]. Validation event day 174... wait the ValidationEvent struct doesn't carry hits/surprises file lists — only counts! So at parse time I can't know which files the event's hits/surprises were.
+
+Hmm. So the pair logic can't be done purely from `parse_validation_events` (counts only). I need to actually read the hit/surprise file identities. Two approaches:
+
+A. **Extend the parse to capture per-file identities** — add `hits_files: Vec<String>`, `surprises_files: Vec<String>` fields to `ValidationEvent` (populated at parse time from the JSONL, and empty for constructed-in-test events). This is additive (all constructed events get default empties), doesn't change `parse_validation_events` behavior for the aggregate readers... but wait, the task says "Do not change `parse_validation_events` ... unless a correctness bug is found". Hmm, but it says prefer additive fields. Adding fields that are parsed is arguably additive.
+
+Actually wait, let me re-read: "Do not change `parse_validation_events`, `validate_risk_meter`, or any accuracy reader unless a correctness bug is found — prefer additive fields."
+
+So the spirit: keep the parsing of existing fields intact, don't break readers. Adding optional per-file fields parsed when present is additive and backward compatible.
+
+B. Compute pairs from raw JSONL content directly in the meter path (parse hits/surprises at meter time).
+
+Approach B keeps `parse_validation_events` completely untouched, and the meter path (`compute_risk_meter` already receives both snapshot_content and validation_content!). So I can parse the raw validation JSONL in `compute_risk_meter` to extract hits/surprises file identities for pair counting. But `parse_validation_events` loses file identity... however `compute_risk_meter` is the one that computes pairs. Let me check: `compute_risk_meter(snapshot_content, validation_content)` — it has the raw content. I could write a small helper that extracts (day, hits_files, surprises_files) from raw JSONL. Then pair counting:
+
+```
+fn count_matched_pairs(snapshot_content, validation_content) -> u64
+```
+
+For each validation event (raw), get day, hits files, surprises files. For each changed file in hits ∪ surprises that is a scored file (src/*.rs), check if it's in `flagged_files_for(day)` (union of flagged across snapshots with snapshot.day <= event.day). If yes → matched pair.
+
+And the `calibration_verdict` pathway: the task says "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs)". The verdict's pairs come via `compute_risk_meter` → `into_risk_meter`. Also `handle_risk` might compute pairs elsewhere for "pairs" display... let me check `commands_risk.rs:330` area (the risk meter display) and `compute_accuracy_stats`'s `lift_events_used` used for the accuracy report's "Pairs: N/5".
+
+The accuracy report (`format_accuracy_report`) uses `lift_events_used` as its pairs count! That's a separate display. Task says keep accuracy readers untouched unless correctness bug. But the "Pairs: N/5" in the accuracy report would still show 3. Hmm. The task focuses on the verdict path (the meter). Let me check what the meter's pairs display shows: `format_risk_meter_line` uses `meter.pairs`.
+
+So plan:
+1. `build_risk_snapshot_json`: add `flagged` array = same as top_10 (path + score + rank). Actually "Each entry: the file path + the rank/score it got at snapshot time." Let me add `flagged` as an array of all scored files? No wait — "Add a `flagged` field (array of file paths) to the snapshot ... Each entry: the file path + the rank/score it got at snapshot time."
+
+Hmm — "flagged" should be which files the scorer flagged as high-risk. The prediction is the top-10. But for the pair-counting recovery, we need the *scored universe* — files that were scored but not in top-10 are "unflagged" yet still in the scored population. Wait no — re-read the goal:
+
+"Goal: the verdict's pair-count and accuracy must be computed from the same filtered, per-file signal used at write time — recovering the pairs locked in old noisy events instead of discarding them."
+
+And: "when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances."
+
+So the issue: a changed src file not in top-10 was historically counted as a "surprise" (e.g. `src/commands_risk_accuracy.rs` on day 172, `src/cli.rs` day 174, `src/update.rs` day 175). These surprises ARE scored files (they're in the scored universe — total_scored=77, and these files are src/*.rs so is_scored_file passes). The surprise was recorded in the event. The problem is the *pair counter*: `pairs = validations with scored_broke > 0` — wait, current meter says pairs=3 with scored_broke=3 for day 172 and 174 and scored_broke=1 for day 175... let me reccount: 
+
+validations:
+- day 171: no total_scored/scored_broke (old format, surprises noise) → not counted
+- day 172: scored_broke=3 → counted
+- day 174: scored_broke=3 → counted
+- day 175: scored_broke=1 → counted
+
+That's 3 pairs! So the meter shows 3/5. Score! Wait, the task description says "the meter at `0/5 paired predictions`" but the actual meter file shows `"pairs": 3`. The task's "Why" section was written from an earlier state maybe. Current actual state: 3/5. Good — so the meter pair counter already counts events with scored_broke>0. 
+
+Hmm wait, but the dream milestone wants ≥5 *matched prediction-outcome pairs* where a *flagged* file actually broke. The current counter counts any event with scored_broke>0, not matched flagged pairs. The task wants to change the pair-count criteria so a pair requires:
+(a) the file was flagged (`flagged_files_for`), AND
+(b) a validation event whose changed-files contained that file (hit or surprise).
+
+Wait — (b) says "hit **or** surprise"?? That's odd — a surprise is by definition NOT in the predictions. But "flagged" here means... hmm. Let me re-read.
+
+"3. **Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise)."
+
+So a matched pair = a file that appears in BOTH the persistent flagged set (across snapshots up to the event's day) AND the changed-files of an event. This counts "prediction-outcome pairs" where the outcome is that the file changed/broke. Because events record changed files from commits since the snapshot — if a flagged file changed, that's a matched prediction-outcome pair (the scorer flagged it, and it broke).
+
+But wait — that double-counts? E.g. day 172 event: hits=[src/commands_risk.rs, src/commands_risk_snapshots.rs], surprises=[src/commands_risk_accuracy.rs]. For a pair to count, the file must be in flagged_files_for(172). From my python analysis: day 172 union of top-10 across all snapshots ≤ 172 includes src/commands_risk.rs and src/commands_risk_snapshots.rs, but NOT src/commands_risk_accuracy.rs (it's not in any top-10). Hmm wait, let me check: day-172 event's surprises = src/commands_risk_accuracy.rs. Is commands_risk_accuracy.rs in any top-10 ≤ day 172? From the tail snapshots I saw, day 176/177 top_10 includes src/commands_risk_accuracy.rs. Day 172-era snapshots... I need to check. My python above printed "day 172: changed_src=... in_top10_union=[src/commands_risk.rs, src/commands_risk_snapshots.rs]" — so commands_risk_accuracy.rs NOT in the flagged union. So the pair from surprise wouldn't count unless it was flagged.
+
+Hmm, so the pair counting relies on whether the surprise files were in the *persistent flagged set* — i.e., in the top-10 of ANY snapshot up to that day. The "flagged_files_for(day)" is the union across ALL snapshots ≤ day. That's a generous definition of "flagged" — a file flagged in ANY snapshot of that day or earlier counts.
+
+So for the old events:
+- day 171 (old format, no scored fields but has hits/surprises): hits=[src/commands_risk.rs] → src/commands_risk.rs in flagged union ≤ 171? Yes (day 172's snapshot has it, but day ≤171... let me check what snapshots exist ≤171). My python said day 171 matched_flagged=['src/commands_risk.rs']. So yes.
+- day 172: hits = commands_risk.rs, commands_risk_snapshots.rs — both flagged. surprises = commands_risk_accuracy.rs — not flagged. So 2 pairs.
+- day 174: hits = commands_risk.rs, commands_risk_snapshots.rs — flagged. surprises = cli.rs — is cli.rs in top-10 union ≤ 174? My python says day 174 matched only the two. So 2 pairs.
+- day 175: hits=[], surprises=[src/update.rs] → src/update.rs not flagged → 0 pairs.
+
+Total: 1 + 2 + 2 + 0 = 5 pairs! That hits the target exactly! 
+
+So with the new pair counting (per-file: file in flagged union ≤ event day AND file in event's changed files), we get exactly 5 matched pairs from the existing 4 events, recovering from the old noisy events (day 171 included, which had no scored fields but did have hits=[src/commands_risk.rs]).
+
+Wait, but is that right? Day 171's event is "noise-laden" — its surprises contain commit subjects and non-src files, but its hit src/commands_risk.rs is a legit scored file that was flagged. And the flagged union ≤171 includes commands_risk.rs. So yes.
+
+But hold on — is a *union across all snapshots ≤ day* the semantically right "flagged" set? The event for day 171 was validated against the LAST snapshot at the time (the one recorded on day 171 or earlier). The hit was src/commands_risk.rs. Was it predicted by the actual snapshot used? The event's predicted_count=10. Which snapshot? The replay path used snapshots.last() at the time. To be honest, we can't recover exactly which snapshot was used. The union approach is a *recovery* heuristic: "was this file ever flagged as high-risk up to that day". The task explicitly endorses this: "Use the snapshot's `flagged` field directly where the snapshot is already loaded" and `flagged_files_for` "filter entries with `day <= given day`, union their `flagged` paths into an ordered set".
+
+OK so the design:
+
+**Part 1**: Add `flagged` to snapshot JSON. Each entry: path + score + rank. I'll make it an array of {path, score, rank, signals?}. Keep it simple: path, score, rank. Actually — should `flagged` be just top_10 with ranks, or ALL scored files? Task: "Add a `flagged` field (array of file paths) to the snapshot ... Each entry: the file path + the rank/score it got at snapshot time."
+
+Since predictions are top-10, and the snapshot already has top_10, `flagged` should probably be the top-10 with rank info (1-based). But then "the file itself carries what it predicted, forever" — the ranked list of predictions with scores. The snapshot write has `risks: &[FileRisk]` sorted. So `flagged` = each of top-10 (or all?) with rank + path + score.
+
+Hmm, "array of file paths" — each entry is a file path + rank + score. The top-10 read is done via `parse_all_snapshots` reading `top_10[].path`. For `flagged_files_for` I need to parse `flagged[].path` with rank/score ordering: "union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)".
+
+So `flagged` in the snapshot = the full ranked list? Or just top-10? Given the union ordering is by score and the snapshot's risks are already sorted by score desc, flagged should include all scored files (so a surprise file like commands_risk_accuracy.rs with a low score is in the flagged set with its rank/score). Hmm wait — but then EVERY src file would be in the flagged set (since all src/*.rs are scored), making "flagged" meaningless as a filter — then any changed src file would match!
+
+Let me think about the pair criteria again: "(a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit or surprise)". If flagged_files_for returns ALL scored src files, then every changed src file matches and pairs = number of distinct src files changed across events: day172: 3 files, day174: 3 files (+clI.rs), day175: 1 (update.rs) — but update.rs — was it scored? total_scored=77; update.rs is src/update.rs so yes! So pairs would be 1(171) + 3(172) + 3(174) + 1(175) = way more. That's not discriminating.
+
+The intent must be: `flagged` = the files the scorer *flagged as high-risk* = the top-10 (the prediction). The union across snapshots ≤ day then covers the case where a file was predicted by SOME snapshot even if not the exact last one — recovering old signal. So `flagged` = top_10 entries (path+score+rank). That makes `flagged_files_for(day)` = union of top-10 paths across snapshots ≤ day (with score ordering for the ordered set).
+
+Actually hmm, then `flagged` is redundant with `top_10`... except it adds rank+score per file and, importantly, is a *durable per-file matrix* the task wants. The union recovery is the point: a file that appeared in ANY snapshot's top-10 up to the event day counts as "flagged" at the time of that event's prediction. The "lost early signal" was: day-172/174 events' changed files — wait no. Let me recheck with python: day 172 union includes commands_risk.rs and commands_risk_snapshots.rs (both hits). The pair counter already counts events with scored_broke>0, so 172 and 174 already count as pairs in the current meter (3 pairs: 172, 174, 175 — wait 175 has scored_broke=1 so it counts too).
+
+Hmm wait — actually the CURRENT meter already shows pairs=3. Where does pairs come from? `compute_risk_meter`: `pairs = validations.filter(scored_broke > 0).count()` = 3 (172, 174, 175). So the 3/5 already. But 171 (which has hits but no scored fields) is not counted. The task says the meter was at 0/5 — that was the state when the task was written; it's now 3/5. And day 175's pair counts even though it was a *miss* (hits=[], surprise update.rs) — the current criteria is "scored_broke > 0" which doesn't require a HIT. The new criteria requires a flagged file that changed — which 175 does NOT satisfy (update.rs never in top-10) → so with new counting: day 171 hits commands_risk.rs flagged? Need check ≤171 union. Let me verify via python: day 171 union includes commands_risk.rs (yes per my earlier run). Day 172: 2 flagged hits. Day 174: 2 flagged hits. Day 175: none. Total = 1+2+2+0 = 5. → 5/5! The counter moves off 0 (well, from 3 to 5) and hits the milestone!
+
+Wait, but is counting day-171's hit valid? Day 171's event is in the OLD format with noise surprises. Its hit src/commands_risk.rs — was it in the top-10 at the time? The event's predicted_count=10. Union ≤171 contains commands_risk.rs per python. So yes, it counts as a matched pair: a file that was flagged (in some snapshot ≤ day 171) and that changed (it's in the event's hits = changed files).
+
+Hold on, one more subtlety: the union uses snapshots up to AND including the event's day. The event on day 171 has git_hash_from=d76b695, git_hash_to=c96395b. The snapshot used for the replay prediction was the last snapshot BEFORE those commits — likely recorded on day 170 or 171. Using snapshots with `day <= 171` may include snapshots recorded *during* day 171 (after the event). That's slightly generous but acceptable as a recovery heuristic — the task says "filter entries with `day <= given day`".
+
+Hmm, actually should it be strictly `< event day`? The task says "filter entries with `day <= given day`, union their `flagged` paths" — explicit `<=`. I'll follow the spec.
+
+**Now the implementation plan:**
+
+1. **`build_risk_snapshot_json`** (commands_risk_snapshots.rs:32): add `flagged` array. Each entry: `{path, score, rank}` for the top-10 (rank = 1-based index). Keep `top_10` as-is for backward compat.
+
+Wait — but should `flagged` include all scored files with their full scores? The task: "Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`...). Each entry: the file path + the rank/score it got at snapshot time."
+
+"the file path + the rank/score it got at snapshot time" — each entry = path + rank + score. For top-10 that's the rank (1-10) + score. For a full scored list, the rank = position in scored order. I think the intent is the scored universe is the "flagged" universe only for high-risk files... 
+
+Let me look at how it's *used*: "Used by the replay-validation path and the calibration verdict" — `flagged_files_for(day)` returns "only `src/` files present" (from tests: "only `src/` files present"). And "Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+And test: "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)." — "flagged in an old snapshot of that day" → the file was in the snapshot's flagged list.
+
+And: "Fixture with non-`src/` churn (`CLAUDE.md`, `DAY_COUNT`, commit-subject strings) proves those never become pairs." → non-src files must be excluded by flagged_files_for (only src/ files in the set).
+
+Decision: `flagged` = the top-10 predictions with `{path, score, rank}` (rank 1-based). This matches "the file path + the rank/score it got at snapshot time" — the rank it got among predictions and its score. `flagged_files_for` then unions paths from `flagged` arrays, keeping the highest-score-first ordering, newest snapshot tie-break. This makes "flagged" == "was predicted top-10 at some point ≤ day", which is a coherent recovery definition of "the file was flagged."
+
+Wait, but then for pair counting day 172: `src/commands_risk_accuracy.rs` was a surprise — NOT in the flagged union — so no pair for it. Good, that's discriminating. And changed files that ARE matched: only those ever top-10'd. 
+
+2. **`flagged_files_for(day: u64) -> Vec<String>`** — parse snapshot JSONL (default path), filter day <= given, union flagged paths ordered by (score desc, newest snapshot first on ties). Only include src/ files? The test says "only `src/` files present" — but top-10 should only contain src/ files anyway (scorer scores src files). I'll filter defensively to src/ anyway? Hmm — wait actually, can top_10 contain non-src? `compute_file_risk_scores` scores src/*.rs files only. So top_10 is all src/. But the flagged union might contain non-src if data was hand-written; filter for safety per the test.
+
+Ordering: "highest score first; later snapshots tie-break". So the set has entries (path, score, snapshot_index). Sort by score desc, then by snapshot recency desc.
+
+3. **Pair counting**: change `compute_risk_meter`'s pairs computation to use the persistent flagged set. Currently:
+```rust
+let pairs = validations
+    .iter()
+    .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+    .count() as u64;
+```
+But `parse_validation_events` loses file identities! So I can't count per-file pairs from `validations`. I need the raw validation content. `compute_risk_meter(snapshot_content, validation_content)` has both. 
+
+But `into_risk_meter(pairs, ...)` receives pairs as an argument, and `calibration_verdict(pairs, validations)` gets pairs separately. The verdict path is fine — it takes pairs as input.
+
+So I'll add a new function `count_matched_pairs(snapshot_content, validation_content) -> u64` that:
+- parses snapshots via `parse_all_snapshots` (for day ordering) — but I need flagged per snapshot with scores... `parse_all_snapshots` returns `ParsedSnapshot { day, git_hash, predicted }` — no scores. For ordering "highest score first" I need scores from the raw snapshot JSONL. Hmm.
+
+Options: 
+- Write a separate raw parse for flagged entries (path, score) from the snapshot content.
+- Or extend `ParsedSnapshot` with optional `flagged: Vec<(String, f64)>` — additive field. parse_all_snapshots is read by other code; adding a field means updating construction sites (there might be tests constructing ParsedSnapshot). Let me check.
+
+Actually, simpler: `flagged_files_for(day)` reads the raw snapshot JSONL itself (it takes no content parameter — "read the risk snapshot JSONL, filter entries with `day <= given day`"). So it does its own parsing. For the meter, I can call a content-based variant.
+
+Let me design the pair counting cleanly:
+
+```rust
+/// Per-file matched pair counting: a file counts as one matched
+/// prediction-outcome pair for a validation event when it was flagged
+/// (persistent flagged set up to the event's day) AND the event's
+/// changed-files contained it.
+fn count_matched_pairs(snapshot_content: &str, validation_content: &str) -> u64 {
+    // events with their day + changed file identities (hits ∪ surprises), src only
+    struct RawEvent { day: u64, changed: Vec<String> }
+    let events: Vec<RawEvent> = parse raw validation lines;
+    let mut pairs = 0;
+    let mut counted: HashSet<(u64, String)> = HashSet::new(); // dedupe: same file counted once per day? or once total?
+    for e in events {
+        let flagged = flagged_files_from(snapshot_content, e.day);
+        for f in e.changed {
+            if flagged.contains(f) && !counted.contains(&(e.day, f)) {
+                pairs += 1;
+                counted.insert((e.day, f));
+            }
+        }
+    }
+    pairs
+}
+```
+
+Dedupe consideration: the events are distinct (day 172 and 174 have DIFFERENT git_hash spans but both list commands_risk.rs and commands_risk_snapshots.rs as hits — same file matching twice across two events). Should they count as 2 pairs or 1? The dream milestone: "≥5 matched prediction-outcome pairs". Each event is a separate observation (separate snapshot→commits span), so the same file breaking in two different spans is two observations → count both. The task: "a validation event whose changed-files contained that file (hit or surprise)" — per event per file. So no dedup across events needed. But the task test says "Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)". OK.
+
+But wait — should pairs be counted per distinct file per event, or per event? "a paired prediction requires: (a) the file was flagged, (b) a validation event whose changed-files contained that file". So each (event, file) where file is flagged and changed = 1 pair. Day 172: commands_risk.rs + commands_risk_snapshots.rs = 2 pairs. Day 174: same 2 = 2 pairs. Day 171: commands_risk.rs = 1 pair. Day 175: none. Total 5. 
+
+Now the ordering/score for flagged: I need to parse flagged from snapshot JSONL with scores. Let me define:
+
+```rust
+/// Parse `flagged` entries from snapshot JSONL content, filtering `day <= given_day`.
+/// Returns paths ordered highest score first (newest snapshot tie-breaks).
+fn flagged_files_from(content: &str, given_day: u64) -> Vec<String>
+```
+
+And `flagged_files_for(day)` = `flagged_files_from(read_default, day)`.
+
+Parse: for each line, day value; if day > given_day skip; collect flagged array entries {path, score}; also fall back to top_10 if flagged absent (backward compat with old snapshots that don't have flagged! Important: existing 97 snapshots have no `flagged` field — `flagged_files_for` must fall back to `top_10` so the union recovery works for the historical events!). Yes — the whole point is recovering from OLD snapshots, so the parser must read `top_10` when `flagged` is absent.
+
+For ordering: collect entries as (path, score, snapshot_index) where snapshot_index = order in file (later = newer). Sort by score desc, then snapshot_index desc. Dedup keeping the best (highest score; on equal score, newest). Build ordered Vec<String>.
+
+Hmm wait — files may appear in multiple snapshots with different scores. "union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)". So for each path, take its max score (or its score from the newest snapshot? "later snapshots tie-break" suggests ties in score are broken by later snapshot). I'll implement: iterate snapshots in order (old→new), for each flagged entry, if path not yet in map, insert (path, score, snapshot_idx); if present, update... hmm. Let me think: we want highest score first; for ties, later snapshot wins. Simplest: for each path, keep (best_score, newest_idx_for_that_score). When adding an entry for an already-seen path: if score > best_score, update best; if score == best_score and idx newer, update idx. Then sort by (score desc, idx desc). That matches "highest score first; later snapshots tie-break".
+
+Actually simpler interpretation: the newest snapshot's flagged entries take precedence, and higher-scored files sort first. Let me just do: iterate snapshots in file order (newest last); for each path in each snapshot's flagged, unconditionally overwrite the path's (score, idx) — because "later snapshots tie-break" and generally later = fresher signal. Hmm but then a file flagged with score 0.3 in newest but 0.73 in older would sort by 0.3? That loses the "highest score first" requirement.
+
+Safest combined: keep max score, and for tie-break prefer newer snapshot. Implement as described above.
+
+4. **Wire into the meter**: `compute_risk_meter` computes pairs via `count_matched_pairs(snapshot_content, validation_content)`.
+
+But wait — `compute_risk_meter`'s current pairs semantics ("validations whose scored_broke present and > 0") is also used in tests:
+- `test_write_risk_meter_to_...` (line ~1490): fixture snapshot `{"day":174,...,"top_10":[{"path":"src/c.rs"}]}` + validation `{"day":174,"hits":["src/c.rs"],"surprises":[]...}` → expects pairs == 1. With new counting: snapshot day 174 flags src/c.rs (via top_10 fallback). Validation day 174 changed = [src/c.rs]. It's flagged → 1 pair. ✓
+- Other tests using `into_risk_meter` with synthetic pairs — fine.
+
+5. **`calibration_verdict`** — the task says "Change the pair-count criteria in the verdict path". The verdict takes `pairs` + validations. The pairs now come from the new counting. The verdict itself: when pairs >= 5, it pools rates using the lift fields. For the current data, with pairs = 5, it would compute the calibrated readout from events with all three lift fields (day 172, 174, 175). flagged_broke_sum = hit_count sum = 2+2+0 = 4; flagged_pop_sum = 10+10+10 = 30 → 13.3%; unflagged_broke = scored_broke - hits = 1+1+1 = 3; unflagged_pop = 77-10 = 67 ×3 = 201 → 1.5%; perceives = 13.3 > 1.5 = true! "perceives churn; pooled accuracy = hits/changed = 4/7 = 57%". Nice — that's a real calibrated readout. 
+
+But hmm — is it *right* to include day 175 (which had 0 hits — all miss)? It has all 3 lift fields so it gets pooled. That's the existing behavior of `compute_accuracy_stats` too (any event with the lift fields is usable). Fine — honest: miss events deflate the rates.
+
+Also need to check the "no usable scored population yet" branch — with day 171 excluded (no lift fields), flagged_pop 30, unflagged_pop 201 → usable. Good.
+
+Now — does anything else consume pairs from a different path? `commands_risk.rs:330` reads the meter file and displays. `format_accuracy_report` uses `lift_events_used` (grep: `let pairs = stats.lift_events_used;` line 251) — this is the accuracy reader; task says don't change accuracy readers. Show `3/5` there — the accuracy report's pairs is a different counter (events carrying lift fields). Hmm — is that inconsistent? The meter shows 5/5 but accuracy report shows 3/5. That's a visible inconsistency in `arc risk` output. But the task says: "Do not change `... any accuracy reader unless a correctness bug is found — prefer additive fields." Changing `lift_events_used` to the per-file pair count would change accuracy reader semantics. I'll leave it but consider... Actually wait — let me re-read: "Reuse the snapshot's `flagged` field directly where the snapshot is already loaded. The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events". The counter in question is the verdict/meter line ("calibration: cold start — N/5 paired predictions, accumulating"). That's the meter. The accuracy report's "Pairs: N/5" is a different line but also displays pairs. Hmm.
+
+Let me check what `handle_risk` shows for the meter — commands_risk.rs:330. Let me look at the risk command's snapshot/validate output and whether it uses write_risk_meter and format_accuracy_report. I'll check how `arc risk` displays. Actually — minimal scope: change `compute_risk_meter` pairs. The accuracy report keeps its own count. But inconsistency might look like a bug... The task explicitly scopes: verdict path. The success check: "Check `arc risk meter` (or the pure verdict test) shows the pair counter moving off 0." `arc risk meter` reads `.arc/risk_meter.json` which is written by `write_risk_meter_to` → `compute_risk_meter`. So the meter is the target. Good.
+
+Now where's `arc risk meter` handled? Let me check handle_risk in commands_risk.rs for "meter" subcommand and where write_risk_meter is called from. Also, I should verify the test for flagged_files_for ordering.
+
+6. **`write_validation_event`** stays unchanged (append-only; old events keep their shape). New snapshots get `flagged`.
+
+Wait — should I also persist per-file hits info in the validation event? The task's part 1 says persist per-file hits into the *snapshot* (flagged). Events already have hits/surprises file lists. OK.
+
+7. **`ParsedSnapshot`** — should I add `flagged` to it? For the replay-validation path (part 3 "Reuse the snapshot's `flagged` field directly where the snapshot is already loaded") — hmm, "where the snapshot is already loaded" refers to paths that already parse snapshots. The replay path uses `parse_all_snapshots` → `last.predicted`. There's no pair counting in the replay path (it writes events). The verdict path (meter) loads snapshots via parse_all_snapshots and validations via parse_validation_events — but count_matched_pairs will do its own raw parse. That's fine.
+
+Actually, let me reconsider whether to reuse `parse_all_snapshots` + new fields. The cleanest minimal approach:
+
+- Add `flagged: Vec<String>` (paths) or `flags: Vec<FlaggedEntry>` to `ParsedSnapshot`? `parse_all_snapshots` construction happens in one place (line 467). Tests might construct ParsedSnapshot... let me grep. Actually I'll keep `parse_all_snapshots` untouched and write a dedicated parser for the flagged union in commands_risk_snapshots.rs. That's additive and low-risk.
+
+Let me now also double check: the task says the new helper `flagged_files_for(day: u64) -> Vec<String>` — "read the risk snapshot JSONL" — signature reads the DEFAULT path. And the test wants a pure function over content presumably. I'll implement:
+
+```rust
+pub(crate) fn flagged_files_for(day: u64) -> Vec<String> {
+    let content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+    flagged_files_from(&content, day)
+}
+
+/// Pure core: parse snapshot JSONL content and union `flagged`/`top_10` paths
+/// for snapshots with `day <= given_day`, ordered highest score first
+/// (newest snapshot tie-breaks). Only src/ files are kept.
+fn flagged_files_from(content: &str, given_day: u64) -> Vec<String>
+```
+
+And pair counting:
+
+```rust
+/// Count matched prediction-outcome pairs from the two ledger contents:
+/// a pair = (validation event, changed file) where the file is in the
+/// persistent flagged set for the event's day (i.e. it was predicted
+/// high-risk in some snapshot up to that day AND it changed in that event's
+/// span). Only src/ source files count; non-source churn can never pair.
+pub(crate) fn count_matched_pairs(snapshot_content: &str, validation_content: &str) -> u64
+```
+
+Then `compute_risk_meter`:
+```rust
+let pairs = count_matched_pairs(snapshot_content, validation_content);
+```
+
+Wait — but there's a subtlety: `compute_risk_meter`'s pairs fed `calibration_verdict` which pools rates using the lift-field events. If pairs>=5 the verdict quotes rates from events with lift fields. Fine.
+
+But hold on — currently pairs=3 means the meter says "3/5 paired predictions, accumulating" — cold start. With new counting pairs=5 → calibrated readout "flagged files broke at 13% vs unflagged 2% (perceives churn; pooled accuracy 57%)". That's a huge milestone — the dream milestone reached! But is it *legitimate*? The union-recovery counts day-171's hit (old noise event) — the hit src/commands_risk.rs IS legit (it's a real scored src file that was changed and was flagged in a snapshot ≤171). Day 172/174 hits: 4 more. That's honest recovery.
+
+Hmm wait — actually let me double-check day 171's hit more carefully. The event day-171 surprises include commit-subject noise. The hits = [src/commands_risk.rs]. Was commands_risk.rs in the top-10 of the actual prediction snapshot used on day 171? My python: day 171 flagged union includes src/commands_risk.rs. But was it flagged in a snapshot *before* the event was written (i.e., the prediction) or during day 171 after? Snapshots ≤ 171 — the event was written 2026-08-19T09:20:10Z on day 171. Snapshots recorded on day 171 before that ts? Let me not over-analyze — the task explicitly directs `day <= given day` union. Follow that.
+
+Actually — wait. There's a risk of *unintentionally* counting a file that was flagged only after the event (a snapshot written later the same day). Minor; acceptable recovery heuristic per task instructions. And the existing data: day 171 snapshot... let me check what snapshots exist with day 171 and their ts. Let me just check quickly.
+
+Also let me reconsider the "5" result — is counting both day-172 AND day-174 hits (same 2 files) as 4 pairs double-counting? Two separate observation spans (different git_hash_from/to). The dream wants matched prediction-outcome pairs = observations of "flagged file broke". Two separate spans = 2 observations each. I think per-(event, file) counting is right.
+
+OK. Now, let me also handle: should `count_matched_pairs` count each matched file once per event (dedupe within event)? An event's changed files (hits ∪ surprises) are distinct files from git name-only + classify, so no within-event dupes. Fine.
+
+Let me now write the code. First, check pseduo for `flagged` in build_risk_snapshot_json. The risks slice is sorted (from compute_file_risk_scores presumably sorted desc by score). Let me verify the sort — check compute_file_risk_scores return. Let me search for the sort in commands_risk.rs.
+
+Also — `handle_risk_snapshot` (line 1366) calls build_risk_snapshot_json with risks sorted — let me confirm the sort order there: `compute_file_risk_scores()` returns sorted desc by score. Let me check.
+
+Then the tests:
+1. `flagged_files_from` unit test: fixture JSONL with two snapshots (day 170 flags src/a.rs score 0.5; day 175 flags src/b.rs score 0.8 and src/a.rs score 0.4) → flagged_files_for(172) should = [src/a.rs] only; flagged_files_from(content, 200) = [src/b.rs, src/a.rs] (highest score first; a.rs newest tie...). Also non-src entries excluded, and top_10 fallback when flagged absent.
+2. Pair count fixture test: snapshot with day-172/174 style + validation events; assert pairs >= 1 and non-src churn never pairs.
+3. Regression: update existing `test_write_risk_meter` fixture? Current fixture: snapshot day 174 top_10=[src/c.rs], validation day 174 hits=[src/c.rs] → new counting: 1 pair ✓ (existing test still passes as long as count_matched_pairs returns 1 for it).
+
+Let me check the existing meter tests that might break: `compute_risk_meter` tests — grep for compute_risk_meter in tests.
+
+Let me look at remaining test code in commands_risk_snapshots.rs tests and check for compute_risk_meter usage in tests. And I need to double check `into_risk_meter` is called with the pairs computed by count_matched_pairs.
+
+Let me now also think about whether `flagged_files_for` should be pub(crate) and re-exported (task: "New helper (commands_risk_snapshots.rs, pub(crate), re-exported)"). Re-exported where? From commands_risk (the re-export list at line 12-16). Let me check the re-export list.
+
+Let me gather these remaining bits.
+────────────────────────────────────────────────────────────────────────────────
+I now have a clear picture. Let me check a few remaining details: the re-export list, sort order of risks, meter computation tests, and the handle_risk "meter" path.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1,30p' src/commands_risk.r…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "compute_risk_meter\|into_… ✓ (6ms)
+ ✓ (11ms)
+  2 tools completed in 850ms (2 ✓)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '1295,1335p' src/commands_r… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have the full picture. Key facts:
+
+1. Risks are sorted descending by score (then path ascending for determinism).
+2. `compute_risk_meter(snapshot_content, validation_content)` computes pairs as events with `scored_broke > 0`. Currently day-172, 174, 175 events have scored_broke → pairs=3.
+3. `build_risk_snapshot_json(risks, day, git_hash)` writes `top_10`, and risks are already sorted.
+4. `parse_all_snapshots` parses `top_10` paths into `predicted`.
+5. Re-export list in commands_risk.rs line 12-16.
+
+My plan:
+1. Part 1: Add `flagged` field to `build_risk_snapshot_json` — array of `{path, rank, score}` entries for ALL scored files (or at least all scored files — `risks` is the full scored list, sorted). Wait — but "flagged" per the task means "the file was flagged as high-risk at snapshot time". Hmm. Re-reading:
+
+"Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever."
+
+So `flagged` = array of entries with path + rank + score. Question: which files? "the file path + the rank/score it got at snapshot time". The whole scored universe has ranks (1..N). If we persist all scored files, then `flagged_files_for` union = full scored universe, and then EVERY surprise in the scored universe would be a "match" — which would make surprising files counts too. Hmm, but wait, the task says:
+
+"3. **Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise)."
+
+Hmm, so a pair = (file that was flagged at snapshot time) ∩ (file that changed). But if `flagged` includes the whole scored universe, then (a) is trivially true for any scored file, and the pair count would be = number of validation events with scores changed files... Let me reconsider.
+
+Actually I think "flagged" should mean "flagged as high-risk" — the top-N. Let me re-read the "Why":
+
+- "The surprise lists of the day-171 and day-175 events are visibly noise-laden (CLAUDE.md, DAY_COUNT, .skill_evolve_counter, commit-subject strings)."
+- "compute_validation already filters surprises through is_scored_file (src/ + .rs), but parse_validation_events and compute_validation do not filter hits: a hit only counts if the changed file is in the top-N predictions, and the top-N is usually all src/ anyway."
+- "Real signal is being lost: when a changed source file was NOT in the predicted top-10 but *was* in the scored universe, it vanishes (hit_count 0 for both sides) and the pair counter never advances."
+
+So a "pair" = a changed file that was in the scored universe (i.e., was predicted/scored), and we KNOW its prediction. The current hit-based counting requires the file to be in top-10 predictions. The fix: use the persistent flagged set. If we persist the WHOLE scored universe with ranks, then any src/ file that changed and was in the scored universe becomes a recoverable pair.
+
+Day-175 event: changed = src/update.rs, surprise. Current: hits=0, surprises=1, scored_broke=1 → pair counter counts it (scored_broke>0 → pairs=3 already includes day-175). Wait, current pairs=3 includes day 175 since scored_broke=1>0. Hmm, so what does "move the N/5 counter off 0" mean? The meter currently shows 3/5. Let me re-read the task...
+
+"The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events — without ever rewriting .arc/risk_validations.jsonl"
+
+Hmm, so they think the counter is at 0? But we observed `.arc/risk_meter.json` showing pairs=3. The task was perhaps written from an assumption. But the task says "pair-count and accuracy must be computed from the same filtered, per-file signal used at write time — recovering the pairs locked in old noisy events instead of discarding them."
+
+OK here's the thing — the current pairs=3 counts events (day 172, 174, 175) that have scored_broke>0. But the task's notion of a pair is per-file: a (predicted file, outcome) pair. The real question for the verdict: how many matched prediction-outcome pairs do we have? With per-file counting:
+- Day 172 event: hits = [src/commands_risk.rs, src/commands_risk_snapshots.rs], surprise = [src/commands_risk_accuracy.rs]. All three are src/ files; in the scored universe. All were flagged (in top_10 of snapshots <= 172? commands_risk_accuracy.rs was top-10 in later snapshots; need to check day<=172). Let me check whether src/commands_risk_accuracy.rs was in top_10 union as of day 172.
+
+From my earlier python: day 172 changed_src = [src/commands_risk.rs, src/commands_risk_accuracy.rs, src/commands_risk_snapshots.rs] and in_top10_union... the output got truncated ("... (2 more similar lines)"). Let me rerun that to see.
+
+Actually the key insight: with the full scored universe persisted in `flagged` (path + rank + score), then `flagged_files_for(day)` returns ALL scored files, and any changed src/ file that's in the scored universe forms a pair. The day-172/174 events' changed files (all src/) would all be in the scored universe. So pairs would count per-file: day-172 → 3 files × ... hmm, but wait — the changed files ARE the outcomes. So the pair count = number of (changed file ∩ scored universe) associations.
+
+But then the counter would jump well past 5 — the verdict would become "calibrated" immediately and start making accuracy claims. Is that the intent? The task says "The goal: move the N/5 paired predictions, accumulating counter off 0". With 3 events having changed src files all in the scored universe, the pair count becomes at least 3 (day 172: 3 files, day 174: 3 files, day 175: 1 file = 7 pairs... plus day 175's src/update.rs — is update.rs in the scored universe as of day 175? total_scored=77 says the scored universe had 77 files then. Very likely yes).
+
+Hmm wait, but is this the right semantics? A "matched pair" per the dream = "a prediction AND its outcome". The file was predicted (it's in the scored universe with a rank/score) AND the outcome was observed (the file changed in a session). The rank matters for whether it was "flagged high-risk" vs not. But the dream's milestone says "measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones". That needs the flagged/unflagged split.
+
+Hmm, let me be more careful. The task explicitly says:
+
+"3. **Pair counting using the persistent flagged set.** Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+So: pair requires (a) file was flagged — via `flagged_files_for(day)` — AND (b) a validation event whose changed files contained that file (hit or surprise).
+
+Hmm — "the file was flagged" — the task's test spec:
+
+"- `flagged_files_for` returns the union across snapshots, newest inclusion wins, only `src/` files present."
+"- Pair count moves from 0 to ≥1 for an artificial fixture mimicking day-172/174 events (a source file changed, in the scored universe, flagged in an old snapshot of that day)."
+"- Fixture with non-`src/` churn (CLAUDE.md, DAY_COUNT, commit-subject strings) proves those never become pairs."
+
+So "flagged in an old snapshot of that day" — so `flagged` = top-N? "a source file changed, in the scored universe, flagged in an old snapshot of that day". This says the source file was "flagged in an old snapshot of that day". So flagged = the file appears in some snapshot's flagged list with day <= event day.
+
+Hmm OK so what IS the `flagged` field content? Given `flagged_files_for` "union their flagged paths into an ordered set (highest score first...)", the flagged list per snapshot is ordered by score. If flags = top-N (the high-risk flags), then for the day-172 fixture, the changed file src/commands_risk_accuracy.rs must have been in the top-10 of some snapshot on day<=172 for it to count. Let me check the actual data: was src/commands_risk_accuracy.rs in the top-10 union as of day 172?
+
+Let me check precisely. Also src/update.rs for day 175.
+
+From the python run truncated output, I need to rerun. Let me do that.
+
+Also "the top-N is usually all src/ anyway" — hmm, that phrase suggests the writer thinks top-10 is a large fraction of the scored universe... no wait, "a hit only counts if the changed file is in the top-N predictions, and the top-N is usually all src/ anyway" — that doesn't parse well. Maybe it means "if the changed file isn't in top-10, it's classified as a surprise; surprises are usually all src/ (after filtering)". Hmm. Actually I think there's a subtlety: the surprise classification means the file WAS in the scored universe (else filtered by is_scored_file), but NOT in top-10. So "the top-N is usually all src/ anyway" might be sloppy phrasing.
+
+Let me look at the actual data to decide: which changed files from the 4 events would be in some snapshot's top-10 as of their day?
+
+Let me compute this properly.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (16 lines) ✓ (32ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (15 lines) ✓ (29ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (9 lines) ✓ (32ms)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (7 lines) ✓ (30ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (7 lines) ✓ (31ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -30 .arc/… (7 lines) ✓ (28ms)
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -30 .arc/… (7 lines) ✓ (27ms)
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && tail -30 .arc/… (7 lines) ✓ (30ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There are 3 snapshots on day 171 and 172 (up to 4 on 174). So multiple snapshots per day.
+
+Now, I have all the facts I need. Let me finalize the design.
+
+**Design (additive, minimal, honest):**
+
+1. **Part 1 — persist per-file `flagged` list in each snapshot:** `build_risk_snapshot_json` adds `"flagged": [{"path": ..., "score": ...}, ...]` — the full scored-ordered top-N (actually the full `risks` list, or top 10?). The task says "Each entry: the file path + the rank/score it got at snapshot time. Then the file itself carries what it predicted, forever." 
+
+   Since snapshots currently store only top_10, and old snapshots lack `flagged`, the `flagged` field going forward should carry enough signal. The task's `flagged_files_for` says "union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)". So flagged is the set of files that the snapshot considered "flagged". 
+
+   To make `flagged_files_for` work for OLD snapshots too (pre-D177), we need it to fall back to `top_10` paths when `flagged` is absent. That's the key to recovering day-172/174 pairs. But wait — the whole premise of the task is that a file changed but was NOT in the top-10 yet still in the scored universe should count. If old snapshots only have top_10, then `flagged_files_for` on old snapshots can only recover top_10-flagging. The new `flagged` field (from Day 177 onward) will carry the FULL scored universe (all scored files with scores), so future events can match any scored file.
+
+   Hmm, but then for days 171/172/174, the recovery is only meaningful for files in top_10: e.g. day 172 event changed src/commands_risk_accuracy.rs — was that in day<=172 top_10? day 172 event surprises contain 'src/commands_risk_accuracy.rs'. In my earlier check "day 172: changed_src=[...] in some snapshot's top_10 (day<=172)" — the output got truncated by the terminal, let me recheck.
+
+Let me re-run the check for day 172 and 174 with explicit output.
+
+Actually, my earlier python script output showed 2 truncated lines. Let me rerun it cleanly for days 172, 174.
+
+The key question is: with the new `flagged` union semantics (falling back to top_10 for old snapshots), does the pair count move off 0 for the REAL data? Per the task: "The goal: move the `N/5 paired predictions, accumulating` counter off 0 by counting real matched pairs recovered from the day-172/174 events". 
+
+So the pair count should become >= 1 when computing with real data. The simulation needs:
+- `flagged_files_for(day)` union over all snapshots with day <= given day.
+- For event day 172: changed src files = hits (commands_risk.rs, commands_risk_snapshots.rs) + surprises (commands_risk_accuracy.rs). All three are presumably in the day<=172 union (they're all big churn files, likely in top-10 repeatedly). So pairs=1 for event 172.
+- Event 174: same three files - likely also in union. pairs=2.
+- Event 175: src/update.rs — was it ever in top_10 by day 175? My earlier check said matched_flagged=[] → src/update.rs was NOT in any snapshot's top_10 by day 175. So event 175 → no pair.
+- Event 171: src/commands_risk.rs in union → but the old-format day-171 event has surprises = meta noise + src/commands_risk.rs as hit. Since the changed set contains src/commands_risk.rs which IS flagged → pair for 171 too.
+
+So with union-fallback semantics, the real pair count should be 3 (171, 172, 174). That's the "recovered" signal.
+
+For FULL recovery (also counting surprise files that were in the scored universe but not top_10), we'd need old snapshots to have the full scored list — they don't. Only top_10. So `flagged_files_for` must treat old snapshots' flagged = their top_10 paths (backward compat), and new snapshots' flagged = the full flagged list.
+
+Actually, should the NEW `flagged` field be the full scored universe (77 files) or just top-10? If it's the full scored universe, then `flagged_files_for` on a day-177+ snapshot returns ~77 paths — making "flagged" mean "scored", which dilutes the discrimination between flagged and unflagged (everything matches). Hmm.
+
+Wait, re-read the task: 
+
+"1. Persist per-file hits into the risk snapshot when each validation is generated. Add a `flagged` field (array of file paths) to the snapshot (`build_risk_snapshot_json`, commands_risk_snapshots.rs — includes `predicted`/`top_10` and, since the Day-177 lift work, `total_scored` + `scored_broke`). Each entry: the file path + the rank/score it got at snapshot time."
+
+Hmm, "includes predicted/top_10 and, since the Day-177 lift work, total_scored + scored_broke" — this phrasing seems garbled (total_scored/scored_broke are validation-event fields, not snapshot fields). I think the intent is: the snapshot already has top_10; add `flagged` as an additional field with per-file path + rank/score.
+
+"2. New helper ... `fn flagged_files_for(day: u64) -> Vec<String>` — read the risk snapshot JSONL, filter entries with `day <= given day`, union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)."
+
+So `flagged` is per-snapshot, and `flagged_files_for` unions across snapshots ≤ day. For old snapshots without `flagged`, fall back to top_10 paths (else the union is empty for old days and nothing is recovered — contradicting the goal).
+
+What should the new `flagged` field contain — top 10 or full scored list? The point of `flagged` = "files the scorer flagged as high-risk". The scorer's flagging output = the ordered risk list; the snapshot currently records top_10. I think the cleanest additive semantics: `flagged` = the same per-file entries as top_10 (path + score + rank), i.e. the files the snapshot flagged. That keeps "flagged" == "predicted" and matches the fallback for old snapshots. The task says "Each entry: the file path + the rank/score it got at snapshot time" — top-10 entries have path + score. 
+
+But then does the recover-real-pairs goal work? With flagged=top_10 for all snapshots (old via fallback, new via explicit), `flagged_files_for(day)` = union of top-10s up to that day. My simulation shows:
+- day 171: commands_risk.rs in union → pair
+- day 172: commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs — check if accuracy.rs in union
+- day 174: same
+- day 175: update.rs not in union → no pair
+
+So pairs = 3 with real data (if accuracy.rs is in the day≤172 union). The meter should move from 0 to 3 in the real `arc risk meter`. The current meter says pairs=3 already (via scored_broke>0 semantics — the OLD definition). Since the current meter shows 3, the task's concern "counter stuck at 0" — the current file shows 3. But the task statement says "0/5". These conflict. Whatever — the task says the goal is that the pair counter counts *matched pairs recovered from the day-172/174 events*, and to implement the new semantics. The important part is the semantics: a pair = a validation event whose changed scored files overlap the flagged union (as of that event's day).
+
+Hmm wait, let me reconsider: The task is explicit: "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise)."
+
+So the new pair criteria: for each validation event, for each changed scored file (hit or surprise, filtered to src/), if that file ∈ flagged_files_for(event.day) → that's a matched pair. Count unique (event, file) pairs? Or count events with ≥1 such file? "a paired prediction requires (a)+(b)" — each (flagged file, event where it changed) = one pair. The meter counts matched prediction-outcome pairs, so counting (file, event) pairs makes sense — each is a prediction (flagged file) matched to an outcome (it changed/broke).
+
+Hmm, but should it be per-file or per-event? "move the N/5 paired predictions counter off 0 by counting real matched pairs recovered from the day-172/174 events". Day 172 event: files commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs → 3 flagged files changed → 3 pairs from one event? Or 1 pair per event? 
+
+The current semantics count events (scored_broke>0). The calibration verdict uses `pairs` as a count and only quotes accuracy once ≥5. If per-file, day 172 gives 3, day 174 gives 3, day 171 gives 1 → 7 pairs → calibrated immediately — but with derived/hand-wavy accuracy. If per-event, day 171+172+174 = 3 events → still < 5.
+
+Given "≥5 matched prediction-outcome pairs" and "a paired prediction requires (a) the file was flagged, (b) a validation event whose changed-files contained that file" — this reads per-file: each flagged file that changed in a validation event is a matched pair. I'll implement per-file pairs: count of (flagged file ∩ event's changed scored files) across events, deduped (a file may appear in multiple events but the pair (file,event) is unique naturally; same file in two events = 2 pairs, which is fine — it was predicted twice and matched twice).
+
+Hmm, actually let me keep it simpler and more defensible: for each validation event with day D, count `|changed_scored_files ∩ flagged_files_for(D)|` and sum. That's the "persistent per-file hit matrix". A file flagged in snapshots up to D and changed → matched.
+
+But careful — `flagged_files_for(D)` for late days (e.g., new snapshots with full scored list) — if the new `flagged` field is the full scored universe (~77 files), then every changed scored file matches → pairs would inflate massively (each event with any src change = all its files match). That destroys discrimination ("flagged"=“scored” collapses the two populations). So `flagged` must be the top-N flagged list (top 10), matching the existing `predicted`/`top_10` semantics. New snapshots: flagged = top_10 entries with rank; old: fallback to top_10 paths.
+
+OK so `flagged` field = same as top_10 entries (path + score), maybe plus rank. And `flagged_files_for` unions paths from `flagged` (fallback `top_10`), ordered by score desc (snapshot JSONL order — last snapshot having highest priority for ties, but we sort by score).
+
+Let me now write the implementation plan:
+
+**Changes in `src/commands_risk_snapshots.rs`:**
+
+1. `build_risk_snapshot_json`: add `"flagged"` array mirroring top_10 entries (path, score, rank). Actually to keep it minimal, add rank to each flagged entry: `{"path": ..., "score": ..., "rank": i+1}`. The task says "the file path + the rank/score it got at snapshot time". Add both `score` and `rank`.
+
+2. `ParsedSnapshot`: add `pub(crate) flagged: Vec<String>` (ordered by score desc / snapshot order). Parse `flagged` if present; fallback to `predicted` (top_10 paths).
+
+3. New pure helper `pub(crate) fn flagged_files_from(content: &str, day: u64) -> Vec<String>`: parse all snapshots, filter `day <= given`, union paths in order (highest score first? snapshots store top_10 already sorted by score desc; union by iterating snapshots in order and appending unseen paths → first-seen wins; "later snapshots tie-break" — for ties in score, later snapshots' entries should win... but with a set-union "first wins" the earlier snapshot would win a tie. Hmm. The task: "union their `flagged` paths into an ordered set (highest score first; later snapshots tie-break)". So order = by score desc; for equal score, later snapshots win. That's odd for a union — "later snapshot wins" means if snapshot A (older) flags path X at score 0.5 and later snapshot B flags X at score 0.5, the tie-break prefers B's... path is the same, so it doesn't matter which snapshot it came from. "Later snapshots tie-break" probably just refers to ordering when the same path has different scores across snapshots — actually for a union set of paths, each path appears once. The ordering criterion "highest score first; later snapshots tie-break" matters for ordering the paths in the returned Vec (used for display/iteration). Simplest: collect paths with their max-or-latest score, sort by score desc then by first-appearance. Honestly the exact ordering only matters for display and for which file is "first" — the pair count is set-based. I'll implement: iterate snapshots in file order (chronological); build a map path → score using the *latest* snapshot's score (last-wins); then sort paths by score desc, tie-break alphabetical... Hmm but the task says "ordered set (highest score first; later snapshots tie-break)". 
+
+Let me not overthink: implement `flagged_files_from(content, day)` → Vec<String>: 
+- merge map path → best (highest) score across snapshots with day ≤ given; on equal score, later snapshot wins (i.e., use `>=` so later snapshot overwrites on tie) — actually to implement "later snapshots tie-break", use: `if !map.contains || snapshot.score > map.score || (snapshot.score == map.score && snapshot newer)`. Since we iterate in order, last-write-wins on ties: `if !map.contains(path) || score >= map[path].score { map[path] = score }`. And also record order.
+- Sort by score desc; tie-break by... snapshot recency. To keep it deterministic and simple, tie-break alphabetical. The pair-count logic doesn't care about order. I'll do score desc, then alphabetical.
+
+4. Pair counting: new function `compute_paired_predictions(snapshot_content: &str, validations: &[ValidationEvent]) -> u64`. For this we need per-event changed files — but `ValidationEvent` doesn't carry per-file hits/surprises! It only has hit_count/total_changed aggregates. 
+
+The task says: "Change the pair-count criteria in the verdict path (commands_risk_snapshots.rs) so a paired prediction requires: (a) the file was flagged (`flagged_files_for`), (b) a validation event whose changed-files contained that file (hit **or** surprise). Reuse the snapshot's `flagged` field directly where the snapshot is already loaded."
+
+So the verdict path needs per-file changed lists. But `ValidationEvent` (the parsed form) drops the per-file lists! parse_validation_events only keeps counts. So to count pairs, we need to parse the raw validation JSONL again and intersect with flagged_files_for(day).
+
+Options:
+- Add `changed_files: Vec<String>` to ValidationEvent (parsed from hits + surprises arrays). That changes the struct — additive field, existing constructors need updating (there are ~2-3 test constructors + the one in test + accuracy tests). Additive, backward compatible — all readers still work. The task says "Do not change parse_validation_events ... unless a correctness bug is found — prefer additive fields." Adding a field IS an additive change to the struct; parse_validation_events gains populating it. Hmm — "prefer additive fields" — adding `changed_files` to the struct is additive. But it says don't change parse_validation_events... adding a field to the struct it constructs is changing it. But it's the minimal way to get per-file data through the parser. Alternatively, keep ValidationEvent untouched and write a new parser for changed files: `parse_validation_changed_files(content) -> Vec<(u32, Vec<String>)>`: for each line, day + hits + surprises joined. That's fully additive — no struct change, no parser change.
+
+I'll do that: a small standalone parser `matched_pairs_from(snapshot_content, validation_content) -> u64` in commands_risk_snapshots.rs that:
+- parses snapshots → for each event day D, flagged set = union of flagged paths from snapshots with day ≤ D
+- parses raw validation lines → day + changed files (hits + surprises, filtered to `src/` + `.rs` — wait, surprises are already filtered by is_scored_file at write time in compute_validation; hits are predicted files which are always src/. Old day-171 event has surprises including meta noise (CLAUDE.md etc.) — those must be excluded. So filter changed files to is_scored_file: starts_with("src/") && ends_with(".rs"))
+
+Hmm, but is_scored_file is private in commands_risk.rs. I'll inline the predicate in commands_risk_snapshots.rs or export it. Task says don't change parse_validation_events etc. Exporting is_scored_file as pub(crate) is additive-safe. Actually simpler: filter `f.starts_with("src/") && f.ends_with(".rs")`.
+
+- count: union of (file,event) where file ∈ flagged(D) and file ∈ changed files of event with day D. Actually per (event, file) pair: iterate events, for each changed scored file f, if f ∈ flagged_files_for(day) → count += 1.
+
+5. `compute_risk_meter`: currently uses `validations.iter().filter(scored_broke>0).count()`. Change pairs to use the new matched-pairs computation. But compute_risk_meter takes snapshot_content AND validation_content — it has both! Great:
+
+```rust
+pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &str) -> RiskMeter {
+    let snapshots = parse_all_snapshots(snapshot_content);
+    let validations = parse_validation_events(validation_content);
+    let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+    let pairs = matched_pairs_from(snapshot_content, validation_content);
+    ...
+}
+```
+
+Wait — but the old pair semantics (scored_broke>0 events) counted 3 with real data. New semantics: events with ≥1 changed file in flagged union:
+- day 171: changed src files = [commands_risk.rs] ∈ flagged → +1 (if commands_risk.rs ∈ union of day≤171 snapshots' top_10)
+- day 172: [commands_risk.rs, commands_risk_snapshots.rs, commands_risk_accuracy.rs] — check union
+- day 174: same 3
+- day 175: [update.rs] not in union → 0
+
+Let me verify whether commands_risk_accuracy.rs appears in day≤172 union. I'll run the check.
+
+6. `calibration_verdict(pairs, validations)` — unchanged signature; it just receives the new pairs count. 
+
+But hold on: calibration_verdict's "calibrated" branch uses `validations` with lift fields. Fine.
+
+7. The verdict path when snapshot is loaded: "Reuse the snapshot's `flagged` field directly where the snapshot is already loaded." — refer to matched_pairs_from implementations detail: it re-parses snapshot content. Fine.
+
+8. `flagged_files_for(day)` — task names it `flagged_files_for(day: u64) -> Vec<String>` reading the risk snapshot JSONL from disk. I'll implement `pub(crate) fn flagged_files_for(day: u64) -> Vec<String>` that reads RISK_SNAPSHOT_PATH and calls a pure `flagged_files_from(content, day)`. And re-export.
+
+**Now the tests** (task-required):
+- `flagged_files_from` returns union across snapshots, newest inclusion wins, only src/ files present.
+- Pair count moves from 0 to ≥1 for fixture mimicking day-172/174 (source file changed, in scored universe, flagged in old snapshot of that day).
+- Fixture with non-src/ churn (CLAUDE.md, DAY_COUNT, commit-subject strings) proves those never become pairs.
+
+Also keep existing tests passing — compute_risk_meter test expects pairs=2 from scored_broke>0 semantics; new semantics may change that! Let me check the existing fixture:
+
+```
+snapshot: day170:[src/a.rs], day172:[src/b.rs], day174:[src/c.rs]
+validations:
+ day171: hits[], surprises[src/x.rs] → changed=[src/x.rs], flagged union(≤171)={src/a.rs} → x.rs not flagged → 0 pairs
+ day172: hits[src/b.rs] → b.rs ∈ union(≤172)={a.rs,b.rs} → +1
+ day173: hits[src/c.rs], surprises[src/z.rs] → c.rs ∈ union(≤173)={a.rs,b.rs,c.rs} → +1 (z.rs not flagged)
+ day174: hits[], surprises[] → 0
+```
+New pairs = 2 — same as old! Great, the fixture test stays green. But the assertion message says "only scored_broke > 0 events count as matched pairs" — semantics changed, so update the message/comment.
+
+Now, ParsedSnapshot gets a new field `flagged: Vec<String>` — parse_all_snapshots constructs it in tests? Let me check test usages of ParsedSnapshot literal construction. Search for `ParsedSnapshot {`.
+
+Also, build_risk_snapshot_json test — check existing tests asserting snapshot JSON shape (would need updating for the new `flagged` field). Let me search.
+
+Let me also double check: does anything construct `ValidationEvent {` besides the two test files? Line 1361 in commands_risk_snapshots.rs (lift_event helper in tests), and commands_risk_accuracy.rs tests (lines 350, 398). Those construct with all fields — we're NOT changing ValidationEvent, so fine.
+
+**Plan:**
+
+1. In `build_risk_snapshot_json`: add `flagged` array.
+2. In `ParsedSnapshot`: add `flagged: Vec<String>`; parse with fallback.
+3. Add `flagged_files_from(content, day)` pure fn + `flagged_files_for(day)` disk reader.
+4. Add `matched_pairs_from(snapshot_content, validation_content)`.
+5. Update `compute_risk_meter` to use matched_pairs_from.
+6. Re-export `flagged_files_for` from commands_risk.rs.
+7. Tests.
+8. cargo fmt/clippy/build/test.
+9. Also: since real data has old snapshots without `flagged`, the fallback to top_10 is what recovers day-172/174 pairs. After this change, `arc risk meter` should show pairs ≥ 1 (probably 3). Verify by... I can't easily run arc risk meter (needs API key? `arc risk snapshot/meter` — risk meter subcommand writes meter from files; may not need API key). Check: `cargo run -- risk meter`? Actually the CLI: `arc risk meter`? From dispatch_sub: "Routes `arc risk [snapshot|validate|history|predict|accuracy|effectiveness|--all]`". Is there a `meter` subcommand? Let me check handle_risk RISK_SUBCOMMANDS.
+
+Let me check RISK_SUBCOMMANDS and whether `arc risk meter` exists, and whether running it needs a model. handle_risk_snapshot calls compute_file_risk_scores which needs the repo — fine offline. Running `cargo run -- risk meter` would verify the real pair count. Let me check the subcommand list.
+
+Then commit.
+
+Let me look at remaining test sections and RISK_SUBCOMMANDS.
+────────────────────────────────────────────────────────────────────────────────
+I have a good picture now. Let me check a few remaining details: `RISK_SUBCOMMANDS` (is there a `meter` subcommand?), existing tests that construct ParsedSnapshot or assert snapshot JSON shape, and verify day-172/174 union membership.
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "RISK_SUBCOMMANDS" src/com…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "ParsedSnapshot {" src/ t…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 - <<'E… (16 lines) ✓ (12ms)
+ ✓ (14ms)
+ ✓ (34ms)
+  3 tools completed in 1.1s (3 ✓)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '800,930p' src/commands_ris… ✓ (6ms)
+
+
