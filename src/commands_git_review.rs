@@ -5,8 +5,8 @@
 //! through `commands_git_review` are unchanged.
 
 pub use crate::commands_review::{
-    build_review_prompt, build_review_prompt_structured, extract_review_json,
-    parse_review_comments, parse_review_effort, ReviewComment, ReviewEffort,
+    build_review_prompt, build_review_prompt_structured, extract_review_json, has_explicit_effort,
+    parse_review_comments, parse_review_effort, review_effort_hint, ReviewComment, ReviewEffort,
 };
 
 use crate::commands_session::auto_compact_if_needed;
@@ -235,6 +235,11 @@ pub async fn handle_review(
         Some((label, content)) => {
             if effort != ReviewEffort::Normal {
                 eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+            } else if remaining.is_empty() && !has_explicit_effort(arg) {
+                // First-impression contract: teach the effort switch when the
+                // user didn't pick one. `remaining.is_empty()` keeps it off when
+                // a target was given (no-arg is the discoverability moment).
+                eprintln!("{}", review_effort_hint());
             }
             let prompt = build_review_prompt(&label, &content, effort);
             run_prompt(agent, &prompt, session_total, model).await;

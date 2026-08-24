@@ -533,6 +533,21 @@ The `/review` command sends your code to the AI for a thorough review covering:
 /review Cargo.toml   # review any file
 ```
 
+Effort is a switch, and it can be given as a flag or a natural word:
+
+```
+/review --quick           # bugs & security only
+/review quick src/main.rs # same, positional word
+/review deep src/main.rs  # exhaustive review
+/review thorough HEAD~3..HEAD
+```
+
+Accepted effort words: `quick`/`fast`/`light` (Quick), `normal` (default),
+`thorough`/`deep`/`full` (Thorough). A path is never eaten as an effort —
+unknown words are treated as review targets, and a bare `/review` prints a
+dim hint (`review effort: --quick | --normal | --thorough (default: normal)`)
+when no effort is given.
+
 ### Non-interactive review (CLI subcommand)
 
 `arc review` also works as a CLI subcommand — no REPL or interactive session needed. This makes it usable in CI pipelines, git hooks, and scripts:

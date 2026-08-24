@@ -28,23 +28,57 @@ impl ReviewEffort {
     }
 }
 
-/// Parse effort flags from review input.
+/// Map a single whitespace-delimited token to an effort level, if it names one.
 ///
-/// Strips `--quick` or `--thorough` from the input and returns the
+/// Accepts both flags (`--quick`, `--normal`, `--thorough`) and natural
+/// positional words (`quick`, `normal`, `thorough` plus the synonyms
+/// `fast`/`light` → Quick and `deep`/`full` → Thorough). Matching is exact
+/// and case-sensitive, so a path like `quickstart.md` or `normal.c` is never
+/// eaten as an effort — unknown tokens return `None` and stay content.
+fn effort_for_token(token: &str) -> Option<ReviewEffort> {
+    match token {
+        "--quick" | "quick" | "fast" | "light" => Some(ReviewEffort::Quick),
+        "--normal" | "normal" => Some(ReviewEffort::Normal),
+        "--thorough" | "thorough" | "deep" | "full" => Some(ReviewEffort::Thorough),
+        _ => None,
+    }
+}
+
+/// Parse effort flags/words from review input.
+///
+/// Strips effort tokens (`--quick`, `--thorough`, or the positional words
+/// `quick`/`normal`/`thorough` and synonyms) from the input and returns the
 /// effort level plus the remaining argument string (file path, range, etc.).
+/// Unknown words are never an error — they are treated as review content.
 pub fn parse_review_effort(input: &str) -> (ReviewEffort, String) {
     let mut effort = ReviewEffort::Normal;
     let mut remaining_parts: Vec<&str> = Vec::new();
 
     for part in input.split_whitespace() {
-        match part {
-            "--quick" => effort = ReviewEffort::Quick,
-            "--thorough" => effort = ReviewEffort::Thorough,
-            _ => remaining_parts.push(part),
+        match effort_for_token(part) {
+            Some(e) => effort = e,
+            None => remaining_parts.push(part),
         }
     }
 
     (effort, remaining_parts.join(" "))
+}
+
+/// Whether the input names an effort level at all (flag or positional word).
+///
+/// Used to decide when to teach the surface: a plain `/review` or
+/// `/review src/lib.rs` (no effort given) should offer the switch, while
+/// `/review quick src/lib.rs` should stay quiet.
+pub fn has_explicit_effort(input: &str) -> bool {
+    input
+        .split_whitespace()
+        .any(|part| effort_for_token(part).is_some())
+}
+
+/// Dim-formatted hint teaching the effort surface, shown when the user gave
+/// no effort at all. Pure (returns the line) so it is unit-testable.
+pub fn review_effort_hint() -> String {
+    format!("{DIM}  review effort: --quick | --normal | --thorough (default: normal){RESET}")
 }
 
 /// Review criteria text for a given effort level.
@@ -568,6 +602,89 @@ mod tests {
         let (effort, remaining) = parse_review_effort("--quick --pr 42");
         assert_eq!(effort, ReviewEffort::Quick);
         assert_eq!(remaining, "--pr 42");
+    }
+
+    #[test]
+    fn test_parse_review_effort_positional_quick() {
+        let (effort, remaining) = parse_review_effort("quick");
+        assert_eq!(effort, ReviewEffort::Quick);
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn test_parse_review_effort_positional_normal() {
+        let (effort, remaining) = parse_review_effort("normal");
+        assert_eq!(effort, ReviewEffort::Normal);
+        assert_eq!(remaining, "");
+    }
+
+    #[test]
+    fn test_parse_review_effort_positional_thorough_with_file() {
+        let (effort, remaining) = parse_review_effort("deep src/lib.rs");
+        assert_eq!(effort, ReviewEffort::Thorough);
+        assert_eq!(remaining, "src/lib.rs");
+    }
+
+    #[test]
+    fn test_parse_review_effort_synonyms() {
+        assert_eq!(
+            parse_review_effort("fast"),
+            (ReviewEffort::Quick, String::new())
+        );
+        assert_eq!(
+            parse_review_effort("light"),
+            (ReviewEffort::Quick, String::new())
+        );
+        assert_eq!(
+            parse_review_effort("full"),
+            (ReviewEffort::Thorough, String::new())
+        );
+        // Synonym + flag later in the string: last one wins, content preserved
+        let (effort, remaining) = parse_review_effort("src/main.rs deep");
+        assert_eq!(effort, ReviewEffort::Thorough);
+        assert_eq!(remaining, "src/main.rs");
+    }
+
+    #[test]
+    fn test_parse_review_effort_path_is_content_not_effort() {
+        // A path is never eaten as an effort — content wins for unknown words.
+        let (effort, remaining) = parse_review_effort("src/lib.rs");
+        assert_eq!(effort, ReviewEffort::Normal);
+        assert_eq!(remaining, "src/lib.rs");
+    }
+
+    #[test]
+    fn test_parse_review_effort_unknown_word_is_content() {
+        // Unknown word is content and becomes the review target.
+        let (effort, remaining) = parse_review_effort("balanced");
+        assert_eq!(effort, ReviewEffort::Normal);
+        assert_eq!(remaining, "balanced");
+    }
+
+    #[test]
+    fn test_parse_review_effort_polymorphic_target_resolves_quick() {
+        let (effort, remaining) = parse_review_effort("quick HEAD~3..HEAD");
+        assert_eq!(effort, ReviewEffort::Quick);
+        assert_eq!(remaining, "HEAD~3..HEAD");
+    }
+
+    #[test]
+    fn test_has_explicit_effort() {
+        assert!(!has_explicit_effort(""));
+        assert!(!has_explicit_effort("src/lib.rs"));
+        assert!(has_explicit_effort("quick"));
+        assert!(has_explicit_effort("--thorough"));
+        assert!(has_explicit_effort("deep src/lib.rs"));
+        assert!(has_explicit_effort("full"));
+    }
+
+    #[test]
+    fn test_review_effort_hint_lists_surface() {
+        let hint = review_effort_hint();
+        assert!(hint.contains("--quick"));
+        assert!(hint.contains("--normal"));
+        assert!(hint.contains("--thorough"));
+        assert!(hint.contains("default: normal"));
     }
 
     #[test]

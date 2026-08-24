@@ -920,12 +920,14 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
              \x20 /review HEAD~3..HEAD      Review a commit range\n\
              \x20 /review --pr 42           Review a GitHub PR\n\
              \x20 /review --quick           Quick review: bugs & security only\n\
-             \x20 /review --thorough        Deep review: all dimensions\n\n\
+             \x20 /review --thorough        Deep review: all dimensions\n\
+             \x20 /review quick src/main.rs Quick review of a file (positional word)\n\
+             \x20 /review deep src/main.rs  Deep review of a file (positional word)\n\n\
              Effort levels:\n\
-             \x20 --quick     Focus on bugs and security only. Skip style nits. Terse output.\n\
-             \x20 (default)   Bugs, security, style, performance, and suggestions.\n\
-             \x20 --thorough  Exhaustive review: also checks error handling, edge cases,\n\
-             \x20             API contracts, test coverage, docs, and concurrency.\n\n\
+             \x20 quick|fast|light  Focus on bugs and security only. Skip style nits. Terse output.\n\
+             \x20 normal (default)  Bugs, security, style, performance, and suggestions.\n\
+             \x20 thorough|deep|full  Exhaustive review: also checks error handling, edge cases,\n\
+             \x20                    API contracts, test coverage, docs, and concurrency.\n\n\
              Sends the diff or file to the AI for a code review.\n\n\
              Also works as a CLI subcommand (non-interactive):\n\
              \x20 arc review               Review from the command line\n\
@@ -934,6 +936,7 @@ pub fn command_help(cmd: &str) -> Option<&'static str> {
              Examples:\n\
              \x20 /review\n\
              \x20 /review --quick src/main.rs\n\
+             \x20 /review thorough src/main.rs\n\
              \x20 /review --thorough HEAD~3..HEAD",
         ),
         "revisit" => Some(
