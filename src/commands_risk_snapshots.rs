@@ -258,6 +258,9 @@ pub(crate) fn write_validation_event(
 /// - No-op if no snapshots exist.
 /// - No-op if no `changed_files` match `src/` paths.
 /// - Appends a validation event to `.arc/risk_validations.jsonl`.
+/// - Each recorded surprise carries its 1-based rank in the scored universe
+///   (e.g. `src/foo.rs (rank 11)`), preserving the near-miss vs cold-miss
+///   distinction the calibration readout needs.
 /// - Prints a brief 2-3 line stderr summary when there are results.
 pub(crate) fn auto_validate_after_failure(changed_files: &[String]) {
     auto_validate_after_failure_to(
@@ -297,13 +300,38 @@ fn auto_validate_after_failure_to(
     let predicted_set: std::collections::HashSet<&str> =
         last.predicted.iter().map(|s| s.as_str()).collect();
 
+    // Surprise-rank context (dream milestone): the watch path has no
+    // `all_ranked` snapshot (that lives in the replay path), so compute the
+    // scored universe from the live scorer and record each surprise's 1-based
+    // position in it. `compute_file_risk_scores()` returns the full ranking
+    // (already sorted by score), so `position + 1` mirrors what
+    // `replay_validate_core`'s `all_ranked` provides. This distinguishes a
+    // near-miss (rank 11, just off the top-10) from a cold miss (rank 700+).
+    let scored: Vec<String> = compute_file_risk_scores()
+        .iter()
+        .map(|r| r.path.clone())
+        .collect();
+
     let mut hits: Vec<String> = Vec::new();
+    // Surprises are stored as `path (rank N)` so the rank survives persistence
+    // without touching the shared writer's signature (`parse_validation_events`
+    // and friends read only the array length, so the suffix is invisible to
+    // them — backward-compatible).
     let mut surprises: Vec<String> = Vec::new();
     for f in &src_files {
         if predicted_set.contains(f.as_str()) {
             hits.push(f.to_string());
         } else {
-            surprises.push(f.to_string());
+            let rank = scored
+                .iter()
+                .position(|r| r == *f)
+                .map(|i| i + 1) // 1-based, mirrors the replay path
+                .unwrap_or(0); // 0 = not in the scored universe
+            surprises.push(if rank > 0 {
+                format!("{f} (rank {rank})")
+            } else {
+                f.to_string()
+            });
         }
     }
 
@@ -1077,8 +1105,11 @@ mod tests {
 
         let surprises = parsed["surprises"].as_array().unwrap();
         assert_eq!(surprises.len(), 2, "should have 2 surprises");
-        assert!(surprises.contains(&serde_json::json!("src/prompt.rs")));
-        assert!(surprises.contains(&serde_json::json!("src/safety.rs")));
+        // Surprises now carry their scored-universe rank (1-based) as a
+        // `path (rank N)` suffix — additive, so the length-based consumers
+        // stay backward-compatible.
+        assert!(surprises.contains(&serde_json::json!("src/prompt.rs (rank 15)")));
+        assert!(surprises.contains(&serde_json::json!("src/safety.rs (rank 20)")));
 
         // accuracy = 3/5 = 60%
         let accuracy = parsed["accuracy_pct"].as_f64().unwrap();
