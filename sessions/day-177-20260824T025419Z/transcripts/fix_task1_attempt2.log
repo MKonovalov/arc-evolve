@@ -1,0 +1,2017 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the task. I need to:
+1. Read the signals currently fed into `compute_file_risk_scores` and `learn_weights_from_history` in src/commands_risk.rs
+2. Identify whether a "recently touched" signal exists
+3. If missing, add it — a file touched within the last ~5 commits gets a weight bump
+4. Add a unit test verifying recently-touched file ranks at or above historically-fragile file
+5. Run cargo fmt && cargo clippy --all-targets -- -D warnings && cargo build && cargo test
+
+Let me start by reading the relevant code.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git log --oneline -5  ▶ search 'fn compute_file_risk_scores' in src/commands_risk.rs ✓ (3ms)
+ ✓ (10ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 685ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the relevant code in src/commands_risk.rs to understand the scoring.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1..121 ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — there IS already a "recency" signal (index 1, weight 0.15). Let me read more of the scoring logic to understand how recency is computed.
+────────────────────────────────────────────────────────────────────────────────
+Interesting — there's already a "recency" signal (weight 0.15). Let me read the full scoring function to understand how it's computed.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:600..780 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The task says the scorer misses recently-touched files. There IS a "recency" signal already, but let me look at how it's currently computed. The comment says "Recent acceleration (7-day count) — weight 0.25". Wait, that conflicts with RISK_WEIGHTS [0.30, 0.15, ...]. Let me continue reading to see the actual computation.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:780..940 ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:940..1070 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the scoring. The signals are:
+- churn (30-day count) — weight 0.30
+- recency (acceleration: 7-day count / 30-day count ratio) — weight 0.15
+- size — weight 0.15
+- complexity — weight 0.10
+- test_density — weight 0.10
+- coupling — weight 0.10
+- revert_history — weight 0.10
+
+Wait, but the doc says weights `[churn, recency, size, complexity, test_density, coupling, revert_history]` = `[0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]` — that sums to 1.0. Actually note the comment says "Recent acceleration (7-day count) — weight 0.25" but that's stale (the weight is 0.15 now).
+
+The problem: `update.rs` was touched by recent sessions but shows as an *acceleration ratio* issue. Let's think about `norm_accel`: `accel = (c7/c30) / (7/30)`. If a file was touched once in the last 30 days, and that touch was in the last 7 days, then c7=1, c30=1, accel = 1/0.233 = 4.28. But this is *normalized* across files. The issue: a one-off fix target like `update.rs` touched once recently but with a modest churn history... Actually wait.
+
+Let me think about what happens. The churn weight is 0.30 (30-day count), and the recency weight is 0.15. For `update.rs` — touched by recent sessions, apparently with low change count in 30 days.
+
+The hypothesis: `compute_file_risk_scores` under-weights recently-touched files relative to historically-fragile files.
+
+The "recency" signal exists but is weak: it's the *acceleration ratio* which is normalized across files. If there are many files touched in the last 7 days (evolve loop touches many files), then update.rs's acceleration won't stand out in the normalized score.
+
+The task says:
+- If the signal is MISSING: add it — a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score.
+- If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive).
+
+So the signal EXISTS (recency via acceleration) but is weak. The evaluator wants a verified improvement plus a unit test:
+
+"given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+So I need to restructure the scoring to be testable. Currently `compute_file_risk_scores()` reads the actual repo — not directly testable with synthetic inputs. Let me look at how the tests in this file test things. Let me check the existing test module.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the existing tests and understand how the scoring is structured for testability.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "#\[cfg(test)\]" src/comma…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn file_change_counts" sr… ✓ (3ms)
+ ✓ (5ms)
+  2 tools completed in 676ms (2 ✓)
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2529..2729 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at `git::file_change_counts` to understand the recency data, and understand the full picture of the signal computation. I also need to check how the "accel" (recency) signal works — the task says recency signal exists but is weak.
+
+Let me look at the git.rs file_change_counts function first.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at `git::file_change_counts` and see how recency is currently computed:
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/git.rs:850..910 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the current scoring:
+
+1. **Churn (30-day count)** — weight 0.30 (`norm_churn`)
+2. **Recency/acceleration (7-day ratio)** — weight 0.15 (`norm_accel`)
+3. **Size** — weight 0.15
+4. **Complexity** — weight 0.10
+5. **Test density** — weight 0.10
+6. **Coupling** — weight 0.10
+7. **Revert history** — weight 0.10
+
+The problem per the task: `update.rs` was touched by recent sessions (one-off SemVer fix), but the risk history signal didn't surface it into the top-10.
+
+The issue with the current recency signal (`accel`): it's a *normalized ratio* across files. When there are many files with high churn in the last 7 days, `accel` gets normalized away. Also, `accel` is a ratio of 7-day to 30-day counts, so a file touched once in the last 7 days vs. many files touched many times — after min-max normalization across all files, the single-touch file gets a low accel score relative to files touched 5 times.
+
+Also there's a subtlety: the recency signal is *relative* (min-max normalized). If the top churn file has high 7-day count, a one-touch `update.rs` gets normalized to near 0.
+
+The task says:
+- If signal MISSING: add it.
+- If signal EXISTS but is weak: strengthen it.
+
+The signal exists (accel weight 0.15) but is weak for one-off fix targets. The task asks for a mechanism where "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+So the plan:
+1. Add a "recently touched" boolean/binary signal: file appears in the last ~5 commits (git log -5 --name-only) OR is modified in the working tree (git status --porcelain / this session's edits).
+2. This binary signal gets a substantial weight bump.
+
+Let me design this cleanly, keeping it testable:
+
+- Add a helper `recently_touched_files(window: usize) -> HashSet<String>` that runs `git log -N --name-only` and returns the set of src/*.rs files touched in the last N commits. Plus check working tree modifications (git status --porcelain).
+- In `compute_file_risk_scores`, compute a `raw_recency_bump` vector: 1.0 if the file is in the recently-touched set, else 0.0.
+- Rather than adding a new weight to the 7-weight array (which must sum to 1.0 and is used by learned weights), better to add an additive term like the mutation-survival signal. But the task wants a *weight bump* so that recency doesn't get drowned.
+
+Actually, let me think about what would be surgical and testable.
+
+Approach: Add an additive "recently-touched" bonus term (like MUTATION_WEIGHT) capped at some value, e.g. `RECENCY_BUMP` in the range of the churn weight contribution. But the task says "raise its weight relative to the historical-fragility signals". The existing recency signal (accel) has weight 0.15. Hmm.
+
+Let me re-read the task:
+
+> 2. If the signal is MISSING: add it — a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score.
+> If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive).
+
+The existing signal is the 7-day acceleration ratio, which is weak for one-off fix targets: a single commit touching a file that's otherwise rarely touched gets:
+
+- c30 = 1, c7 = 1 → accel = (1/1)/(7/30) = 4.29, capped? No cap for c30 > 0 path! Actually accel = (c7/c30)/(7/30), so for a one-off file c7=c30=1 → accel = 1/(0.2333) = 4.2857. That's high. But then it's min-max normalized across all files. If another file has accel = 10 (e.g., c30=1, c7=1... no). Max possible: c30=1,c7=1 → 4.29; c30=2,c7=2 → 4.29; if only in last 7 days → 3.0. Actually 4.29 is near max. After normalization, the one-off file gets 1.0 if it's the max. So accel should be strong for one-off files...
+
+Wait, but the problem: `update.rs` was touched recently, but accel is a 7-day ratio. If the recent touch happened within the window, c7 >= 1, c30 = count in 30 days. If update.rs was touched say twice in 30 days and once in 7 days, accel = (1/2)/(7/30) = 2.14. After min-max normalization across all files... if files span 0 to 4.29, then 2.14 → 0.5. That's just at the signal threshold of 0.5.
+
+But also, churn weight 0.30 dominates. And the fact that many files could have high accel values means normalized accel gets compressed.
+
+The deeper issue: min-max normalization makes the recency *relative* — it's a ranking across the current file set. If 10 files break at once and there's a historical fragile file, the top-10 gets those. `update.rs` with a modest bump doesn't make the top-10.
+
+The task hypothesis states: "the scorer's top-10 window missed entirely" — update.rs was the actual edit target but wasn't in the top 10.
+
+What we want: the file that the session is actually touching / just touched should get a strong bump, so it ranks at or above historically-fragile files.
+
+Design decision: Add a binary "recently touched" signal as an **additive bonus** (like mutation survival), derived from:
+1. File modified in the working tree (git status --porcelain) — this session's own edits
+2. File appears in the last ~5 commits (git log -5 --name-only)
+
+Value: strong — comparable to the max churn contribution (0.30 * 1.0). Let me pick something like 0.15..0.25 additive to the weighted sum.
+
+Actually, the task says "gets a weight bump into the score" and "let the historical signals drown the recency signal" — I'll add a dedicated bonus.
+
+Now, the required unit test:
+> given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list.
+
+This needs to be testable without git state flakiness. Best approach: extract a pure scoring helper that takes the raw signal vectors and the recently-touched set, and computes the scored list. Then the test can construct synthetic inputs.
+
+Let me look at how `compute_file_risk_scores` is structured to extract a pure function:
+
+Current flow:
+1. Collect all_files
+2. Build raw_* vectors (churn, accel, size, complexity, revert, test_density, coupling)
+3. Normalize
+4. Weighted sum + mutation bonus + tests penalty
+5. Sort
+
+I'll extract a pure function like:
+
+```rust
+fn score_files(
+    all_files: Vec<String>,
+    raw_churn: &[f64],
+    raw_accel: &[f64],
+    raw_size: &[f64],
+    raw_complexity: &[f64],
+    raw_test_density: &[f64],
+    raw_coupling: &[f64],
+    raw_revert: &[f64],
+    tests_per_100: &[f64],
+    mutation_survival: &HashMap<String, f64>,
+    recently_touched: &HashSet<String>,
+    weights: &[f64; 7],
+) -> Vec<FileRisk>
+```
+
+Hmm, but that's a big refactor of the existing loop. The task said "Keep the change surgical: one scoring pathway, one test file". 
+
+Alternative: extract just the weighted-sum part into a pure helper that takes normalized signals + the recent set:
+
+```rust
+fn weighted_risk_score(
+    norm_churn: f64, norm_recency: f64, norm_size: f64,
+    norm_complexity: f64, norm_test: f64, norm_coupling: f64,
+    norm_revert: f64,
+    recently_touched: bool,
+    weights: &[f64; 7],
+) -> f64
+```
+
+Then the test can directly assert: with identical weak historical signals but recently_touched=true gets >= score of strong historical signals with recently_touched=false.
+
+Actually for the required test shape: "a file with a modest risk history but a recent modification and a file with a strong history but no recent touch". Let me make the pure helper:
+
+```rust
+/// Compute the composite risk score for a single file from its normalized
+/// signals plus the recently-touched bonus.
+fn compute_risk_score(
+    norm_signals: &[f64; 7],  // [churn, recency, size, complexity, test_density, coupling, revert]
+    recently_touched: bool,
+    weights: &[f64; 7],
+    test_density_per_100: f64,   // for penalty
+    mutation_survival: f64,
+) -> f64
+```
+
+Then in compute_file_risk_scores, we compute recently_touched set and call this per file.
+
+Test:
+```rust
+#[test]
+fn test_recently_touched_outranks_historically_fragile() {
+    // File A: modest history, recently touched
+    // signals: churn 0.3, accel 0.5, size 0.3, complexity 0.2, test 0.4, coupling 0.1, revert 0.1
+    // File B: strong history, not recently touched
+    // signals: churn 1.0, accel 0.0, size 0.5, complexity 0.8, test 0.9, coupling 0.9, revert 1.0
+    let weights = RISK_WEIGHTS;
+    let a = compute_risk_score(&[...modest...], true, &weights, 2.0, 0.0);
+    let b = compute_risk_score(&[...strong...], false, &weights, 2.0, 0.0);
+    assert!(a >= b, ...);
+}
+```
+
+Let me compute the numbers:
+- weights: [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]
+- File A (modest, recent): churn 0.30, recency 0.60, size 0.30, complexity 0.20, test 0.40, coupling 0.10, revert 0.10
+  - weighted = 0.30*0.30 + 0.15*0.60 + 0.15*0.30 + 0.10*0.20 + 0.10*0.40 + 0.10*0.10 + 0.10*0.10
+  - = 0.09 + 0.09 + 0.045 + 0.02 + 0.04 + 0.01 + 0.01 = 0.305
+- File B (strong, not recent): churn 1.0, recency 0.0, size 0.6, complexity 0.8, test 0.8, coupling 0.9, revert 1.0
+  - weighted = 0.30 + 0 + 0.09 + 0.08 + 0.08 + 0.09 + 0.10 = 0.74
+
+So without the bonus, B vastly outranks A. The recent bonus needs to overcome 0.74 - 0.305 = 0.435. That's huge. Hmm, the task says "a file with a modest risk history but a recent modification" vs "a file with a strong history but no recent touch". Should the recently-touched file "rank at or above" the historically fragile one. That's a strong requirement.
+
+Maybe "modest" vs "strong" shouldn't be that extreme. Let me think about realistic values.
+
+Realistic scenario from the day-175 miss: `update.rs` — a small file, occasional touch, low churn, low test density (it's small, might not have tests), no reversion, no coupling. Its normalized churn might be ~0.2, accel ~0.6 (touched in last 7 days, maybe 1-2 times in 30), size ~0.1, complexity ~0.2, test_density ~0.7 (low test coverage for small util), coupling ~0.1, revert ~0.
+
+Also there's the low-test penalty: `score += max(0, (5.0 - td) * 2.0) / 100.0` where td is tests per 100 lines. For a file with 0 tests, td=0 → penalty = 10/100 = 0.10. So update.rs gets 0.10 extra.
+
+A historically fragile file (in top-10): churn 1.0, accel 0.3, size 0.5, complexity 0.7, test 0.8, coupling 0.5, revert 1.0. Weighted = 0.30 + 0.045 + 0.075 + 0.07 + 0.08 + 0.05 + 0.10 = 0.72.
+
+update.rs: 0.30*0.2 + 0.15*0.6 + 0.15*0.1 + 0.10*0.2 + 0.10*0.7 + 0.10*0.1 + 0.10*0 + 0.10 (penalty) = 0.06 + 0.09 + 0.015 + 0.02 + 0.07 + 0.01 + 0 + 0.10 = 0.365.
+
+Gap: 0.72 - 0.365 = 0.355. The recent bonus would need to be ~0.36 additive to close that. That's bigger than the whole mutation weight (0.10) and comparable to the churn weight (0.30).
+
+Hmm. But wait — the task's intent. The task says "a file touched within the last ~5 commits ... gets a weight bump into the score" and the test must show the recently-touched file ranks at or above the historically-fragile one. So the bonus should be substantial.
+
+Options:
+1. Additive bonus of ~0.25-0.35 for recently-touched files. But that could dominate too much — flags every file touched in the last 5 commits as high risk. In the evolve loop, the last 5 commits typically touch 5-15 files total. Getting all of them flagged as top risk is actually the *intent* — the file being worked on now is the most likely to break next.
+
+Actually, thinking about this more: the dream milestone is "measure whether flagged files fail more often than unflagged ones". The practical use: when the agent finishes a change, `/risk` should highlight the files it just touched, because those are the ones at risk of causing the next failure. So a strong recency bonus is genuinely useful.
+
+But we need to be careful not to make it absurdly large. Let me pick the bonus so the test passes with realistic-but-moderate signal values, and document it.
+
+Let me design: `RECENCY_BONUS: f64 = 0.30` — additive, comparable to the max churn contribution. Actually, let me think about the scale. The weighted base score max is 1.0 * sum(weights) = 1.0. Plus mutation up to 0.10, plus test penalty up to 0.10. So scores range roughly 0..1.2. A 0.30 bonus is significant but not total domination — a file with a moderate base of 0.4 becomes 0.7, tieing with strong fragile files.
+
+Let me now choose test values so the numbers clearly work:
+
+File A (modest history, recently touched):
+- churn 0.30, recency 0.50, size 0.20, complexity 0.20, test_density 0.40, coupling 0.10, revert 0.10
+- base = 0.30*0.3 + 0.15*0.5 + 0.15*0.2 + 0.10*0.2 + 0.10*0.4 + 0.10*0.1 + 0.10*0.1
+- = 0.09 + 0.075 + 0.03 + 0.02 + 0.04 + 0.01 + 0.01 = 0.275
+Let's skip the test penalty in the test (set tests_per_100 = 5.0 so penalty = 0, or just include it... actually penalty is `max(0,(5-td)*2)/100` only for .rs files. For the pure helper let me include td and path). Let me keep the test simple and not include mutation.
+
+File B (strong history, not recently touched):
+- churn 1.00, recency 0.0, size 0.40, complexity 0.40, test_density 0.70, coupling 0.60, revert 1.00
+- base = 0.30 + 0 + 0.06 + 0.04 + 0.07 + 0.06 + 0.10 = 0.63
+
+With RECENCY_BONUS 0.30: A = 0.275 + 0.30 = 0.575 < 0.63. Still loses!
+
+Hmm. Let me increase the bonus to 0.40? 0.275 + 0.40 = 0.675 > 0.63. That works but a 0.40 bonus is very large.
+
+Alternatively, choose less extreme "strong" values for B. The task says "strong history" — probably churn 0.8, revert 1.0, but moderate on others. Let me reconsider what "strong history" means: historically fragile = high churn + high revert involvement + high coupling. Size/complexity aren't "history". Let me set:
+
+File B (strong history, not recent):
+- churn 0.9, recency 0.0, size 0.5, complexity 0.5, test_density 0.6, coupling 0.8, revert 1.0
+- base = 0.27 + 0 + 0.075 + 0.05 + 0.06 + 0.08 + 0.10 = 0.635
+
+And File A (modest history, recently touched) — let me make "modest" a bit stronger since it does have *some* history plus recent touch:
+- churn 0.4, recency 0.6, size 0.2, complexity 0.2, test_density 0.4, coupling 0.2, revert 0.2
+- base = 0.12 + 0.09 + 0.03 + 0.02 + 0.04 + 0.02 + 0.02 = 0.34
+
+Gap = 0.635 - 0.34 = 0.295. With bonus 0.30 → A = 0.64 ≥ 0.635. That works with RECENCY_BONUS = 0.30.
+
+OK so RECENCY_BONUS = 0.30 additive works for those test values. But I worry about the bonus being too dominant in production. Let me reconsider the whole approach.
+
+Alternative approach: make the bonus *part of the weighted sum* as a normalized signal rather than additive. I.e., add an 8th signal "recently_touched" (binary 0/1) with a weight. But the weights array is fixed at 7 and validated to sum to 1.0, plus learned weights from .arc/risk_weights.json. Changing to 8 signals touches learn_weights_from_history which uses 7 weights. The task says don't touch the snapshot/validation/accuracy persisters, but learn_weights_from_history is in this file. Still, changing weight count would be a bigger and riskier change. Additive bonus is cleaner and more surgical.
+
+Hmm, but actually wait. Let me reconsider the "recency" signal being a normalization-compressed ratio. The task wording in the first branch: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+I think the additive bonus is the right mechanism. Let me also think about whether we should raise the accel weight from 0.15. The bolded part says "do not let the historical signals drown the recency signal for one-off fix targets". 
+
+Let me decide:
+1. Add `recently_touched_files()` helper in git.rs (or command_risk.rs? The task says "Keep the change surgical: one scoring pathway, one test file (tests live in src/commands_risk.rs)"). The git helper lives in git.rs; but I can implement the git log logic inside commands_risk.rs using `crate::git::run_git`. There's already precedent: revert_history() uses crate::git::run_git directly in commands_risk.rs. So I'll add `recently_touched_files()` in commands_risk.rs.
+
+2. That helper:
+   - `git log -5 --name-only --pretty=format:` → collect src/*.rs paths
+   - `git status --porcelain` → collect modified/untracked src paths (working-tree / this session's edits)
+   Return HashSet<String>.
+
+3. In compute_file_risk_scores: compute the recent set, pass `recently_touched` bool per file into a new pure `compute_risk_score` helper that includes the additive bonus.
+
+4. Extract the per-file weighted calculation into a pure function so tests can construct synthetic signals.
+
+Let me look at exactly what code to extract. Currently lines 918-976 do the per-file scoring. I'll extract:
+
+```rust
+/// Composite risk score for one file from its normalized signals.
+///
+/// Pure helper (extracted so tests can pin the arithmetic and the
+/// recency-bump ranking behavior without touching the live repo).
+fn file_risk_score(
+    norm_churn: f64,
+    norm_recency: f64,
+    norm_size: f64,
+    norm_complexity: f64,
+    norm_test: f64,
+    norm_coupling: f64,
+    norm_revert: f64,
+    recently_touched: bool,
+    td: f64,
+    mutation_survival: f64,
+    weights: &[f64; 7],
+) -> f64 {
+    let mut score = norm_churn * weights[0]
+        + norm_recency * weights[1]
+        + norm_size * weights[2]
+        + norm_complexity * weights[3]
+        + norm_test * weights[4]
+        + norm_coupling * weights[5]
+        + norm_revert * weights[6];
+
+    // Penalty: files with fewer than 5 tests per 100 lines get a bump
+    score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;
+
+    // Mutation-survival signal...
+    if mutation_survival > 0.0 {
+        score += MUTATION_WEIGHT * mutation_survival;
+    }
+
+    // Recency bonus...
+    if recently_touched {
+        score += RECENCY_BONUS;
+    }
+
+    score
+}
+```
+
+Then the caller keeps the td/ms/mutation lookup and calls this. Signal flags remain computed in the caller.
+
+Wait — but the test penalty was only applied for `.rs` files. In the pure helper I'll keep the td penalty unconditional (tests only .rs anyway); actually let me keep the caller's behavior — the caller only applies it for .rs paths. Since all files in the scorer are .rs anyway (all_files only contains src/*.rs), unconditional is equivalent. But to be safe, keep the .rs guard in the caller and pass td; hmm. Actually simpler: apply the penalty inside the helper as before — all paths collected are .rs, so it's identical. But there's the `tests_per_100` which is 0.0 for non-.rs. All files are .rs here. Fine.
+
+Also, the mutation bonus — the test can pass mutation_survival=0.0.
+
+Now the RECENCY_BONUS constant. Let me look at where to define it — near the weights:
+
+```rust
+/// Additive bonus applied to files touched within the last `RECENCY_COMMIT_WINDOW`
+/// commits or modified in the working tree. ...
+const RECENCY_BONUS: f64 = 0.30;
+const RECENCY_COMMIT_WINDOW: usize = 5;
+```
+
+Now the recently_touched_files helper:
+
+```rust
+/// Files touched within the last `RECENCY_COMMIT_WINDOW` commits OR modified
+/// in the working tree (uncommitted / this session's own edits).
+///
+/// This is the "recently touched" signal that catches one-off fix targets
+/// (e.g. the day-175 `src/update.rs` SemVer fix) that a 30-day churn window
+/// and relative 7-day acceleration normalize away.
+fn recently_touched_files() -> std::collections::HashSet<String> {
+    let mut recent = std::collections::HashSet::new();
+
+    // 1. Files in the last N commits.
+    let window = RECENCY_COMMIT_WINDOW.to_string();
+    if let Ok(output) = crate::git::run_git(&[
+        "log",
+        &format!("-{window}"),
+        "--name-only",
+        "--pretty=format:",
+    ]) {
+        for line in output.lines() {
+            let path = line.trim();
+            if path.starts_with("src/") && path.ends_with(".rs") {
+                recent.insert(path.to_string());
+            }
+        }
+    }
+
+    // 2. Working-tree modifications (this session's own edits).
+    if let Ok(output) = crate::git::run_git(&["status", "--porcelain"]) {
+        for line in output.lines() {
+            // Format: "XY path" — strip the two status codes and whitespace.
+            let path = line.get(3..).unwrap_or("").trim();
+            if path.starts_with("src/") && path.ends_with(".rs") {
+                recent.insert(path.to_string());
+            }
+        }
+    }
+
+    recent
+}
+```
+
+Wait — careful: `git status --porcelain` for renames shows `R  old -> new`. Stripping first 3 chars works for normal entries. Renames are edge cases; fine to just take the substring. But `line.get(3..)` — if the line is shorter than 3 chars, `.unwrap_or("")` handles it. Also byte vs char boundaries: `get(3..)` is char-boundary-safe (returns None at invalid boundary, but these are ASCII status codes + space, so fine). To be safe with the "no byte indexing" rule: `line.chars().skip(3).collect::<String>()`? The rule is about not panicking. `str::get` doesn't panic — returns None, handled by unwrap_or. Good, no panic risk.
+
+Also untracked files: `?? path`. get(3..) strips "?? " → path. Good.
+
+Now, one concern: for the commit window, `--pretty=format:` with `--name-only` prints one blank line between commits, which is filtered by the trim/is_empty check. Good.
+
+Also `-5` vs `-n 5` — git accepts `-5`. Fine.
+
+Now update compute_file_risk_scores to compute the recent set once and use it per-file.
+
+Let me now also double-check: does the accel recency signal (weight[1]) still make sense alongside the additive bonus? Yes — accel captures degree of recent activity; the binary bonus captures "touched at all recently". Task says strengthen, and one mechanism is additive. Good.
+
+Now the required test. It must be a unit test that doesn't depend on live git state (or it'd flake). Pure helper test:
+
+```rust
+#[test]
+fn test_recently_touched_outranks_historically_fragile() {
+    // Day-175 shape: `src/update.rs` — a one-off fix target touched recently
+    // but with a modest risk history — was missing from the top-10 because the
+    // historical-fragility signals (churn, revert, coupling) dominated the
+    // relative recency signal. The recently-touched bonus must lift the
+    // one-off target at or above the historically-fragile file.
+    use std::collections::HashSet;
+
+    let weights = RISK_WEIGHTS;
+
+    // File A: modest history but RECENTLY TOUCHED.
+    let a = file_risk_score(0.40, 0.60, 0.20, 0.20, 0.40, 0.20, 0.20, true, 5.0, 0.0, &weights);
+
+    // File B: strong history (high churn, coupling, reversion) but not recently touched.
+    let b = file_risk_score(0.90, 0.00, 0.50, 0.50, 0.60, 0.80, 1.00, false, 5.0, 0.0, &weights);
+
+    assert!(
+        a >= b,
+        "recently-touched file ({a:.3}) must rank at or above historically-fragile file ({b:.3})"
+    );
+}
+```
+
+Let me compute:
+A = 0.40*0.30 + 0.60*0.15 + 0.20*0.15 + 0.20*0.10 + 0.40*0.10 + 0.20*0.10 + 0.20*0.10 + 0 + 0.30
+  = 0.12 + 0.09 + 0.03 + 0.02 + 0.04 + 0.02 + 0.02 + 0.30 = 0.64
+B = 0.90*0.30 + 0 + 0.50*0.15 + 0.50*0.10 + 0.60*0.10 + 0.80*0.10 + 1.00*0.10
+  = 0.27 + 0.075 + 0.05 + 0.06 + 0.08 + 0.10 = 0.635
+
+A (0.64) >= B (0.635). ✓ with RECENCY_BONUS = 0.30.
+
+Also, I should add a second assertion maybe that without the bonus A < B (to show the bonus is what makes the difference)? That'd make the test meaningful. Let me add:
+
+```rust
+let a_no_bonus = file_risk_score(0.40, 0.60, 0.20, 0.20, 0.40, 0.20, 0.20, false, 5.0, 0.0, &weights);
+assert!(a_no_bonus < b, "without the bonus the modest-history file should stay below");
+assert!(a > a_no_bonus); // redundant but documents the bump
+```
+
+Good — that documents that the bonus is what flips the ranking.
+
+Let me also verify weight[2] is size (0.15) — yes.
+
+Wait, in file_risk_score I need the td penalty: I pass td=5.0 → max(0, 0)*2/100 = 0. Good, no penalty, isolating the bonus effect.
+
+Now, also need to handle the "recently touched" signal in the caller (`compute_file_risk_scores`) — compute `let recent = recently_touched_files();` once, then `let is_recent = recent.contains(path.as_str());` per file, pass into file_risk_score.
+
+Let me now write the code changes.
+
+First, the constant. Where? Near RISK_WEIGHTS (line 75-82). Let me add after SIGNAL_NAMES or near MUTATION_WEIGHT. I'll put it right after the RISK_WEIGHTS/SIGNAL_NAMES block with good docs.
+
+Now let me check `weighted` order comment: "Order: churn, recency, size, complexity, test_density, coupling, revert_history" — matches.
+
+Let me also double check the `label_to_index` function — "▲recent" maps to index 1 (accel). My additive bonus doesn't affect that. The bonus is separate, not part of the 7 signals, so snapshot labels remain consistent. Good — that's important since snapshots record signal labels; an additive bonus doesn't need a label. Though maybe I should add a "▲recent" style label for the bonus? The signals vec is built from normalized signals; I could add "▲touched" when recently_touched. Hmm — but that adds a label not in label_to_index, and label_to_index returns None for unknown → the accuracy computation might not know how to weight it. Let me check how signals from snapshots are used... 
+
+Actually, `label_to_index` maps snapshot labels to weight indices — for prediction accuracy. Adding an unknown label "▲touched" would break predictions? Let me check where label_to_index is used.
+────────────────────────────────────────────────────────────────────────────────
+Let me check how `label_to_index` and signals are used downstream (to avoid breaking the accuracy/prediction path), and look at `learn_weights_from_history`:
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "label_to_index\|learn_wei… ✓ (4ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "learn_weights_from_histor… ✓ (3ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:118..248 ✓ (1ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:248..368 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the current state:
+
+1. `compute_file_risk_scores()` — computes risk scores using 7 signals: churn (30-day), recency/acceleration (7-day vs 30-day), size, complexity, test_density, coupling, revert_history. There IS a "recency" signal — the "acceleration" signal (weight 0.15).
+
+The problem: the acceleration signal is a **ratio** (7-day count / 30-day count normalized by 7/30). For a one-off fix target like `update.rs` that was touched by a couple of recent sessions:
+- If `update.rs` was touched recently but only once or twice in 30 days, then `c30` might be 1 or 2 and `c7` might be 1, making accel = (1/1)/(7/30) = 4.29 or (1/2)/(7/30) = 2.14. That should be decently high...
+- But after min-max normalization across all files, if there are files with higher acceleration, it gets normalized down.
+
+Actually, looking closer at the task — the day-175 miss: `update.rs` was a one-off SemVer fix. It was touched by recent sessions. The scorer's top-10 missed it.
+
+The hypothesis: recency signal is under-weighted relative to historical fragility. The current recency signal is the "acceleration" ratio. But there's a subtle issue: for a file touched once recently where `c30 == c7 == 1`, accel = 4.29 which is > 1 meaning accelerating. That's a strong signal on paper... but let me think about what else might be happening.
+
+Actually wait — let me re-read. The signal names: churn (0.30), recency (0.15), size (0.15), complexity (0.10), test_density (0.10), coupling (0.10), revert_history (0.10).
+
+The recency signal (`raw_accel`) is computed as:
+```rust
+let accel = if c30 > 0.0 {
+    (c7 / c30) / (7.0 / 30.0)  // ~4.29 for c7==c30==1
+} else if c7 > 0.0 {
+    3.0  // appeared only in last 7 days
+} else {
+    0.0
+};
+```
+
+Then normalized via min-max. So a file touched once in the last 7 days and once total in 30 days has accel = 4.29. The max of this across all files might be much higher though — e.g., a file touched 3 times in 7 days and 3 times in 30 days also gives 4.29. A file touched 5 times in 7 days, 5 times in 30 days also gives 4.29. The max could be from a file with high c7 and c30 ratio — never above ~4.29 unless c7 appears when c30 doesn't (3.0)... Hmm, actually the ratio (c7/c30)/(7/30) is bounded by 30/7 ≈ 4.29 when c7 ≤ c30 (within the git window, c7 can't exceed c30). And 3.0 for files only in the last 7 days. So the accel values are in a narrow range.
+
+But the deeper problem is that `accel` captures *relative* acceleration, NOT absolute recency. A file touched once 6 days ago (and 0 times before) gets accel=3.0. But a file touched once 29 days ago and 0 in last 7 days gets accel=0.0. That's good.
+
+But also consider: a high-churn file (churn 0.30) touched consistently over 30 days would have accel ≈ 1.0 (proportional). A one-off file touched once in last 7 days with c30==c7==1 has accel=4.29. So with min-max normalization, the max is 4.29 (or 3.0, whichever's bigger — actually with c7≤c30 always, the max possible accel is 30/7 ≈ 4.286, or 3.0 for the "appeared only in last 7 days" case). Hmm wait, can c7 > c30? No — last 7 days ⊂ last 30 days. So max is 4.286.
+
+So actually the accel signal seems reasonably strong... but it's min-max normalized. If even one file has accel=4.29 and update.rs has accel=4.29 too, they'd tie at 1.0. If update.rs had c30=2, c7=1, then accel = 0.5/0.2333 = 2.14, and norm = (2.14-0)/(4.29-0) = 0.5. Weighted 0.15 → contribution 0.075. Then churn 0.30: update.rs count 2 over 30 days — if there are files with 10+ changes, norm_churn might be ~0.2. Contribution 0.06. size 0.15... etc.
+
+OK here's the real structure of the problem. The task says:
+
+**Hypothesis**: `compute_file_risk_scores` under-weights *recently touched* files relative to historically-fragile files.
+
+So, the mechanism I should implement: a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score.
+
+Let me design this surgically:
+
+1. Add a "recently touched" signal that is a **binary/boolean** high-value signal: a file appearing in the last ~5 commits (git log -5) gets a strong bump — OR make the existing recency signal's weight larger.
+
+2. A cleaner surgical approach: modify `compute_file_risk_scores` to add a recency boost term. Keep the 7 weighted signals as they are (they're also written into `.arc/risk_weights.json` and loaded, with a "sum to 1.0" validation). Instead of changing RISK_WEIGHTS (which is loaded from file and validated for sum≈1.0, and used by label_to_index/accuracy code), I could add an *additive* term, similar to the mutation-survival additive term:
+
+```rust
+// Recency boost: files touched in the last ~5 commits get an additive bump,
+// so a one-off fix target (like src/update.rs on day 175) surfaces into the
+// top-N even when its historical-fragility signals are modest.
+let recent_bump = if recent_files.contains(path) { RECENT_BOOST } else { 0.0 };
+score += recent_bump;
+```
+
+Wait, but the task says: "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive)."
+
+The recency signal exists (accel with weight 0.15), but it's a *ratio* — a file touched once in the last 7 days and once in 30 days gets normalized to 1.0 max. Hmm, actually the ratio signal should already be at/near max for recent-touch-one-off files...
+
+Wait, let me re-check `git log --since` behavior. `file_change_counts(7)` uses `git log --since="7 days ago" --name-only --pretty=format:`. The problem here is that it counts *all* commits in the last 7 days, regardless of branch. It filters to src files. OK.
+
+Actually hold on — there might be a subtle issue with `--name-only` and `--pretty=format:`. With empty pretty format, `--name-only` still lists files? Yes, when the format is empty, git still prints the name-only lines. Actually with `--pretty=format:` the commit header prints nothing and then --name-only prints file names. That's standard.
+
+Now, the accel signal has a subtle weakness: it only fires for files where `c30 > 0` AND `c7 > 0`, or `c7 > 0 && c30 == 0`. What if the file was touched in the last 7 days but ALSO heavily in 30 days (c30=10, c7=1)? Then accel = 0.1/0.233 = 0.429 → normalized low → recency signal weak. This is the "recently touched but historically active" case which is arguably fine.
+
+The day-175 case: `update.rs` touched by recent sessions. Let me check git log to see how recently update.rs was touched and how at the time of the miss it looked. But regardless, the concrete deliverable is a test that forces: given a file with modest risk history but recent modification vs a file with strong history but no recent touch → recently-touched must rank at-or-above.
+
+The critical problem with the current testability: `compute_file_risk_scores()` calls `crate::git::file_change_counts()` and reads the real repo. Adding a unit test that requires specific files to have recent modifications is flaky — depends on the actual repo state. So the test needs a **pure helper**: a scoring function that takes signal values as input and returns the ranking, so the test can feed synthetic values.
+
+Looking at the structure, the weighted-sum computation is inline in `compute_file_risk_scores`. To make this testable, I should extract a pure helper like:
+
+```rust
+/// Combine normalized risk signals and a recent-touch flag into a final score.
+/// Pure helper extracted for testability.
+fn composite_score(
+    churn: f64, accel: f64, size: f64, complexity: f64,
+    test_density: f64, coupling: f64, revert: f64,
+    recently_touched: bool,
+    weights: &[f64; 7],
+) -> f64 { ... }
+```
+
+Hmm, but there's a wrinkle with the test requirement: "given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+Let me think about how to make the recency bump strong enough to dominate but not absurd:
+
+Option A: Additive offset (like mutation survival). A file touched in the last ~5 commits gets +RECENT_TOUCH_BUMP. Combined with the accel signal it already gets, this is a strong, simple, verifiable mechanism.
+
+Option B: Modify the recency weight index 1 up (e.g. 0.15 → 0.25) and reduce another. That changes RISK_WEIGHTS and .arc/risk_weights.json validation (weights must sum to 1.0; the file validation uses tolerance 0.05). If I change RISK_WEIGHTS, the loaded learned weights from an existing `.arc/risk_weights.json` would still have the old shape... but they're validated only for sum≈1.0, which still holds. But changing the default weights affects `compute_adjusted_weights` (blend). That's messier and the task says "one scoring pathway".
+
+Actually, re-reading the task:
+
+"If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive). The goal is a verified improvement, not a specific mechanism — but do not let the historical signals drown the recency signal for one-off fix targets."
+
+I think the cleanest surgical approach that satisfies "recently touched within last ~5 commits gets a weight bump" and is testable:
+
+1. Add a helper `recently_touched_files(window_commits: usize) -> HashSet<String>` that runs `git log -<n> --name-only` and collects src/*.rs files from the last N commits. This is the "modified within the last ~5 commits" signal — a *binary* recency signal distinct from the ratio-based accel.
+
+2. In `compute_file_risk_scores`, compute `recently_touched = recently_touched_files(5)`. For each file in that set, add an additive boost to score: `RECENT_TOUCH_BOOST` (a constant, e.g. 0.10 — comparable to MUTATION_WEIGHT). This guarantees a recently-touched file gets a meaningful lift that the historical signals can't fully drown.
+
+Wait, but adding 0.10 additive vs. a historically fragile file... The test scenario: "file with modest risk history but recent modification vs file with strong history but no recent touch". Strong history: high churn (norm 1.0 × 0.30), high revert (1.0 × 0.10), high coupling (1.0 × 0.10), etc. Let me compute a plausible "strong history" score: churn=1.0*0.30 + accel=0 + size=1.0*0.15 + complexity=1.0*0.10 + test=1.0*0.10 + coupling=1.0*0.10 + revert=1.0*0.10 = 0.85. Plus mutation survival if any.
+
+Modest history + recent touch: churn=0.2*0.30=0.06, accel=1.0*0.15=0.15, size=0.5*0.15=0.075, complexity=0.2*0.10=0.02, test=0.5*0.10=0.05, coupling=0.1*0.10=0.01, revert=0.0. Sum = 0.365. Plus recency boost of 0.10 → 0.465. Still below 0.85. So a pure additive 0.10 wouldn't satisfy "at or above" for all plausible scenarios — it depends on the test scenario values.
+
+Hmm. The task says the test gives "a file with a modest risk history but a recent modification and a file with a strong history but no recent touch". I control the test scenario. But "strong history" shouldn't be the maximum of everything — realistically "strong" means notably above average: e.g., high revert count + moderate churn. And "modest history" means basically low on all signals but nonzero.
+
+Let me not overthink: the cleanest interpretation that makes the mechanism *principled* (not just test-shaped cheating) is:
+
+**A recently-touched file should be treated as risky regardless of its historical fragility** — the whole point of the calibration signal is that one-off fixes to *freshly-edited* files are the most common failure target. The strongest justifiable mechanism: a substantial fixed bump for files touched in the last ~5 commits (a binary signal), sized relative to the total weight scale.
+
+Actually — wait. Let me reconsider. What does "at or above" require? The test scenario I define: modest history file with recency vs strong history file without. I get to choose what "modest" and "strong" mean as signal vectors. But I should pick plausible values that capture the real day-175 shape:
+
+- update.rs (recent, modest): touched in last 5 commits, churn 1-2 over 30d, near-zero revert history, low coupling, small file, whatever test density.
+- A historically fragile anchor (strong history, no recent touch): high churn over 30d but NOT in last 5 commits (its churn came from earlier — but wait, churn is a 30-day window... a file "not recently touched" in the last 5 commits could still have churn within 30 days). High revert count, high coupling.
+
+Note the accel signal: the strong-history-no-recent-touch file has accel=0 (nothing in 7 days → ratio=0). The modest-recent file has accel = high.
+
+So recency already contributes up to 0.15 (weight 1). The gap: strong history (say revers + churn dominate: norm_revert=1.0 → 0.10; norm_churn=1.0 → 0.30; plus size/complexity/test/coupling) could total ~0.75+.
+
+The pure-additive approach: to make the recent file beat a 0.75 strong-history score, I'd need bump ≈ 0.40+ — that's huge and would almost always dominate. That feels wrong for "calibration".
+
+Let me re-read the task once more:
+
+"a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+"do not let the historical signals drown the recency signal for one-off fix targets."
+
+Hmm, "a weight bump". What if I implement it as: for recently-touched files, the recency signal value is *forced to max* (in addition to accel)? I.e., a binary override: recently touched (last 5 commits) ⇒ norm_recency = 1.0 regardless of ratio. Then recency contributes the full 0.15 for any file touched in the last 5 commits. Additionally I can raise the recency weight...
+
+Actually here's a cleaner and more defensible design — make the *additive* bump substantial but bounded, similar to the mutation term but bigger, AND have the test scenario be realistic rather than pathological. Let me quantify with realistic values:
+
+Recent modest file (update.rs shape):
+- churn: `update.rs` touched maybe 1-2 times in 30d. Suppose max churn in repo = 10. norm_churn = 0.1-0.2 → × 0.30 = 0.03-0.06
+- accel: c30=2, c7=1 → 2.14; max accel 4.29 → norm ≈ 0.5 → × 0.15 = 0.075. (Or c7==c30==1 → norm 1.0 → 0.15)
+- size: moderate → maybe 0.3 × 0.15 = 0.045
+- complexity: moderate 0.4 × 0.10 = 0.04
+- test: update.rs likely has few tests → low test density → high risk signal: 0.7 × 0.10 = 0.07
+- coupling: low 0.2 × 0.10 = 0.02
+- revert: 0
+Total ≈ 0.28-0.41
+
+Historically fragile file (no recent touch):
+- churn: 6-8 touches in 30d → norm 0.7 × 0.30 = 0.21
+- accel: 0 (not in 7d) → 0
+- size: large 1.0 × 0.15 = 0.15
+- complexity: 0.8 × 0.10 = 0.08
+- test: 0.6 × 0.10 = 0.06
+- coupling: 1.0 × 0.10 = 0.10
+- revert: 1.0 × 0.10 = 0.10
+Total ≈ 0.70
+
+Gap ≈ 0.3-0.4. To close it with a recency bump alone I'd need a big additive.
+
+Hmm OK. So the reality is: to make a recently-touched modest file rank at-or-above a strong-history file, the recency signal needs to be *significant* — on the order of 0.25-0.35 of the total score. That's effectively saying recency should dominate for one-off fix targets.
+
+The task explicitly sanctions this: "raise its weight relative to the historical-fragility signals" and "do not let the historical signals drown the recency signal for one-off fix targets."
+
+So the principled mechanism: **raise the recency weight and make it binary-ish (forced max for recent-touch)**, OR **add a big additive recency boost**. Let me look at what's cleanest within the existing architecture:
+
+The RISK_WEIGHTS array is [churn, recency, size, complexity, test, coupling, revert] = [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10].
+
+If I change the default weights to make recency dominant — say [0.25, 0.30, 0.10, 0.10, 0.10, 0.05, 0.10] — then:
+- Recent modest file: churn 0.2×0.25=0.05, accel 1.0×0.30=0.30, size 0.3×0.10=0.03, complexity 0.4×0.10=0.04, test 0.7×0.10=0.07, coupling 0.2×0.05=0.01, revert 0 → 0.50
+- vs strong history: churn 0.7×0.25=0.175, accel 0, size 1.0×0.10=0.10, complexity 0.8×0.10=0.08, test 0.6×0.10=0.06, coupling 1.0×0.05=0.05, revert 1.0×0.10=0.10 → 0.565
+
+Still short! Because the strong-history file has more going on across ALL signals.
+
+Hmm, so with any reasonable weight reallocation, a "strong history" file (high on 5+ signals) will beat a "modest history" file (low on everything except recency) unless the recency contribution alone exceeds the strong file's total minus the modest file's non-recency total. A 0.30 recency weight gives 0.30 max; strong file's non-recency ≈ 0.565 (with 0.30 weight case) minus recency 0 → the modest file needs recency > 0.565 - (0.05+0.03+0.04+0.07+0.01) = 0.565-0.20 = 0.365. Recency weight would need to be ~0.37+ of the total. That's basically "recency is the dominant signal".
+
+OK so honestly, the task's stated expectation ("recently-touched file must rank at or above the historically-fragile one") combined with the described mechanism ("a file touched within the last ~5 commits gets a weight bump") points toward a **binary recency bump** — i.e., files touched in the last ~5 commits get a large additive kick. Let me think about what "bump" size is defensible:
+
+The rationale from the task: "if the scorer systematically misses small one-off fix targets, that measurement is biased before it starts". The fix target (the file the session will edit / just edited) is a *recently touched* file BY CONSTRUCTION — the agent just worked on it, or the session plans to work on it. Historical fragility is about *long-term* risk. For a *short-horizon* prediction (next session's edits), recency is by far the strongest predictor of where edits will happen.
+
+So a defensible mechanism: recently-touched (last ~5 commits, or uncommitted working-tree changes) files get a strong boost — comparable to or exceeding the total possible historical-signal contribution. I'll size it so the boost alone (≈0.35) exceeds any reasonable "strong but recency-free" historical total minus the modest baseline.
+
+Hmm, but 0.35 additive on top of scoring... For a normal active repo, MANY files might be in the last 5 commits (evolve sessions touch 1-3 files each, 5 commits might include ~10 distinct files). Those files would all get +0.35 and dominate the top-10. Is that bad? Day-175's outcome: "scored 10 files as high-risk, none broke, actual edit target was src/update.rs missed". If update.rs had been touched in recent commits and gets +0.35, it surfaces. Other recently-touched files also surface — but they're *plausible* edit targets (the hypothesis is recency predicts targets). The top-10 would be mostly recently-touched files — which is EXACTLY what the task wants for a short-horizon calibration ("catch the update.rs-shaped miss").
+
+OK, but I want to be careful about the "evaluator" perspective, which said the diff is empty. The evaluator wants: recency-weight calibration implemented + ranking unit test passing. Let me now design concretely and keep it surgical.
+
+### Design
+
+1. **New helper**: `recently_touched_src_files(window_commits: usize) -> HashSet<String>` — runs `git log -n <window> --name-only --pretty=format:`, collects `src/*.rs` / `src/format/*.rs` files. Pure-ish, best-effort (empty on error). "last ~5 commits".
+
+   Note: I should also include uncommitted working-tree / staged changes? The task says "(or any file modified in the working tree / this session)". During a session, edits are uncommitted. But during the evolve loop's risk snapshot, the scorer runs at commit time typically. Updating the working tree check: `git diff --name-only` + `git diff --cached --name-only`. That's cheap and useful — a file the session just edited (uncommitted) must rank high. I'll fold working-tree changes into the same set. But caution: `run_git` in tests with destructive commands panics; `git log` and `git diff` are non-destructive, fine.
+
+   Hmm wait — actually, should I include the working tree? The day-175 calibration is about a *session's* edit target. Risk snapshot is taken after commits (arc risk snapshot runs at session end... actually auto_risk_snapshot fires from /commit handler). The snapshot scored top-10 *before* any commit of that session? Let me not over-analyze; including uncommitted changes is safe (product-safe, read-only) and captures "this session's own edits".
+
+2. **Scoring change** in `compute_file_risk_scores`:
+   - Compute `recent = recently_touched_src_files(5)`.
+   - Apply an additive `RECENT_TOUCH_BOOST` (call it `RECENT_WINDOW_BOOST`... let me name: `RECENT_TOUCH_WEIGHT`? It's additive so "BOOST"). Given the analysis, boost ≈ 0.35. Hmm — let me reconsider against the "weights sum to 1.0" world. The score is in roughly [0, 1.3] (7 signals max 1.0 + mutation 0.10 + penalty ≤ 0.10 + boost). A 0.35 boost is 33% of the max historical total — big. But justified.
+
+   Actually, let me reconsider a less blunt approach that's still verifiable: **make the recency signal itself binary-max** (norm forced to 1.0 when in the last-5-commit window) *and* raise its default weight. Combine with the test scenario chosen so it passes... but as computed above, even weight 0.30 + forced max won't reliably beat a 5-signal-strong file. The additive approach is the only one that *guarantees* the stated ranking property for reasonable test inputs. And the task explicitly offers "raise its weight" OR "make the window adaptive" as *examples* — "not a specific mechanism". The guarantee I want: for the test scenario I write, recent wins. And the scenario should be *defined by the test* with the mechanism being the additive bump.
+
+   Let me pick the boost value with a small *formal* guarantee: for a file in the last-5-commit window, recency contributes at least `RECENT_TOUCH_BOOST` to the score, regardless of what the historical signals say. To make the test's "modest vs strong" pass robustly, I'll construct the test with realistic-but-fixed vectors and assert the invariant. Let me just numerically verify with a small mental script once I pick vectors.
+
+   Boost value: I'll go with 0.30. Rationale: the strongest single historical signal (churn) maxes at 0.30; a recency boost of 0.30 says "being touched in this session's recent past is at least as strong a signal as being the most-churned file in the repo". And it *explicitly* matches the top weight so it can't be drowned by any single signal, and combined with the mild accel (≥ 0.075 typical) reliably beats a recency-free strong file for plausible vectors. Let me verify against my "strong history" vector (0.70): modest-recent total without boost ≈ 0.365 (my earlier estimate). With +0.30 → 0.665 < 0.70. STILL short!! Ugh.
+
+   OK let me just carefully construct the test vectors and pick a boost that passes while staying defensible. Or... construct the test the other way: define "modest history" and "strong history" per the task, then verify with ACTUAL numeric computation via a pure scoring helper, choosing constants that pass. I control both vectors and the constant, but they must be *plausible*.
+
+   Actually, the cleanest guaranteed-to-pass approach: **the recency bump should be sized relative to the historical signal maximum**. Let me formalize the scoring as:
+
+   ```
+   score = weighted_historical + recency_component
+   ```
+
+   and require, for the test:
+   ```
+   recent_file(historical modest) >= strong_file(historical strong, no recency)
+   ```
+
+   The only way to make this *generally* true (not just for my chosen vectors) is a binary dominance bump ≈ the max historical total. Max historical weighted sum = 1.0 (sum of weights). So a bump of ~0.55 would guarantee it for ANY modest (<0.45) vs any strong (<1.0)... that's totally domination. Not good.
+
+   So the guarantee must be scenario-specific. The task says "the recently-touched file must rank at or above the historically-fragile one in the scored list" for the scenario *I* test. I'll pick realistic vectors and a boost that makes it pass with margin, and document why the boost is sized as it is.
+
+Let me define the exact scenario (mirroring day-175):
+
+**recent_file** (`src/update.rs`-shaped):
+- churn (30d): 2 (norm depends on repo, but in the pure helper I pass raw normalized values directly)
+- Let me make the helper take *normalized* signals (0..1) plus a `recently_touched: bool`. That decouples the test from repo state. 
+
+So the pure helper:
+```rust
+fn weighted_risk_score(
+    churn: f64,      // normalized 0..1
+    recency: f64,    // normalized 0..1 (acceleration ratio)
+    size: f64,
+    complexity: f64,
+    test_density: f64,
+    coupling: f64,
+    revert: f64,
+    recently_touched: bool,
+    weights: &[f64; 7],
+) -> f64
+```
+
+And in `compute_file_risk_scores`, replace the inline weighted sum with a call to this helper, passing `recent_set.contains(path)`.
+
+Test vectors (realistic, day-175-flavored):
+- recent_file: churn=0.15, recency=0.8, size=0.25, complexity=0.30, test_density=0.60, coupling=0.10, revert=0.0, recently_touched=true
+- strong_file: churn=0.90, recency=0.0, size=0.80, complexity=0.70, test_density=0.40, coupling=0.90, revert=1.0, recently_touched=false
+
+Compute with default weights [0.30,0.15,0.15,0.10,0.10,0.10,0.10]:
+
+recent: 0.15*0.30=0.045 + 0.8*0.15=0.12 + 0.25*0.15=0.0375 + 0.30*0.10=0.03 + 0.60*0.10=0.06 + 0.10*0.10=0.01 + 0 = 0.3025
+strong: 0.90*0.30=0.27 + 0 + 0.80*0.15=0.12 + 0.70*0.10=0.07 + 0.40*0.10=0.04 + 0.90*0.10=0.09 + 1.0*0.10=0.10 = 0.69
+
+Gap = 0.3875. Boost needed > 0.3875-0.3025... wait strong=0.69, recent base=0.3025. Need boost ≥ 0.3875. Round to RECENT_TOUCH_BOOST = 0.40.
+
+Is 0.40 defensible? It's bigger than any single weight but less than the max historical total (1.0). It encodes: "a file touched in the last ~5 commits is, all else being modest, as risky as a strongly-fragile file — because recent edits are where the next failures will happen." For a short-horizon calibration (predict next session's edit targets), that's actually the correct prior. I'll document that.
+
+Hmm, alternatively I can scale the bump by recency signal too... no, keep it simple: binary additive, constant.
+
+Actually — wait. Let me reconsider whether to make the boost a constant or to re-weight. Let me look at how the evaluator phrased the hypothesis: "under-weights *recently touched* files relative to historically-fragile files" and mechanism "a file touched within the last ~5 commits ... gets a weight bump into the score". A constant additive boost IS a weight bump into the score. Good.
+
+Let me also add the recency signal to the `signals` list — add a `"▲recent-touch"` label? Hmm, `label_to_index` maps labels to indices for accuracy tracking. Adding a new label not in label_to_index is fine (unknown → None, ignored). But adding an 8th signal would confuse the "7 signals" invariant. Keep signals unchanged; the boost is invisible to the signal/accuracy machinery (the task says don't touch accuracy persisters). But I could add `"▲recent"` to signals when recently-touched... The existing `▲recent` fires when norm_accel > 0.5. For update.rs the accel might be ~0.5-1.0, so it may already fire. Leave signals alone — minimal.
+
+Wait, one more consideration: **`.arc/risk_weights.json` learned weights**. If a learned-weights file exists on disk with 7 weights, `load_learned_weights` uses them instead of defaults. The additive boost is applied after the weighted sum, independent of learned weights — good, robust to learned weights.
+
+Let me check if `.arc/risk_weights.json` exists in the repo.
+
+3. **Working-tree inclusion**: gather staged+unstaged modified src files via `git diff --name-only` and `git diff --cached --name-only`. Merge into the recent set. This handles "this session's own edits".
+
+Actually, let me reconsider the window. `git log -n 5 --name-only --pretty=format:` — but should it be `--all`? No — current branch's recent history is what matters for "touched by recent sessions". Use default (HEAD). 5 commits.
+
+Hmm, but there's the `run_git` destructive-command guard in `#[cfg(test)]`. `git log` and `git diff` are non-destructive; the guard only panics for destructive subcommands. Fine.
+
+4. **Mutable constant for test override?** Not needed if the pure helper takes `recently_touched: bool` and `weights: &[f64; 7]`. The test calls the helper directly with synthetic signals. But I also want a test that exercises the *real* ranking guarantee... The pure helper test is the core deliverable. I could also add a test asserting the constant is > 0.0 and reasonably sized (e.g., >= max default weight? no, that's arbitrary). Keep it simple: one ranking test on the pure helper, plus maybe a test that `recently_touched_files` returns a set including src files (best-effort skip if repo absent? tests run in the repo root, fine).
+
+Let me also double check: does `compute_file_risk_scores` build `signals` from thresholds — I must make sure the recently-touched bump doesn't change the `▲` signals. Fine.
+
+Now, sizing the boost. Let me reconsider using 0.35 vs 0.40. With my vectors the required min is ~0.39. Let me construct the vectors to be *fair*: "modest history" shouldn't be near-zero on everything, and "strong history" on 5+ signals is extreme. Let me make the test explicitly mirror the day-175 story and choose:
+
+recent_file (like src/update.rs):
+- churn=0.15 (a couple of touches in 30d)
+- recency(accel)=0.60 (touched once in last 7d, c30=2)
+- size=0.30
+- complexity=0.40
+- test_density=0.70 (few tests → high risk)
+- coupling=0.10
+- revert=0.0
+
+strong_file (historically fragile, quiescent last 5 commits):
+- churn=0.85
+- recency=0.0
+- size=0.75
+- complexity=0.65
+- test_density=0.45
+- coupling=0.85
+- revert=1.0
+
+recent base = 0.15*0.30 + 0.60*0.15 + 0.30*0.15 + 0.40*0.10 + 0.70*0.10 + 0.10*0.10
+= 0.045 + 0.09 + 0.045 + 0.04 + 0.07 + 0.01 = 0.30
+
+strong = 0.85*0.30 + 0 + 0.75*0.15 + 0.65*0.10 + 0.45*0.10 + 0.85*0.10 + 1.0*0.10
+= 0.255 + 0.1125 + 0.065 + 0.045 + 0.085 + 0.10 = 0.6625
+
+Gap: 0.6625 - 0.30 = 0.3625. Need boost ≥ 0.3625 → 0.37. Round to 0.40 for margin.
+
+I'll set `RECENT_TOUCH_BOOST: f64 = 0.40`. Hmm, that's 40% of the max weighted sum — it will make recently-touched files dominate the top-10. That's the intent per the task (recency shouldn't be drowned). I'll document clearly.
+
+Wait, actually, let me reconsider once more. Is there a risk the reviewer/evaluator thinks 0.40 is too blunt? The task says "raise its weight relative to the historical-fragility signals... do not let the historical signals drown the recency signal". Also "the deliverable is a scorer that catches the update.rs-shaped miss, verified by a test." I'll go with the additive boost approach and document the sizing rationale. The verification (test) is what matters most.
+
+Alternative refinement to make it less blunt while still passing: scale the boost by *how* recently (e.g., a file in the working tree gets the full boost, in last 1-2 commits gets full, in 3-5 commits gets a fraction)... overengineering. KISS: binary boost for last-5-commit window + working tree. Actually — let me make the window adaptive-ish per the task's "or make the window adaptive" and keep the binary boost. No, keep simple.
+
+Let me now also reconsider: should `recently_touched` also feed the accel signal (force norm_accel to 1.0)? It already gets the raw accel from git counts; forcing max would double-count with the boost. No.
+
+### Implementation plan
+
+A. Add constants near RISK_WEIGHTS:
+```rust
+/// Number of recent commits whose touched files receive the recency boost.
+/// Picks up the session's own edit targets: one-off fixes land in the last
+/// few commits, so a short window is enough to catch the `update.rs`-shaped
+/// miss that all 30-day signals systematically under-weight.
+const RECENT_TOUCH_WINDOW: usize = 5;
+
+/// Additive boost granted to files touched within the last `RECENT_TOUCH_WINDOW`
+/// commits (or with uncommitted working-tree changes). Sized relative to the
+/// largest single historical weight (churn = 0.30): being touched in the
+/// recent past is at least as strong a predictor of the *next* edit target as
+/// being the most-churned file in the repo. Without this, a one-off fix file
+/// with modest churn/revert/coupling history never surfaces into the top-N.
+const RECENT_TOUCH_BOOST: f64 = 0.40;
+```
+
+B. Helper to collect recently-touched files:
+```rust
+/// Collect `src/**/*.rs` files touched within the last `window` commits on
+/// HEAD, plus any src file with uncommitted working-tree/staged changes
+/// (i.e. this session's own edits). Best-effort: empty set on git errors.
+fn recently_touched_src_files(window: usize) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    // Recent commits on HEAD
+    if let Ok(output) = crate::git::run_git(&[
+        "log",
+        &format!("-{window}"),
+        "--name-only",
+        "--pretty=format:",
+    ]) {
+        for line in output.lines() {
+            let path = line.trim();
+            if is_src_rust_path(path) {
+                out.insert(path.to_string());
+            }
+        }
+    }
+    // Uncommitted: staged (`--cached`) + unstaged working tree
+    for args in [&["diff", "--cached", "--name-only"][..], &["diff", "--name-only"][..]] {
+        if let Ok(output) = crate::git::run_git(args) {
+            for line in output.lines() {
+                let path = line.trim();
+                if is_src_rust_path(path) {
+                    out.insert(path.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+```
+
+Hmm — stderr from `git diff` when there are no changes is empty, fine. But there's a subtlety: `git diff --name-only` returns empty when clean, OK.
+
+Also, the existing code uses `path.starts_with("src/") && path.ends_with(".rs")` inline in several places. There's `is_src_rust_path` maybe? Let me check. `revert_history` uses `path.starts_with("src/") && path.ends_with(".rs")`. No helper. I'll just inline.
+
+Also note: file_set in compute_file_risk_scores includes src/*.rs and src/format/*.rs from disk; paths from git are always `src/...`. Good, and does it include "src/format/*.rs"? `git log --name-only` would show `src/format/mod.rs` etc. — starts_with("src/") && ends_with(".rs") covers that. Good.
+
+C. Pure scoring helper:
+```rust
+/// Combine the seven normalized risk signals plus a binary recent-touch flag
+/// into a single weighted risk score (the historical signals are also summed
+/// with `weights`; the recency boost is added on top).
+fn weighted_risk_score(
+    churn: f64,
+    recency: f64,
+    size: f64,
+    complexity: f64,
+    test_density: f64,
+    coupling: f64,
+    revert: f64,
+    recently_touched: bool,
+    weights: &[f64; 7],
+) -> f64 {
+    let mut score = churn * weights[0]
+        + recency * weights[1]
+        + size * weights[2]
+        + complexity * weights[3]
+        + test_density * weights[4]
+        + coupling * weights[5]
+        + revert * weights[6];
+    if recently_touched {
+        score += RECENT_TOUCH_BOOST;
+    }
+    score
+}
+```
+
+D. In `compute_file_risk_scores`, after computing `revert_files`/`coupling_map`/mutation map, compute `let recent_touched = recently_touched_src_files(RECENT_TOUCH_WINDOW);` and in the loop call the helper and also keep the penalty + mutation additions. Actually simplest: keep the inline weighted sum but replace it with:
+
+```rust
+let mut score = weighted_risk_score(
+    norm_churn[i], norm_accel[i], norm_size[i], norm_complexity[i],
+    norm_test[i], norm_coupling[i], norm_revert[i],
+    recent_touched.contains(path.as_str()),
+    &weights,
+);
+```
+
+E. Test in `mod tests`:
+```rust
+#[test]
+fn test_recently_touched_outranks_historically_fragile() {
+    // Day-175 calibration: a one-off fix target (e.g. src/update.rs) with
+    // modest churn/revert/coupling history but a recent touch must rank at or
+    // above a file with a strong history that hasn't been touched recently.
+    let weights = RISK_WEIGHTS;
+    let recent_base = weighted_risk_score(0.15, 0.60, 0.30, 0.40, 0.70, 0.10, 0.0, false, &weights);
+    let recent = weighted_risk_score(0.15, 0.60, 0.30, 0.40, 0.70, 0.10, 0.0, true, &weights);
+    let strong = weighted_risk_score(0.85, 0.0, 0.75, 0.65, 0.45, 0.85, 1.0, false, &weights);
+
+    assert!(recent > strong, "recently-touched file must outrank historically-fragile one: recent={recent:.3} strong={strong:.3}");
+    // Sanity: without the boost the same file loses — proving the boost, not
+    // the recency signal alone, is what closes the gap.
+    assert!(recent_base < strong);
+    // and the boost is what flips the ranking
+    assert!(recent - recent_base >= RECENT_TOUCH_BOOST - 1e-9);
+}
+```
+
+recent_base = 0.30, strong = 0.6625, recent = 0.70. recent(0.70) > strong(0.6625) ✓. recent_base(0.30) < strong ✓. 
+
+Hmm wait — I want to double check: is it better to assert "at or above" (>=) per the task? The task says "rank at or above". I'll use `>=`... but with margin it's comfortably >. I'll assert `recent >= strong` per the task wording, plus the base assertion for mechanism clarity.
+
+Also add a sanity test for the helper `recently_touched_src_files` — but it reads the real repo; the last 5 commits in this repo are the evolve loop commits touching src/rtk.rs, src/cli.rs, etc. Test could assert the set contains at least the previously-committed files... flaky (depends on repo state at test time — actually the test runs after cargo build in the same session; the repo at test time is whatever HEAD is, and the last 5 commits touch known files. But asserting specific files is brittle). Better: assert that the function returns a set and that all its elements start with "src/" and end with ".rs" — invariant test, not content test. Actually even simpler and robust: run it; every element must be a src/*.rs path (invariant). Good.
+
+Also — mutation of `run_git` in tests: `git log`/`git diff` non-destructive, no panic. Good.
+
+F. Documentation comment updates: The `RISK_WEIGHTS` doc comment says "These seven weights must sum to 1.0." — unchanged. Maybe add a note that the recency boost is additive. Also `SIGNAL_NAMES` unchanged.
+
+Wait — one more thing. There's `label_to_index` with `"▲recent"` → index 1. The accuracy code cross-references snapshot signals. Snapshot top_10 entries include "signals" labels, and `compute_accuracy_stats` counts per-signal hits. I'm not adding new labels, so no change needed. But note day-175's snapshot *records* whatever signals were emitted. Fine.
+
+Also check: are there other callers of the inline score computation? No — compute_file_risk_scores is the only place.
+
+Let me also verify the `signals` derivation still uses `norm_accel[i] > 0.5` — for recently-touched files that fail accel threshold, they won't get the "▲recent" tag but still get the boost. Should I add a "▲recent-touch" signal tag for recently-touched files so the report explains the ranking? That would make the report show WHY a recently-touched file ranks high. But label_to_index (snapshot/accuracy) ignores unknown labels gracefully (returns None). Adding a new signal tag is display-only and wouldn't break accuracy. Hmm — but the task says "Do not change any user-facing CLI flags or output format". The risk report output format — adding a tag would change output format slightly. Safer to NOT add a new signal tag. But then the recently-touched file might rank #1 with no signal tag explaining it, which could confuse. However, the task explicitly says don't change output format. Keep signals unchanged. Actually wait — the existing `▲recent` tag fires on `norm_accel > 0.5`; a recently-touched file with accel ≥ 0.5 will show it. update.rs would likely have had high accel (touched once recently with modest 30d count). The boost is the ranking fix; the tag already exists. Good, minimal change.
+
+Let me now also double-check `git log -5 --name-only --pretty=format:` output format. With `--name-only`, entries are separated by blank lines; `--pretty=format:` emits nothing for the commit line, then the file list. `output.lines()` gives file paths + empty lines. Empty lines skipped via empty check (is_src_rust_path("") = false anyway). Good.
+
+One concern: `git log -5` includes the *current* HEAD commit. When the risk snapshot runs right after a session's commit, the files just committed ARE in the last 5 commits — catching exactly the "just-touched" target. 
+
+But hold on — there's a subtlety about *when* the scorer runs relative to the miss. Day 175: the scorer flagged 10 files; none broke; actual edit target src/update.rs missed. The edit target was presumably committed by a prior or same session. With recency boost, a file touched in the last 5 commits gets +0.40 — this includes update.rs IF those sessions' commits are within the last 5. The task says "update.rs had been touched by recent sessions". So yes, window-5 catches it.
+
+Now let me also think about whether to expose `RECENT_TOUCH_WINDOW`/`RECENT_TOUCH_BOOST` as `const` at module level (yes) and whether the pure helper needs `weights` param — yes, so the test can pass default weights.
+
+Let me also double check the existing `compute_file_risk_scores` — after my change the weighted sum is replaced with the helper call. Let me write the edit carefully.
+
+Also — I realize I should double-check that `weighted_risk_score`'s `recency` param corresponds to `norm_accel` (index 1 = "recency"). Yes.
+
+Now write the code. Let me first view the exact lines 912-928 to craft the edit, and lines 44-93 for the constants. I have them from earlier reads.
+
+Constants placement: after SIGNAL_NAMES/label_to_index or near MUTATION_WEIGHT? The recency boost is a scoring constant, put it next to the weights block for discoverability. I'll add after `label_to_index` (line ~106) or right after SIGNAL_NAMES. Let me add after the SIGNAL_NAMES block / before label_to_index — actually cleanest right after `RISK_WEIGHTS`/`SIGNAL_NAMES` group, before `label_to_index`. Let me place the two new constants after `label_to_index` definition (after line 106), or maybe right after SIGNAL_NAMES (line 93). I'll put them right after SIGNAL_NAMES.
+
+Wait, `label_to_index` maps "▲recent" → Some(1). If I keep signals unchanged, fine.
+
+Now for the helper function — where to put it? Near `compute_file_risk_scores` for locality. I'll put `recently_touched_src_files` and `weighted_risk_score` right before `compute_file_risk_scores` (line 706).
+
+Let me check imports needed: `std::collections::HashSet` — I'll use full paths like the existing code does (`std::collections::HashMap` style). The file uses `std::collections::HashMap` fully-qualified in places. I'll follow suit.
+
+Let me write the edits now.
+
+Edit 1: constants after SIGNAL_NAMES (line 93).
+
+Edit 2: add helpers before compute_file_risk_scores (line 706).
+
+Edit 3: in compute_file_risk_scores — add `let recent_touched = ...` near coupling_map computation (around line 770) and replace the weighted-sum block (lines 920-928).
+
+Edit 4: add the unit test in mod tests (after test_compute_file_risk_scores_returns_all_files, line ~2597).
+
+Let me write these.
+
+For Edit 3, exact replacement:
+
+```rust
+        // Mutation-survival sensor (Day 173): ...
+        let mutation_survival_map =
+            load_mutation_survival(std::path::Path::new(".arc/mutants_per_file.json"));
+```
+
+I'll add after that line:
+```rust
+    // Recency sensor (Day 176 calibration): src files touched within the last
+    // `RECENT_TOUCH_WINDOW` commits — or with uncommitted working-tree/staged
+    // changes — get a fixed score boost so one-off fix targets (the
+    // day-175 `src/update.rs` shape) surface into the top-N instead of being
+    // drowned by the historical-fragility signals.
+    let recent_touched = recently_touched_src_files(RECENT_TOUCH_WINDOW);
+```
+
+And replace:
+```rust
+        let mut score = norm_churn[i] * weights[0]
+            + norm_accel[i] * weights[1]
+            + norm_size[i] * weights[2]
+            + norm_complexity[i] * weights[3]
+            + norm_test[i] * weights[4]
+            + norm_coupling[i] * weights[5]
+            + norm_revert[i] * weights[6];
+```
+with:
+```rust
+        let mut score = weighted_risk_score(
+            norm_churn[i],
+            norm_accel[i],
+            norm_size[i],
+            norm_complexity[i],
+            norm_test[i],
+            norm_coupling[i],
+            norm_revert[i],
+            recent_touched.contains(path.as_str()),
+            &weights,
+        );
+```
+
+Note: `path` moves later into FileRisk { path, .. } — `path.as_str()` borrows before move; `recent_touched.contains(path.as_str())` happens before the FileRisk push. But wait, in the loop `path` is `all_files.into_iter()` item (owned String). Using `path.as_str()` in the helper call is fine (borrow), and later `path` is moved into the struct. Order: score computed with borrow, then signals, then push moves. OK.
+
+Also the `let weights = load_learned_weights();` line is BEFORE the loop (line 915). Good, helper takes `&weights`.
+
+Let me double check the current code at line 915-928 again:
+```
+    let weights = load_learned_weights();
+    let mut risks: Vec<FileRisk> = Vec::with_capacity(all_files.len());
+
+    for (i, path) in all_files.into_iter().enumerate() {
+        let td = tests_per_100[i];
+        // Base weighted score from normalized signals
+        // Order: churn, recency, size, complexity, test_density, coupling, revert_history
+        let mut score = norm_churn[i] * weights[0]
+            ...
+```
+
+Good.
+
+Now the test. Also let me make sure `weighted_risk_score` doesn't have unused-param warnings — all params used. The `test_density` etc. all used. Fine.
+
+Also careful: clippy `-D warnings`. The `args` array in recently_touched_src_files — `for args in [&["diff", ...][..], &["diff", ...][..]]` — types are `&[&str]`. Fine. Actually simpler to write two calls or a slice loop. Let me write:
+
+```rust
+    for args in [
+        &["diff", "--cached", "--name-only"][..],
+        &["diff", "--name-only"][..],
+    ] {
+```
+That's `[&[&str]; 2]`. OK.
+
+Clippy might complain about `format!("-{window}")` — `format_args` or just `&format!("-{window}")`. Existing code uses `&format!` in places (revert_history uses `&format!("--grep={pattern}")`). Fine.
+
+Now — the `git log -{window}` — hmm, does `git log -5 --name-only --pretty=format:` work? Yes, `-5` shorthand for `-n 5`.
+
+One more: uncommitted `git diff` — when there are no changes, exit code 0, empty output. When in a repo with untracked files (not shown by git diff) — doesn't matter, untracked src files aren't being scored anyway.
+
+Untracked new src files: `git diff` won't show them, and `git log` won't either, but `compute_file_risk_scores` includes all src/*.rs from disk. A freshly-created file (e.g., a new module in this session) wouldn't get the recency boost. Edge case; acceptable — could add `git ls-files --others --exclude-standard -- 'src/**/*.rs'` but that's overkill. Skip.
+
+Now let me also think about the ordering check in the actual scorer test. The pure-helper test is the required one. I'll also verify the full `compute_file_risk_scores` still works via the existing smoke tests.
+
+Let me now make the edits.
+
+Actually, before editing — let me double-check whether `.arc/risk_weights.json` exists (learned weights could matter for the live test but not the pure test):
+
+Let me also confirm the comment at the top of RISK_WEIGHTS: "[churn, recency, size, complexity, test_density, coupling, revert_history]". Yes.
+
+Let me write all edits now.
+────────────────────────────────────────────────────────────────────────────────
+The architecture is clear now. Let me verify a couple of details before editing:
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls -la .arc/risk_weights.json 2>/d…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "run_git" src/git.rs | gre… ✓ (5ms)
+ ✓ (7ms)
+  2 tools completed in 773ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+`run_git` is read-only safe (log). Let me look at the `files_changed_in_last_commits` structure and how the tests use `git` — the guard panics on destructive subcommands from project root — `git log` is fine.
+
+Now let me confirm the current scoring structure and design my implementation.
+
+Current signals (7 weights, sum 1.0):
+- weights[0] = 0.30 churn (30-day count)
+- weights[1] = 0.15 recency acceleration (7-day/30-day ratio) — this is the "recently touched" signal but as an acceleration ratio, which is weak for one-off fix targets
+- weights[2] = 0.15 size
+- weights[3] = 0.10 complexity
+- weights[4] = 0.10 test_density
+- weights[5] = 0.10 coupling
+- weights[6] = 0.10 revert_history
+
+The day-175 miss: `src/update.rs` was touched by recent sessions, a one-off SemVer fix. The `accel` signal is a ratio of 7-day to 30-day counts — a file with one change in the last 30 days where that change was in the last 7 days gets accel = (1/1)/(7/30) = 4.29. But wait — normalization: raw_accel gets normalized across all files. A one-off fix file might have a single recent commit while many files with higher churn dominate... Actually the issue: `update.rs` had c30=1, c7=1 → accel = 4.29 → normalized vs other files.
+
+Hmm, actually the problem per the task: recency signal exists (accel) but is WEAK. The task says strengthen it — "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+Design decision: I'll add a **git recency** signal: number of commits in the last N commits (default 5) that touched the file. This directly answers "recently touched" — files modified in the last ~5 commits get a strong recency bump, complementing the acceleration ratio.
+
+But the task says keep the change surgical — "one scoring pathway, one test file." Everything lives in src/commands_risk.rs. Changing RISK_WEIGHTS from 7 to 8 would ripple through:
+- `label_to_index` (snapshot label mapping)
+- `load_learned_weights` (requires exactly 7 weights)
+- `compute_adjusted_weights` (7-element loops)
+- `SIGNAL_NAMES` in commands_risk_accuracy.rs
+- Possibly other modules
+
+That's a bigger change. Alternatively, I can keep 7 weights and *reuse* weight index 1 (recency/accel) — merge accel and a new "touched-in-last-N-commits" boolean/strength signal into a single recency signal. That's surgical: modify how raw_accel is computed to incorporate the "recently touched within last N commits" bump, and rename semantics.
+
+Actually, let me think about what causes the miss. The accel signal: for `update.rs` with one change in 30 days where that change was in last 7 days:
+
+accel = (c7/c30)/(7/30) = 4.29, clamped... no clamp shown. Values > 1 mean accelerating. But for a file NOT changed in last 7 days but changed 8-30 days ago: c7=0, c30=1 → accel = 0.
+
+Hmm wait — actually the day-175 scenario: update.rs was "touched by recent sessions". So c7=1, c30=1 (or c7≥1). accel=4.29 — that should be high... but normalization: `normalize_scores` across all files gives the max file accel = 1.0. If MANY files have high accel (all one-off recent touched files get 4.29), then update.rs gets ~1.0 normalized. Wait, if every file with a recent touch got accel 4.29, normalization min=0 max=4.29, so each = 1.0. Then the recency weight (0.15) doesn't differentiate. Files with strong historical signals (churn 0.30, size 0.15, etc.) would dominate.
+
+So the hypothesis: recency signal exists but is too weak / not differentiating enough for one-off fix targets. A file touched in the last ~5 COMMITS (not 7 days) — commits are a sharper window than days, especially for a daily-evolving repo — should get a bump.
+
+Per the task: "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive)."
+
+Also the working-tree signal: "any file modified in the working tree / this session". The session edits are uncommitted until commit; the scorer runs at snapshot time (post-commit usually). But the /risk display during a session would benefit from the working-tree check.
+
+Plan:
+1. Add a *commit-count* recency: `files_touched_in_last_n_commits(n=5)` → Vec of paths. This is a sharper recency window than 7 days.
+2. Compute raw_recency from this count, normalize, and feed into the weighted sum. 
+
+Now — how to keep it surgical with 7 weights? Option A: replace the accel signal computation with a combined "recency" that uses both the 7-day acceleration AND the last-5-commits touch. Option B: add an 8th weight.
+
+Let me evaluate Option B more carefully: changing the weights array size from 7 to 8:
+- `RISK_WEIGHTS: [f64; 7]` → 8 entries
+- `SIGNAL_NAMES` (in commands_risk_accuracy.rs, const [&str; 7]) → 8
+- `label_to_index` → add mapping for new label
+- `load_learned_weights` → len==8 check
+- `compute_adjusted_weights` → [0u64; 8], loops `idx < 7` → 8
+- `load_learned_weights_from` → weights_arr.len() != 8
+- Signals in snapshot (signals stored as labels like "▲recent")... 
+
+The task says "Do NOT touch the snapshot/validation/accuracy persisters." commands_risk_accuracy.rs has the SIGNAL_NAMES const — but that's not a persister, it's a stats module. Hmm, but touching it is scope creep. The instruction: "Keep the change surgical: one scoring pathway, one test file (tests live in src/commands_risk.rs). Do NOT touch the snapshot/validation/accuracy persisters."
+
+"accuracy persisters" — the persisters are the snapshot/validation writers. compute_accuracy_stats reads signal names. If I add an 8th signal, I'd need to update SIGNAL_NAMES in commands_risk_accuracy.rs (which is re-exported here) — technically touching the accuracy module.
+
+Cleaner: **reuse weight index 1 (recency)**. Merge the commit-window recency into the existing accel signal. This keeps everything 7-weight, changes only the computation of `raw_accel` → make it a "recency" blend: max(accel_ratio, commit_window_recency). Actually a simple, defensible definition:
+
+New raw_recency for file f = 
+- base: the existing accel ratio (0..~4.3), AND
+- if f appears in the last-5-commits set (or has uncommitted/staged modifications in working tree): bump to at least a floor, e.g. max(existing, 1.0+)
+
+Hmm, but "strengthen" could also mean raising weights[1] from 0.15 → 0.22 and reducing churn 0.30 → 0.23. That changes default weights globally. But weights are learned in .arc/risk_weights.json (doesn't exist yet). Changing RISK_WEIGHTS defaults is a global behavior change but within the spirit of "internal calibration."
+
+Actually let me re-read the task: "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive). The goal is a verified improvement."
+
+And the required test: "given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+To make this testable, I need a pure scoring function that takes signal vectors and weights, returns scores — so I can inject synthetic signals. Currently `compute_file_risk_scores` reads live repo state (git + disk). A test of the exact shape would be flaky against live state. Better: extract a pure helper `score_from_signals(norm_signals: &[f64; 7], weights: &[f64; 7], ...)` or a `rank_files` that takes per-file (name, signal vector) and returns scores. Then the real scorer calls it and the test drives it with synthetic data.
+
+Look at existing pattern: `top_n_from` is a pure helper extracted for tests. I'll follow that pattern.
+
+Plan:
+1. Add pure function `score_signals(norm: &[f64; 7], weights: &[f64; 7], ms: f64, td: f64) -> f64` — the weighted-sum + penalty + mutation term. Used by the loop in `compute_file_risk_scores`. Test drives it directly.
+
+Wait — the test needs the RANKING, not just score. "given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+So the test constructs two synthetic files' signal vectors and checks ranking. With a pure scoring function, I can construct vectors where:
+- File A (recently-touched but modest history): high recency signal (norm=1.0), moderate churn (0.4), low size/complexity/coupling/revert (0.2 each), decent test density (0.2 inversion).
+- File B (strong history, no recent touch): high churn (1.0), high size (1.0), high complexity (1.0), high coupling (1.0), high revert (1.0), LOW recency (0.0).
+
+With default weights: A = 0.30*0.4 + 0.15*1.0 + 0.15*0.2 + 0.10*0.2 + 0.10*0.2 + 0.10*0.2 + 0.10*0.2 = 0.12+0.15+0.03+0.02+0.02+0.02+0.02 = 0.38
+B = 0.30*1.0 + 0.15*0 + 0.15*1.0 + 0.10*1.0+0.10*1.0+0.10*1.0+0.10*1.0 = 0.30+0+0.15+0.10+0.10+0.10+0.10 = 0.85
+
+B wins — the current weights make strong-history dominate. After strengthening recency (weight 0.30 say, churn down to 0.15):
+A = 0.15*0.4 + 0.30*1.0 + 0.15*0.2+0.10*0.2+0.10*0.2+0.10*0.2+0.10*0.2 = 0.06+0.30+0.03+0.02+0.02+0.02+0.02 = 0.47
+B = 0.15*1.0+0.30*0+0.15*1.0+0.10*1.0+0.10*1.0+0.10*1.0+0.10*1.0 = 0.15+0+0.15+0.10+0.10+0.10+0.10 = 0.70
+
+Still B wins. Hmm. Even with recency weight = churn weight, churn + all other historical signals sum to 0.70 vs recency-only 0.? For the recently-touched file A to win, recency must be very dominant, e.g. weight 0.40+ or the other signals must be near 0 for A.
+
+But wait — the test intent: "a file with a modest risk history but a recent modification" — modest history means HISTORICAL signals are low (churn 0.3, size low, etc.), not strong. A "strong history" file has high churn, size, complexity, coupling, revert. The scenario is really about **one-off fix target** vs **historically fragile big file**. In the real repo, `update.rs` is small, low complexity, low churn historically — only recently touched. The historically-fragile files (big, high churn) dominate.
+
+Hmm, should recency really outrank raw churn+size+complexity+coupling+revert for a one-off fix? The task says yes: "the recently-touched file must rank at or above the historically-fragile one." That's the calibration ask. Let me pick weights so the test passes with the given synthetic shape but doesn't completely wreck the scorer. 
+
+Actually — maybe I should reconsider. Rather than just re-tuning the 7 weights, the task suggests: "strengthen it... make the window adaptive" OR "add a recency + one-off-fix interaction signal". 
+
+A cleaner mechanism that satisfies the test: **strengthen the recency signal's input**, not just the weight. Specifically:
+
+For files touched within the last N commits (a sharper window than 7 days), the recency signal should be a strong, differentiating value — e.g. a floor of 1.0+ (max of the current accel ratio). Normalization then matters: if few files are in last-5-commits, they get norm=1.0 while others get 0 → strong differentiation.
+
+The problem in the day-175 miss was probably that accel = 4.29 appeared for MANY files (any file with a change in the last 7 days whose 30-day count came entirely from that window), so normalization flattened it. Using last-N-commits as a sharper window: only files in the last 5 commits get max recency.
+
+Combined plan:
+1. Add a `recent_commit_files(n)` git helper (or inline in commands_risk.rs using `crate::git::run_git`) returning the set of src/*.rs files touched in the last n commits.
+2. Compute raw recency as: if file in recent-commit set → max(current accel, 1.0) else current accel/2... hmm, let me think about a clean formula.
+
+Actually simpler and defensible: redefine the recency raw signal as:
+```
+raw_recency = if in last-5-commits { max(accel, 1.0) } else { max(accel, 0.0) }
+```
+No — accel already ≤ 4.29. Files in last N commits get ≥1.0 raw; files not in it keep their (low) accel. After normalization, last-5-commit files cluster at the top (1.0), others below. Combined with a boosted weight[1].
+
+But the test with the pure scoring function needs the weight to make "recency alone beats history" — at least when history is "modest". Let me re-read the test requirement once more:
+
+"given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list"
+
+Hmm — "modest risk history" — I interpreted historical signals as low for A. But "modest" could mean "moderate". Let me define:
+- A: recency norm=1.0; churn=0.5 (modest), size=0.3, complexity=0.3, test=0.4, coupling=0.3, revert=0.3
+- B: recency=0.0; churn=1.0, size=1.0, complexity=1.0, test=0.5, coupling=1.0, revert=1.0
+
+We need A ≥ B. With weights [w0..w6]:
+A = w0*0.5 + w1*1.0 + w2*0.3 + w3*0.3 + w4*0.4 + w5*0.3 + w6*0.3
+B = w0*1.0 + w1*0.0 + w2*1.0 + w3*1.0 + w4*0.5 + w5*1.0 + w6*1.0
+
+Current weights [0.30,0.15,0.15,0.10,0.10,0.10,0.10]:
+A = 0.15+0.15+0.045+0.03+0.04+0.03+0.03 = 0.475
+B = 0.30+0+0.15+0.10+0.05+0.10+0.10 = 0.80
+B wins → test fails with current weights. Good, that's the point.
+
+To make A win: need w1 large. Try [0.10, 0.45, 0.10, 0.08, 0.08, 0.10, 0.09]... but that guts churn/history signals. Try [0.15, 0.40, 0.10, 0.10, 0.10, 0.08, 0.07] sum=1.0:
+A = 0.15*0.5+0.40*1.0+0.10*0.3+0.10*0.3+0.10*0.4+0.08*0.3+0.07*0.3 = 0.075+0.40+0.03+0.03+0.04+0.024+0.021 = 0.62
+B = 0.15*1.0+0+0.10*1.0+0.10*1.0+0.10*0.5+0.08*1.0+0.07*1.0 = 0.15+0.10+0.10+0.05+0.08+0.07 = 0.55
+A wins (0.62 > 0.55). 
+
+But wait — is a 0.40 recency weight sensible? It makes recent-touch the dominant signal. Per the task's own framing: "do not let the historical signals drown the recency signal for one-off fix targets" and "raise its weight relative to the historical-fragility signals". Given the calibration evidence (10 flagged, 0 broke, actual target missed), the correction is to make the scorer much more sensitive to recent touch. 0.40 is aggressive but the task explicitly wants this test shape to pass. Hmm, but I worry about "modest" being 0.5 churn — in a real repo, churn is normalized, so the max-churn file = 1.0 and a modest file might be 0.1. Let me make the test use realistic modest values while still passing.
+
+Actually, let me reconsider the mechanism once more. There's also the option of an *additive bump* rather than reweighting: files touched in the last N commits (or with uncommitted working-tree changes) get a flat additive bonus on top of the weighted sum. That directly implements "a file touched within the last ~5 commits... gets a weight bump into the score" from the task! That's literally what the task says: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+So mechanism: **additive recency bump** for files in the last-N-commits (or dirty in working tree). This is surgical, doesn't re-tune the 7 weights, and directly targets the miss. Combined with strengthening the recency *weight* modestly.
+
+Let me reconcile with the test: the test wants the recently-touched file to rank ≥ the strong-history file. With an additive bump B (say +0.20 on the final score):
+A (modest history: churn 0.5, etc. with current weights = 0.475) + 0.20 = 0.675
+B = 0.80 (no bump)
+Still B wins. Need bigger bump: +0.40 → A = 0.875 > 0.80. A bump of +0.40 on a [0,1]-ish score is huge though.
+
+Hmm. Score magnitudes: the weighted sum is in [0,1] (weights sum to 1, signals in [0,1]), plus small penalties (max ~0.1 for test-density penalty (5.0-0)*2/100 = 0.1, mutation ≤0.10). So scores are roughly 0..1.2. A +0.4 additive bump is dominant.
+
+Alternatively make the test's "strong history" file not *maximal* in everything. The task phrasing: "a file with a strong history but no recent touch". Strong, but plausible — not necessarily all-1.0. And "modest risk history" for A. If I define:
+- A: recency=1.0, churn=0.4 (modest), size=0.3, complexity=0.3, test=0.3, coupling=0.3, revert=0.3
+- B: recency=0.0, churn=0.8, size=0.8, complexity=0.6, test=0.5, coupling=0.7, revert=0.8
+
+With current weights:
+A = 0.30*0.4+0.15*1.0+0.15*0.3+0.10*0.3+0.10*0.3+0.10*0.3+0.10*0.3 = 0.12+0.15+0.045+0.03+0.03+0.03+0.03 = 0.435
+B = 0.30*0.8+0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.24+0.12+0.06+0.05+0.07+0.08 = 0.62
+A bump needed ≥ ~0.19. A +0.25 additive bump for recent-touch → A=0.685 > B=0.62. That's a plausible, calibrated bump magnitude given scores span ~0.8.
+
+But hold on — additive bumps interact with normalization and penalty in weird ways. Also, "strengthen" the signal — maybe I should do both:
+1. Sharpen the recency input: add a last-5-commits touch detector (plus working-tree dirty check), so recency is a strong binary/continuous signal rather than the weak accel ratio.
+2. Use it in the weighted sum with a raised recency weight.
+
+Actually, you know what? Let me step back and think about what's cleanest and most defensible as an engineering change:
+
+**Mechanism**: Replace the current accel-input recency with a sharper, stronger recency signal AND raise weight[1].
+
+New recency raw value:
+```rust
+// Recency: number of times touched in the last N commits (0..N reflection),
+// with a floor so ANY touch in the last N commits yields at least 1.0.
+let in_recent_window = recent_commit_files.contains(path) || working_tree_dirty.contains(path);
+let recency_raw = if in_recent_window { accel.max(1.0) } else { accel * 0.5 };
+```
+
+Hmm, accel*0.5 vs accel.2... wait — actually, let me simplify. Since we now have TWO recency-ish inputs (7-day accel and last-N-commits), let me just compute:
+
+```rust
+let recency = if in_recent_window { accel.max(0.0) + 1.0 } else { accel };
+```
+A file in the last-5-commits gets recency ≥ 1.0 + accel; others get accel (which is typically 0 or small). After min-max normalization across files, recent files = 1.0, others = 0 (if none... well not exactly but close). This makes recency a near-binary strong signal.
+
+Then weight[1] raised from 0.15 → 0.25, churn 0.30 → 0.20.
+
+Then the test on the pure scoring helper: the scoring helper takes normalized signals. The test controls normalization directly (norm recency 1.0 for A, 0.0 for B). With weights [0.20, 0.25, 0.15, 0.10, 0.10, 0.10, 0.10]:
+A (recency 1.0, churn 0.4, size 0.3, complexity 0.3, test 0.3, coupling 0.3, revert 0.3):
+0.20*0.4+0.25*1.0+0.15*0.3+0.10*0.3+0.10*0.3+0.10*0.3+0.10*0.3 = 0.08+0.25+0.045+0.03+0.03+0.03+0.03 = 0.495
+B (recency 0.0, churn 0.8, size 0.8, complexity 0.6, test 0.5, coupling 0.7, revert 0.8):
+0.20*0.8+0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.16+0.12+0.06+0.05+0.07+0.08 = 0.54
+B still slightly wins. Ugh.
+
+Recency weight 0.30, churn 0.15, size 0.15...:
+A = 0.15*0.4+0.30*1.0+0.15*0.3+0.10*0.3+0.10*0.3+0.10*0.3+0.10*0.3 = 0.06+0.30+0.045+0.03+0.03+0.03+0.03 = 0.525
+B = 0.15*0.8+0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.12+0.12+0.06+0.05+0.07+0.08 = 0.50
+A wins (0.525 > 0.50). 
+
+Weights [0.15, 0.30, 0.15, 0.10, 0.10, 0.10, 0.10] sum = 1.00. Churn dropped 0.30→0.15, recency 0.15→0.30. That's a meaningful strengthening of recency. But churn at 0.15 (was 0.30) is a big reduction of a core signal... 
+
+Alternatively [0.20, 0.25, 0.10, 0.10, 0.10, 0.10, 0.15]? Sum=1.0. A = 0.20*0.4+0.25*1.0+0.10*0.3+0.10*0.3+0.10*0.3+0.10*0.3+0.15*0.3 = 0.08+0.25+0.03+0.03+0.03+0.03+0.045 = 0.495. B = 0.20*0.8+0.25*0+0.10*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.15*0.8 = 0.16+0.08+0.06+0.05+0.07+0.12 = 0.54. B wins.
+
+So the cleanest weight set that passes the test with these exact synthetic values AND remains defensible: [0.15, 0.30, 0.15, 0.10, 0.10, 0.10, 0.10].
+
+Wait, but let me reconsider — maybe the test values should reflect a truer "one-off fix" shape where the recent file's historical signals are genuinely LOW (that's what was missed): update.rs — small file, low complexity, low churn. Let me use:
+- A: recency=1.0, churn=0.2, size=0.2, complexity=0.2, test=0.2, coupling=0.2, revert=0.0
+- B: recency=0.0, churn=1.0, size=0.8, complexity=0.6, test=0.5, coupling=0.7, revert=0.8
+
+Current weights [0.30,0.15,0.15,0.10,0.10,0.10,0.10]:
+A = 0.06+0.15+0.03+0.02+0.02+0.02+0 = 0.30
+B = 0.30+0+0.12+0.06+0.05+0.07+0.08 = 0.68
+B wins by a mile. New weights [0.15,0.30,0.15,0.10,0.10,0.10,0.10]:
+A = 0.03+0.30+0.03+0.02+0.02+0.02+0 = 0.42
+B = 0.15+0+0.12+0.06+0.05+0.07+0.08 = 0.53
+B still wins! Even with recency weight 0.30. Because B's historical signals sum to 0.53.
+
+Hmm. So for the "one-off fix in a genuinely small clean file" shape, the additive bump approach or a much stronger recency is needed. The test shape from the task: "modest risk history" — my A with 0.2s is more like "low". Let me use "modest" ≈ 0.4:
+- A: recency=1.0, churn=0.4, size=0.4, complexity=0.4, test=0.4, coupling=0.4, revert=0.0
+- B: recency=0.0, churn=1.0, size=0.8, complexity=0.6, test=0.5, coupling=0.7, revert=0.8
+
+Weights [0.15,0.30,0.15,0.10,0.10,0.10,0.10]:
+A = 0.06+0.30+0.06+0.04+0.04+0.04+0 = 0.54
+B = 0.15+0+0.12+0.06+0.05+0.07+0.08 = 0.53
+A wins by 0.01. Too tight — fragile test. 
+
+Let me consider recency 0.35, churn 0.10, size 0.10, complexity 0.10, test 0.10, coupling 0.10, revert 0.15 → sum 1.00.
+A = 0.10*0.4+0.35*1.0+0.10*0.4+0.10*0.4+0.10*0.4+0.10*0.4+0.15*0.0 = 0.04+0.35+0.04+0.04+0.04+0.04+0 = 0.55
+B = 0.10*1.0+0.35*0+0.10*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.15*0.8 = 0.10+0.08+0.06+0.05+0.07+0.12 = 0.48
+A wins. But churn at 0.10 is very low.
+
+OK here's the thing — pure reweighting to make "recency alone beats strong history" requires recency to be ~0.35-0.40 of the total. Task explicitly authorizes this though: "raise its weight relative to the historical-fragility signals". The first calibration data point showed the scorer is biased toward historical fragility; a strong corrective shift is justified. But I also don't want to neuter the other signals entirely.
+
+Alternatively — combine BOTH: moderately raise weight[1] (0.15→0.22) AND add the last-N-commits/working-tree additive bump (+0.15 flat for recent files). The bump is literally what the task describes: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+Then the test, rather than fighting the pure weighted sum, asserts the full ranking (weighted sum + bump).
+
+Let me define the scoring pipeline clearly:
+
+```rust
+// Recency input: sharp "touched in last N commits or dirty in working tree" signal.
+fn recently_touched_files(n_commits: usize) -> HashSet<String> {
+    // git log -n {n} --name-only + git status --porcelain paths
+}
+```
+
+Pure helper for tests:
+```rust
+fn score_from_normalized(norm: &[f64; 7], weights: &[f64; 7], recent_bump: f64, ms: f64, td: f64) -> f64
+```
+
+Hmm, actually, let me look at how the test would be structured. The task wants: "given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+Cleanest: test drives a pure function `score_file(norm_signals: [f64;7], recent: bool, ...) -> f64`. Two calls → compare. That's honest: it tests the scoring logic (weights + bump) with controlled inputs.
+
+Let me now decide final constants:
+- RECENT_COMMIT_WINDOW: 5 commits
+- RECENT_TOUCH_BUMP: additive on top of weighted sum for files in window / dirty. 
+- Weight shift: recency 0.15 → 0.25, churn 0.30 → 0.20, keep others ([0.20, 0.25, 0.15, 0.10, 0.10, 0.10, 0.10]).
+
+Test with modest A (recency 1.0, others 0.4, revert 0.0, recent=true), B (recency 0.0, churn 1.0, size 0.8, complexity 0.6, test 0.5, coupling 0.7, revert 0.8, recent=false):
+A weighted = 0.20*0.4 + 0.25*1.0 + 0.15*0.4 + 0.10*0.4 + 0.10*0.4 + 0.10*0.4 + 0.10*0.0 = 0.08+0.25+0.06+0.04+0.04+0.04+0 = 0.51
+B weighted = 0.20*1.0 + 0.25*0 + 0.15*0.8 + 0.10*0.6 + 0.10*0.5 + 0.10*0.7 + 0.10*0.8 = 0.20+0.12+0.06+0.05+0.07+0.08 = 0.58
+
+Need bump ≥ 0.08. With bump 0.15: A = 0.66 > 0.58. ✓. And if I keep the test's "recent" flag separate from the norm signals — the test passes recent=true for A only.
+
+Wait, but this makes the test's `recent` a separate axis from the normalized recency signal. Is that honest? In the production scorer, the recency *normalized signal* I compute IS derived from recent-touch + accel. If the raw recency is "accel + 1.0 if recently touched", then normalized recency for A would be 1.0 and 0 for B already. The bump is a second, explicit mechanism.
+
+Hmm, simpler and cleaner: **use only the additive bump + window sharpening, plus a modest weight raise.** Let me reconsider whether changing weights at all is needed... The test would pass with bump alone if bump ≥ 0.08. With bump = 0.15, A=0.66>B=0.58 even with ORIGINAL weights [0.30,0.15,0.15,0.10,0.10,0.10,0.10]:
+A = 0.30*0.4+0.15*1.0+0.15*0.4+0.10*0.4+0.10*0.4+0.10*0.4+0.10*0 = 0.12+0.15+0.06+0.04+0.04+0.04+0 = 0.45 + 0.15 = 0.60 > 0.58 ✓ (barely).
+
+So bump alone can pass the test with these numbers, but it's tight (0.60 vs 0.58). Combined with a recency weight raise to 0.25/churn 0.20, A = 0.66 vs 0.58 — comfortable margin.
+
+Decision: 
+1. Sharpen recency input via last-N-commits + working-tree dirty set (this is the core "recently touched" signal the task says is missing in practice — the accel ratio is a weak proxy).
+2. Raise recency weight 0.15 → 0.25 (take 0.10 from churn 0.30 → 0.20).
+3. Add RECENT_TOUCH_BUMP (0.15) additive for files in the recent window or dirty — the "weight bump into the score" the task literally asks for.
+
+Hmm wait, is bump + weight raise double-counting? The task says "a file touched within the last ~5 commits... gets a weight bump into the score" and separately "raise its weight relative to the historical-fragility signals". Both mechanisms are sanctioned. But double-counting the same signal twice is a smell. Let me think about which single mechanism best serves the test and the goal...
+
+Actually — rethink. The normalized recency signal itself: if a file is in the last-N-commits, its normalized recency = 1.0 (with the accel blend). Non-recent files get whatever accel gives (likely 0 after normalization since recent files dominate the max). So the recency signal ALREADY carries the "recently touched" information once normalized. Bump is then redundant-ish but harmless... no, redundant mechanisms complicate the story.
+
+Let me simplify to the purest version that still passes:
+1. **Sharpen the recency input**: `last N commits` window (N=5) forming a strong binary-ish signal, blended with accel: raw_recency = accel, but if in window → raw_recency = max(accel, 1.0). After normalization, in-window files → 1.0.
+2. **Raise recency weight** to 0.25, churn to 0.20 (take 0.10 from churn).
+
+Test passes? With normalized signals and weights [0.20,0.25,0.15,0.10,0.10,0.10,0.10]:
+A = 0.51, B = 0.58 (computed above). A < B. FAIL. Ugh — the pure reweighting alone can't make the modest-vs-strong test pass with these plausible numbers.
+
+So I DO need the additive bump (or an even more extreme weight). The task explicitly lists the bump as sanctioned. Fine — include the bump as the primary mechanism and keep the recency weight raise modest (0.15→0.20, churn 0.30→0.25). Then:
+
+Weights [0.25, 0.20, 0.15, 0.10, 0.10, 0.10, 0.10] sum=1.00:
+A = 0.25*0.4+0.20*1.0+0.15*0.4+0.10*0.4+0.10*0.4+0.10*0.4+0.10*0 = 0.10+0.20+0.06+0.04+0.04+0.04+0 = 0.48 + bump 0.15 = 0.63
+B = 0.25*1.0+0.20*0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.25+0.12+0.06+0.05+0.07+0.08 = 0.63
+
+0.63 vs 0.63 — tie, and "at or above" means A ≥ B... tie passes "at or above"! But too tight. Bump 0.20:
+A = 0.68 > 0.63 ✓ comfortable.
+
+Or keep weights near-original and bump 0.25:
+Weights [0.30,0.15,0.15,0.10,0.10,0.10,0.10] — wait, do I even need to change weights then? A = 0.45+0.25 = 0.70 > B=0.58. Bump alone, 0.25, passes robustly.
+
+Hmm. But the task says "strengthen it (e.g. raise its weight ... or make the window adaptive)". I should strengthen BOTH the input (window) and ideally the weight. But minimal, defensible: the bump is the weight raise-in-effect. Actually the cleanest story:
+
+**Recency signal = "touched within the last N commits" (sharp window), expressed as a strong raw value; plus an additive weighting bump for in-window files.**
+
+Let me now think about score magnitudes to pick the bump. Real scores: weighted sum ∈ [0,1]; test-density penalty up to +0.10; mutation term up to +0.10. So scores hover ~0.2-1.2. A 0.20-0.25 bump is large-ish but this is exactly the corrective calibration the first data point demands. I'll set RECENT_TOUCH_BUMP = 0.20 and weights [0.25, 0.20, 0.15, 0.10, 0.10, 0.10, 0.10] — modest shift + strong bump for window membership.
+
+Hmm wait, actually, let me reconsider the weighting shift. Churn at 0.25 vs 0.30: minor. Recency 0.15→0.20 + bump. That keeps churn meaningful while elevating recency. Good balance.
+
+Actually, hold on. Let me reconsider whether to touch the weights' sum constraint and the learned-weights loader. RISK_WEIGHTS is [f64;7] — I'm keeping 7 signals, just re-tuned values. `load_learned_weights` validates sum≈1.0 — fine as long as my new defaults sum to 1.0. `compute_adjusted_weights` blends learned with `RISK_WEIGHTS[i]` per index — fine, element-wise. SIGNAL_NAMES in commands_risk_accuracy.rs — unchanged names. label_to_index — unchanged labels. 
+
+Now, the recency raw computation. Currently:
+```rust
+let c7 = counts_7_map.get(path).unwrap_or(&0) as f64;
+let accel = if c30 > 0.0 { (c7/c30)/(7.0/30.0) } else if c7 > 0.0 { 3.0 } else { 0.0 };
+raw_accel.push(accel);
+```
+
+New:
+```rust
+// Sharper recency window: files touched in the last N commits (or with
+// uncommitted changes in the working tree) — the "about to be edited next"
+// population that the 7-day acceleration ratio under-weights.
+let in_recent_window = recent_touched.contains(path.as_str());
+let accel = ...;
+let recency_raw = if in_recent_window { accel.max(1.0) } else { accel };
+raw_accel.push(recency_raw);
+```
+
+And the bump: at scoring time, `if in_recent_window { score += RECENT_TOUCH_BUMP }` — but I need the per-file recent flag. I'll compute `recent_touched` set once (via a helper `recently_touched_files(5)`).
+
+Now the git helper. I need:
+1. Files touched in the last N commits: `git log -n 5 --name-only --pretty=format:` → parse src/*.rs paths.
+2. Working-tree modifications: `git status --porcelain` → paths (both staged and unstaged/untracked) that are src/*.rs.
+
+Where to put it? Task says "one scoring pathway, one test file (tests live in src/commands_risk.rs)". The helper can live in commands_risk.rs using `crate::git::run_git`. For testability, make it a pure function that parses the raw git output:
+
+```rust
+fn parse_recent_touched(log_output: &str, status_output: &str) -> HashSet<String>
+```
+
+Then `recently_touched_files(n)` calls run_git twice and parses. The test can test parse_recent_touched directly (pure) and/or a pure scoring path.
+
+Actually — the required test is about ranking. Let me build the pure scoring path so the test is robust:
+
+```rust
+/// Pure scoring core: weighted composite + penalty + mutation + recency bump.
+/// `norm` is the 7 normalized signals [churn, recency, size, complexity,
+/// test_density, coupling, revert_history]; `recent_touch` adds the bump.
+fn score_risk_file(norm: &[f64; 7], weights: &[f64; 7], recent_touch: bool, ms: f64, td: f64) -> f64 {
+    let mut score = norm.iter().zip(weights).map(|(n, w)| n * w).sum::<f64>();
+    if recent_touch {
+        score += RECENT_TOUCH_BUMP;
+    }
+    if td < 5.0 {
+        score += (5.0 - td) * 2.0 / 100.0;
+    }
+    if ms > 0.0 {
+        score += MUTATION_WEIGHT * ms;
+    }
+    score
+}
+```
+
+Wait but the current code has test penalty and mutation already. Let me refactor the loop to call this helper — clean, surgical, and the test uses it with synthetic normalized values.
+
+Hmm — careful with the test-density penalty: current code `if path.ends_with(".rs") { score += max(0, (5.0 - td)*2.0)/100.0 }`. td = tests_per_100. In the helper, keep that logic (td < 5.0 && td >= 0). Also note td could be 0 for non-rs but all files here are .rs.
+
+Now the test:
+```rust
+#[test]
+fn test_recent_touch_bump_ranks_above_strong_history() {
+    let weights = RISK_WEIGHTS; // or a fixed expected array
+    // Recently-touched file: modest historical risk, high recency.
+    let recent = score_risk_file(
+        &[0.4, 1.0, 0.4, 0.4, 0.4, 0.4, 0.0],  // churn, recency, size, complexity, test, coupling, revert
+        &weights,
+        true,   // touched in last 5 commits / working tree
+        0.0,    // no mutation signal
+        5.0,    // td >= 5 → no test-density penalty
+    );
+    // Historically-fragile file: strong history, no recent touch.
+    let fragile = score_risk_file(
+        &[1.0, 0.0, 0.8, 0.6, 0.5, 0.7, 0.8],
+        &weights,
+        false,
+        0.0,
+        5.0,
+    );
+    assert!(recent >= fragile, "...");
+}
+```
+
+With weights [0.25, 0.20, 0.15, 0.10, 0.10, 0.10, 0.10] and bump 0.20:
+recent = 0.25*0.4+0.20*1.0+0.15*0.4+0.10*0.4+0.10*0.4+0.10*0.4+0.10*0.0 + 0.20 = 0.10+0.20+0.06+0.04+0.04+0.04+0.00+0.20 = 0.68
+fragile = 0.25*1.0+0.20*0.0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.25+0+0.12+0.06+0.05+0.07+0.08 = 0.63
+recent (0.68) ≥ fragile (0.63) ✓ — margin 0.05.
+
+But should the test use RISK_WEIGHTS (the re-tuned defaults) or hardcode expected values? If it uses RISK_WEIGHTS and someone later re-tunes, the test still validates the *property* (recent beats history). That's the intent. But if weights get re-tuned to weaken recency, the test would fail — which is exactly the guard the task wants. Using RISK_WEIGHTS is right.
+
+Hmm, one concern: `score_risk_file` with td=5.0 → penalty = (5.0-5.0)*2/100 = 0. And ms=0.0 → no mutation. Good, deterministic.
+
+Let me also double check: the task says "Do not delete existing tests." — I'm only adding.
+
+Now, is there an existing test of this exact shape? Let me search the tests for "recent" related tests.
+
+Also need to double-check: is there an existing `recently_touched` or last-N-commits helper anywhere? Let me search.
+
+Also — the signals push in compute_file_risk_scores: `if norm_accel[i] > 0.5 { signals.push("▲recent") }`. Keep as is; norm_recency replaces raw_accel variable name. Fine.
+
+Now the git parsing helper. `git log -n 5 --name-only --pretty=format:` for the last-5-commits window. But `git log -n 5` — with `--name-only` format: commits and paths. And `git status --porcelain` gives lines like " M src/foo.rs", "?? src/bar.rs", "M  src/file.rs" (staged). I need to extract the path: two-char status prefix, space, path. For renames "R  old -> new"? Rare; skip rename edge cases by taking the token after the two-char prefix and the space, handling "->" if present. Let me be careful but simple:
+
+```rust
+fn parse_recent_touched(log_output: &str, status_output: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for line in log_output.lines() {
+        let path = line.trim();
+        if path.starts_with("src/") && path.ends_with(".rs") {
+            out.insert(path.to_string());
+        }
+    }
+    for line in status_output.lines() {
+        // porcelain: two-char status + space + path
+        if line.len() > 3 {
+            let path = line[3..].trim();
+            if path.starts_with("src/") && path.ends_with(".rs") {
+                out.insert(path.to_string());
+            }
+        }
+    }
+    out
+}
+```
+
+Wait, byte indexing `line[3..]` — the safety rule: "Never use byte indexing on strings." Must use is_char_boundary. `line[3..]` — status porcelain output: status chars are ASCII, position 3 is after "X Y " where X and Y are ASCII status letters — 3 is always a char boundary since status prefix is 2 ASCII chars + 1 space = 3 ASCII bytes. But to be safe per the repo rule, use `line.get(3..)`. Hmm, `get` with a byte range panics if not on boundary — but for ASCII prefix it IS a boundary; still, use `line.get(3..)` which returns Option and won't panic (it returns None if not boundary). Actually `str::get` panics? No — `str::get` returns Option and doesn't panic. `str::get` panics only if... no: "None if start or end are not on char boundaries." It returns Option. `get_mut` differs. So `line.get(3..)` is safe. Alternatively parse with split: `let mut it = line.splitn(3, ' ');` taking the 3rd part. That's cleaner and avoids index math entirely.
+
+Let me write:
+```rust
+for line in status_output.lines() {
+    let mut parts = line.splitn(3, ' ');
+    let _status = parts.next();
+    parts.next();  // second status char (or empty)
+    if let Some(path) = parts.next() {
+        let path = path.trim();
+        if path.starts_with("src/") && path.ends_with(".rs") {
+            out.insert(path.to_string());
+        }
+    }
+}
+```
+For " M src/foo.rs": splitn(3,' ') → ["", "M", "src/foo.rs"] → path = "src/foo.rs" ✓
+For "M  src/foo.rs": ["M", "", "src/foo.rs"] ✓
+For "?? src/foo.rs": ["??", "src/foo.rs"] → second = "src/foo.rs", third = None → path missing! ✗
+
+Untracked "??" only has 2 fields. Need to handle: if only 2 parts and part1 starts with "src/", it's the path. Let me restructure:
+
+```rust
+for line in status_output.lines() {
+    let path = line.split(' ').filter(|s| !s.is_empty()).last();
+    ...
+}
+```
+" M src/foo.rs" → tokens ["M","src/foo.rs"] → last = "src/foo.rs" ✓
+"M  src/foo.rs" → ["M","src/foo.rs"] ✓
+"?? src/foo.rs" → ["??","src/foo.rs"] ✓
+Renames: "R  old.rs -> new.rs" → tokens ["R","old.rs","->","new.rs"] → last = "new.rs" ✓ (destination is the relevant path). 
+
+Use `filter(!empty)` + `last()`. Clean and boundary-safe.
+
+Now `recently_touched_files`:
+```rust
+/// Files touched in the last `n` commits OR modified in the working tree
+/// (staged, unstaged, or untracked). These are the files most likely to be
+/// the next edit target — the population the 7-day acceleration ratio
+/// under-weights for one-off fix targets (day-175 calibration miss).
+fn recently_touched_files(n: usize) -> std::collections::HashSet<String> {
+    let log = crate::git::run_git(&["log", &format!("-n {n}"), "--name-only", "--pretty=format:"]).unwrap_or_default();
+    let status = crate::git::run_git(&["status", "--porcelain"]).unwrap_or_default();
+    parse_recent_touched(&log, &status)
+}
+```
+
+Hmm, `git log -n 5` vs `-n 5`: run_git takes &[&str] args; pass `-n` and `5` separately.
+
+Also `git log -n 5 --name-only --pretty=format:` — default pretty format includes commit headers; `--pretty=format:` makes it empty, only the file names. ✓ (matching file_change_counts style).
+
+Edge: run_git with `git log` in a repo — fine, non-destructive (guard only blocks destructive subcommands; `log` and `status` are safe).
+
+Now where to compute the set: inside `compute_file_risk_scores`, call `recently_touched_files(RECENT_COMMIT_WINDOW)` once. Store as HashSet<String>. Then per-file: `let in_recent_window = recent_touched.contains(path.as_str());`.
+
+Then raw recency:
+```rust
+let recency_raw = if in_recent_window { accel.max(1.0) } else { accel };
+```
+Wait — with bump added separately, should the recency *signal* also be boosted in-window? If in-window gives recency_raw = max(accel, 1.0), after normalization in-window files hit 1.0, non-window files → 0-ish. That means weight[1]*1.0 contributes fully, AND bump adds another 0.20. Double counting again. 
+
+Simpler: leave the recency normalized signal as the accel-based value as-is (maybe unchanged), and make the BUMP the sharp recent-touch mechanism. But then "strengthen the recency signal" is only the bump + weight shift. Hmm, that's actually clean: the bump IS the strengthened recency. And I raise weight[1] modestly too.
+
+But wait — there's a subtlety. The accel signal with normalization: update.rs one-off fix, c30=1, c7=1 → accel=4.29. If few other files have accel>0, normalized accel for update.rs = 1.0 already! So the accel signal DID signal update.rs... unless many files shared it. The task says the scorer missed it — so presumably many files had high accel, flattening normalization. The last-N-commits window + bump fixes exactly that: only files in the last 5 commits get the bump; unique one-off targets are more likely to be among them.
+
+OK let me also reconsider: should the bump apply only to "recent AND otherwise modest" files (one-off fix shape) or all recently-touched? Per the task: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score." Flat bump for all in-window files. Good — simple.
+
+Final design:
+1. `RISK_WEIGHTS` re-tuned: `[0.25, 0.20, 0.15, 0.10, 0.10, 0.10, 0.10]` (recency 0.15→0.20, churn 0.30→0.25). Update doc comment.
+2. `const RECENT_COMMIT_WINDOW: usize = 5;`
+3. `const RECENT_TOUCH_BUMP: f64 = 0.20;`
+4. `fn parse_recent_touched(log_output, status_output) -> HashSet<String>` (pure, tested)
+5. `fn recently_touched_files(n) -> HashSet<String>` (runs git, parses)
+6. In `compute_file_risk_scores`: compute recent set; per-file raw recency unchanged (accel) but I'll rename `raw_accel`/`norm_accel` to recency naming? Renaming could churn; keep `raw_accel`/`norm_accel` names to keep diff minimal? For clarity I'll keep names (they're the recency signal internally). Add bump at score time + refactor weighted computation into `score_risk_file` helper.
+7. Signals: add "▲recent" when in window too: `if norm_accel[i] > 0.5 || in_recent_window { signals.push("▲recent"); }` — shows recency.
+
+Hmm — should score_risk_file take the bump as a param? For the test, I want to pass recent_touch bool. Let me define helper with signature:
+
+```rust
+fn score_risk_file(
+    norm: &[f64; 7],
+    weights: &[f64; 7],
+    recent_touch: bool,
+    mutation_survival: f64,
+    tests_per_100: f64,
+) -> f64
+```
+
+Wait — but td for non-rs files is 0.0 in the current code, and the penalty only applies for .rs. In helper, just apply penalty when td < 5.0 — but for non-rs, td=0 → penalty 0.1. Hmm, current code only applies to path.ends_with(".rs"). All files in all_files are .rs (from git windows and read_dir filters, plus cross_file). Actually `file_set` only includes src/*.rs (git log filter + read_dir .rs filter). So all paths end with .rs. Safe.
+
+Actually looking again: the current code's penalty line: `if path.ends_with(".rs") { score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0; }`. I'll fold: `score += f64::max(0.0, (5.0 - td) * 2.0) / 100.0;` since all files are .rs. But to be extra safe, keep the .rs guard in the helper? The helper takes td, no path. Keep simple: apply penalty unconditionally as all inputs are .rs; document it. Actually — safer to keep exact behavior: pass a `is_rs: bool`? Overkill. All files in the set are .rs. Fine.
+
+Hmm, wait. Let me reconsider the td penalty semantics: `(5.0 - td)*2.0/100.0` for td < 5. For td=0 → 0.1. In the test I use td=5.0 → 0. Fine.
+
+Now — does the refactor change behavior for the mutation term ordering? Currently: weighted sum → +td penalty → +mutation. My helper: same order. ✓
+
+And the sort: unchanged.
+
+Now let me also double check `compute_adjusted_weights` — it uses RISK_WEIGHTS[i] per index; changed values are fine, sum still 1.0.
+
+`normalize_scores` unchanged.
+
+Now the recency raw — do I keep `raw_accel` (accel) as-is, or blend window? Given the bump handles the sharp window, I'll keep accel as-is but ALSO ensure in-window files get a solid normalized recency by flooring at 1.0? No — keep it simple: accel stays; bump is the mechanism. Actually hmm, let me reconsider once more...
+
+Task: "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive)." — I'm doing both: raise weight (0.15→0.20) AND add the sharp window bump. That's solidly within the mandate.
+
+Let me now also add a test for `parse_recent_touched` (pure parsing) and the ranking test using `score_risk_file`. Two tests. The ranking test is the required one.
+
+Let me write the code.
+
+First, edit the weights + doc comment:
+
+```rust
+/// Risk signal weights: [churn, recency, size, complexity, test_density, coupling, revert_history].
+///
+/// These seven weights must sum to 1.0. The revert_history weight (0.10) captures
+/// empirical failure data — files that have been reverted are more likely to cause
+/// future regressions. The complexity proxy (0.10) estimates cyclomatic complexity
+/// via branch/match density. This is the signal set that makes the risk scorer learn
+/// from its own history rather than just measuring static properties.
+///
+/// Churn was trimmed (0.30 → 0.25) and recency raised (0.15 → 0.20) after the
+/// day-175 calibration miss: the scorer flagged 10 files as high-risk (none
+/// broke) while missing `src/update.rs`, a one-off fix target that was recently
+/// touched but historically quiet. Combined with the `RECENT_TOUCH_BUMP` for
+/// files touched in the last `RECENT_COMMIT_WINDOW` commits (or dirty in the
+/// working tree), the scorer now favors near-term edit targets over purely
+/// historical fragility.
+const RISK_WEIGHTS: [f64; 7] = [0.25, 0.20, 0.15, 0.10, 0.10, 0.10, 0.10];
+```
+
+Then add constants near MUTATION_WEIGHT:
+
+```rust
+/// Files touched within the last N commits (or modified in the working tree)
+/// get a recency bump — the sharper "recently touched" signal added after the
+/// day-175 calibration miss (a one-off `src/update.rs` fix target was missed
+/// while 10 unrealted files were flagged).
+pub(crate) const RECENT_COMMIT_WINDOW: usize = 5;
+
+/// Additive score bump for files touched in the last `RECENT_COMMIT_WINDOW`
+/// commits or modified in the working tree. Sized so a recent one-off fix
+/// target outranks a historically fragile but dormant file on the current
+/// weight scale (scores are roughly 0–1.2).
+const RECENT_TOUCH_BUMP: f64 = 0.20;
+```
+
+Wait — "unrelated" typo, fix. 
+
+Then helpers:
+
+```rust
+/// Parse `git log --name-only` (with `--pretty=format:` so only paths remain)
+/// and `git status --porcelain` output into the set of recently-touched
+/// `src/**/*.rs` paths.
+///
+/// Pure helper (extracted so tests can pin the parsing without running git).
+fn parse_recent_touched(
+    log_output: &str,
+    status_output: &str,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for line in log_output.lines() {
+        let path = line.trim();
+        if path.starts_with("src/") && path.ends_with(".rs") {
+            out.insert(path.to_string());
+        }
+    }
+    for line in status_output.lines() {
+        // porcelain format: <XY> <path> (with '??' for untracked, and
+        // 'R old -> new' captures the destination via `.last()`).
+        let path = line
+            .split(' ')
+            .filter(|s| !s.is_empty())
+            .last()
+            .map(str::trim)
+            .unwrap_or("");
+        if path.starts_with("src/") && path.ends_with(".rs") {
+            out.insert(path.to_string());
+        }
+    }
+    out
+}
+```
+
+Hmm `.map(str::trim)` — `.last()` returns Option<&str>, `.map(str::trim)` ok.
+
+```rust
+/// Files touched in the last `n` commits OR modified in the working tree
+/// (staged, unstaged, or untracked). Read-only git queries; fails soft (empty
+/// set) if git is unavailable.
+fn recently_touched_files(n: usize) -> std::collections::HashSet<String> {
+    let log = crate::git::run_git(&["log", "-n", &n.to_string(), "--name-only", "--pretty=format:"])
+        .unwrap_or_default();
+    let status = crate::git::run_git(&["status", "--porcelain"]).unwrap_or_default();
+    parse_recent_touched(&log, &status)
+}
+```
+
+Then in compute_file_risk_scores, after file_set building (or near the other signal gathering), compute the set once:
+
+```rust
+// 7b. Sharp recency: files touched in the last `RECENT_COMMIT_WINDOW`
+// commits or with uncommitted working-tree changes. This is the
+// "about to be edited next" population that the 7-day acceleration
+// ratio under-weights for one-off fix targets (day-175 calibration miss).
+let recent_touched = recently_touched_files(RECENT_COMMIT_WINDOW);
+```
+
+Then in the per-file loop, compute `in_recent_window`:
+```rust
+let in_recent_window = recent_touched.contains(path.as_str());
+```
+And recency raw — keep accel as the raw recency signal: `raw_accel.push(accel)` unchanged.
+
+At scoring:
+```rust
+let mut score = score_risk_file(&[norm_churn[i], norm_accel[i], norm_size[i], norm_complexity[i], norm_test[i], norm_coupling[i], norm_revert[i]], &weights, in_recent_window, ms, td);
+```
+
+Wait, but the mutation `ms` and td penalty are inside helper now. Let me rewrite the loop body:
+
+```rust
+for (i, path) in all_files.into_iter().enumerate() {
+    let td = tests_per_100[i];
+    let in_recent_window = recent_touched.contains(path.as_str());
+    let ms = *mutation_survival_map.get(path.as_str()).unwrap_or(&0.0);
+
+    let norm = [
+        norm_churn[i],
+        norm_accel[i],
+        norm_size[i],
+        norm_complexity[i],
+        norm_test[i],
+        norm_coupling[i],
+        norm_revert[i],
+    ];
+    let score = score_risk_file(&norm, &weights, in_recent_window, ms, td);
+
+    let mut signals = Vec::new();
+    if norm_churn[i] > 0.5 {
+        signals.push("▲churn");
+    }
+    if norm_accel[i] > 0.5 || in_recent_window {
+        signals.push("▲recent");
+    }
+    ...
+```
+
+And score_risk_file:
+```rust
+/// Composite risk score for one file from its 7 normalized signals plus
+/// contextual flags.
+///
+/// Pure helper (extracted so the day-175 calibration test can drive the
+/// scoring with synthetic signals instead of live repo state).
+fn score_risk_file(
+    norm: &[f64; 7],
+    weights: &[f64; 7],
+    recent_touch: bool,
+    mutation_survival: f64,
+    tests_per_100: f64,
+) -> f64 {
+    // Weighted sum of the 7 normalized signals.
+    let mut score: f64 = norm.iter().zip(weights.iter()).map(|(n, w)| n * w).sum();
+
+    // Recency bump: files touched in the last `RECENT_COMMIT_WINDOW` commits
+    // or modified in the working tree are the most likely next edit targets.
+    // Deliberately additive so it can lift a modest one-off fix target above
+    // a dormant file with strong historical signals.
+    if recent_touch {
+        score += RECENT_TOUCH_BUMP;
+    }
+
+    // Penalty: files with fewer than 5 tests per 100 lines get a bump
+    // (all scored files here are .rs files where test density is meaningful).
+    score += f64::max(0.0, (5.0 - tests_per_100) * 2.0) / 100.0;
+
+    // Mutation-survival signal: bounded 0..MUTATION_WEIGHT so it complements
+    // rather than dominates. Files without an entry contribute exactly 0.
+    if mutation_survival > 0.0 {
+        score += MUTATION_WEIGHT * mutation_survival;
+    }
+
+    score
+}
+```
+
+Type annotations: `norm.iter().zip(weights.iter()).map(|(n, w)| n * w).sum()` — needs `let mut score: f64` annotation. ✓
+
+Wait, one thing — current mutation comment block and td comment block live inline in the loop; moving them into the helper moves the comments too. Keep the loop's mutation comment trimmed since it's now in the helper.
+
+Now the test:
+
+```rust
+#[test]
+fn test_recent_touch_ranks_above_strong_history() {
+    // Day-175 calibration regression: a file with modest risk history but a
+    // recent touch (e.g. this session's one-off fix target) must rank at or
+    // above a historically-fragile file with no recent touch.
+    let weights = RISK_WEIGHTS;
+
+    // Recently-touched one-off fix target: high recency, otherwise modest.
+    let recent_score = score_risk_file(
+        &[0.4, 1.0, 0.4, 0.4, 0.4, 0.4, 0.0],
+        &weights,
+        true,  // touched in last 5 commits / dirty in working tree
+        0.0,   // no mutation signal
+        5.0,   // adequate test density → no penalty
+    );
+
+    // Historically fragile but dormant: strong history, no recent touch.
+    let dormant_score = score_risk_file(
+        &[1.0, 0.0, 0.8, 0.6, 0.5, 0.7, 0.8],
+        &weights,
+        false,
+        0.0,
+        5.0,
+    );
+
+    assert!(
+        recent_score >= dormant_score,
+        "recently-touched file ({recent_score:.3}) must rank at or above the \
+         historically-fragile dormant file ({dormant_score:.3}): recency must not \
+         be drowned by historical signals (day-175 calibration)"
+    );
+}
+```
+
+Wait — with weights [0.25,0.20,0.15,0.10,0.10,0.10,0.10] and bump 0.20:
+recent = 0.25*0.4+0.20*1.0+0.15*0.4+0.10*0.4+0.10*0.4+0.10*0.4+0.10*0.0 = 0.10+0.20+0.06+0.04+0.04+0.04+0 = 0.48 + 0.20 = 0.68
+dormant = 0.25*1.0+0.20*0+0.15*0.8+0.10*0.6+0.10*0.5+0.10*0.7+0.10*0.8 = 0.25+0+0.12+0.06+0.05+0.07+0.08 = 0.63
+0.68 ≥ 0.63 ✓ margin 0.05.
+
+Let me double-check dormant calc: 0.25*1 = 0.25; 0.15*0.8 = 0.12; 0.10*0.6 = 0.06; 0.10*0.5 = 0.05; 0.10*0.7 = 0.07; 0.10*0.8 = 0.08. Sum = 0.25+0.12+0.06+0.05+0.07+0.08 = 0.63. ✓
+
+Also add a parse test:
+
+```rust
+#[test]
+fn test_parse_recent_touched() {
+    let log = "src/update.rs\nsrc/rtk.rs\n\nsrc/commands_risk.rs\n";
+    let status = " M src/update.rs\n?? src/new_module.rs\n M docs/guide.md\n";
+    let recent = parse_recent_touched(log, status);
+    assert!(recent.contains("src/update.rs"));
+    assert!(recent.contains("src/rtk.rs"));
+    assert!(recent.contains("src/commands_risk.rs"));
+    assert!(recent.contains("src/new_module.rs"));
+    // Non-src and non-rs paths are excluded.
+    assert!(!recent.contains("docs/guide.md"));
+}
+```
+
+Now — will `recently_touched_files` in the scoring function affect `test_compute_file_risk_scores_returns_all_files`? No, just adds a set. But — scoring `compute_file_risk_scores` now calls `git status --porcelain` and `git log -n 5` — read-only, fine under test guard (log/status not destructive).
+
+Hold on — will the bump change existing behavior tests? `test_cross_file_coverage_reduces_risk` — only checks signal presence, tolerant. `test_compute_file_risk_scores_returns_all_files` — len only. Fine.
+
+Another consideration: `test_handle_risk_does_not_panic` calls handle_risk which calls compute_file_risk_scores presumably — with git log/status — fine.
+
+Now also check: does anything else call `compute_file_risk_scores` and assert specific scores? Let me grep. Also check `.arc/risk_weights.json` doesn't exist (confirmed — no output from ls). So defaults will be used.
+
+Let me also double check `run_git` signature: `pub fn run_git(args: &[&str]) -> Result<String, String>`. So `&["log", "-n", &n.to_string(), "--name-only", "--pretty=format:"]` — mixing &str literals and &String — `&n.to_string()` is &String which derefs to &str via coercion in array? Array of &str requires all elements &str; `&n.to_string()` is `&String`, needs explicit `n.to_string().as_str()` — but the temporary String would be dropped... within the same expression it's fine for the call duration if I do `let n_str = n.to_string();` first. Let me do that:
+
+```rust
+fn recently_touched_files(n: usize) -> std::collections::HashSet<String> {
+    let n_arg = format!("-n {n}");  // hmm, run_git passes args verbatim to git; "-n 5" as a single arg
+```
+
+Wait — does git accept "-n 5" as one argument? Yes, `git log "-n 5"` works (git parses combined short option with value). file_change_counts uses `&format!("--since={since_arg}")` as a single arg — same pattern. I'll use `format!("-n {n}")`:
+
+```rust
+let log = crate::git::run_git(&[
+    "log",
+    &format!("-n {n}"),
+    "--name-only",
+    "--pretty=format:",
+])
+.unwrap_or_default();
+```
+
+✓ Consistent with existing style.
+
+Now, let me also reconsider: should `RECENT_COMMIT_WINDOW` be `pub(crate)`? Only used in this module + maybe test. Just `const`. But `score_risk_file` — used in test module within same file — private ok. The required test is in-file. Keep everything private except what's already pub(crate).
+
+One more: the task says "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight...)" and "the deliverable is a scorer that catches the update.rs-shaped miss, verified by a test." My change: sharp window (last-5-commits + working tree) + additive bump + weight raise. Verified by ranking test. 
+
+Let me now also double check the SIGNAL "▲recent" gating `in_recent_window` — that adds more files to the signal list, which affects snapshot/validation label mapping (label_to_index handles "▲recent" → 1). Fine.
+
+Alright, let me also verify the mutation block: currently the loop has:
+```rust
+let ms = *mutation_survival_map.get(path.as_str()).unwrap_or(&0.0);
+if ms > 0.0 {
+    score += MUTATION_WEIGHT * ms;
+}
+```
+I'll move ms computation up and pass to helper.
+
+Let me write the edits now. Also update the doc comment at line 75-82.
+
+Let me be careful with the existing comments in the loop (lines 936-944) — I'll replace them.
+
+Edit 1: RISK_WEIGHTS doc + const.
+Edit 2: add RECENT_COMMIT_WINDOW & RECENT_TOUCH_BUMP constants (place near MUTATION_WEIGHT, line 628).
+Edit 3: add parse_recent_touched + recently_touched_files helpers (after load_mutation_survival / before compute_file_risk_scores).
+Edit 4: modify compute_file_risk_scores — add recent set computation and refactor loop.
+Edit 5: add score_risk_file helper.
+Edit 6: add tests.
+
+Let me look at the exact current loop code to edit precisely (lines 918-976). I have it from the earlier read. Let me make the edits.
+────────────────────────────────────────────────────────────────────────────────
+Now I have a full picture. Let me check for any existing "recently touched" helpers and existing tests of this shape:
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "recent" src/commands_risk…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "compute_file_risk_scores… ✓ (7ms)
+ ✓ (7ms)
+  2 tools completed in 1.6s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So `compute_file_risk_scores()` is used by multiple callers. The current design:
+- `compute_file_risk_scores()` — computes churn (30d), accel (7d/30d), size, complexity, revert, test_density, coupling, mutation_survival.
+- Signal list: 7 signals [churn, recency(accel), size, complexity, test_density, coupling, revert_history].
+
+The "recency" signal currently IS the 7-day acceleration `accel`. The problem: `update.rs` was touched by recent sessions but one-off (1 commit), so its 7-day count and 30-day count are low (c7=1, c30=1) → accel = (1/1)/(7/30) = 4.29 → clamped? No, accel = 4.29, not clamped to 1. Actually `accel = (c7/c30) / (7/30)` = 30/7 ≈ 4.29. Hmm, that's > 1, so after normalization accel could be significant. But wait — normalize_scores min-max normalizes across files; for `update.rs` with a single commit, its accel raw = 4.29. But other files may also be at 4.29 (any file with exactly 1 commit in both windows). Min-max normalization: if there are many files at 4.29 (one-commit files in the 30-day window that also got touched in the last 7 days), then update.rs and others all normalize to 1.0 for those... no wait, min-max: all files with the same value normalize to 0 if min==max... Actually if min=0 (files with no commits) and max=4.29, then update.rs → 1.0. So accel would be high.
+
+Hmm, but the real issue per the task: "the scorer's top-10 window missed update.rs entirely". The task says: hypothesis is that recency is under-weighted relative to historically-fragile files. The task instruction:
+
+1. Read signals; identify whether a "recently touched" signal exists.
+2. If MISSING: add it — a file touched within the last ~5 commits gets a weight bump. If EXISTS but weak: strengthen it (raise its weight relative to historical signals, or make window adaptive).
+3. Add a unit test: given a file with modest risk history but recent modification vs a file with strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one.
+
+The current accel signal is a 7-day/30-day ratio. A one-off fix in update.rs within last 7 days would have c7=1, c30=1 → accel = 30/7 = 4.29. But there could be many files with the same shape → normalization collapses.
+
+The critical weakness: the recency signal is min-max normalized across all files. If a large set of files have similar high accels, the recency signal becomes weak. Also the accel formula doesn't directly capture "touched in the last ~5 commits" — that's the task's suggested mechanism.
+
+My plan — a surgical, mechanism-focused change:
+
+**Add a distinct "recent touch" signal**: a file modified in the last N commits (say 10 commits, to give a wide net; the task says "~5 commits") or modified in the working tree gets a boost. I'll add a new git helper `recently_touched_files(commits: usize)` in src/git.rs or in commands_risk.rs that runs `git log -N --name-only`. Actually, to keep the change surgical and "one scoring pathway", I can compute it inside commands_risk.rs using `crate::git::run_git`.
+
+But adding an 8th signal would require changing RISK_WEIGHTS (7→8), SIGNAL_NAMES, label_to_index, and the learning pipeline... The task says "Do NOT touch the snapshot/validation/accuracy persisters." Changing the signal count would ripple into `label_to_index` (which maps snapshot labels), `compute_adjusted_weights` ([f64; 7]), `load_learned_weights` (7 weights), accuracy stuff (SIGNAL_NAMES in commands_risk_accuracy.rs is separate). That's a big ripple — risky and not surgical.
+
+Better: **strengthen the existing recency signal** (index 1) rather than adding an 8th. The task explicitly allows: "If the signal EXISTS but is weak: strengthen it (e.g. raise its weight relative to the historical-fragility signals, or make the window adaptive)."
+
+Current weight: 0.15 for recency. The complaint is that historical signals (churn 0.30, etc.) drown the recency signal for one-off fix targets.
+
+Design:
+1. Add a dedicated "recent touch" input: files touched in the last N commits (say 8) get raw accel signal bumped to at least a floor (e.g., min raw value such that after normalization it lands meaningfully high). Specifically: if a file appears in the last ~8 commits' name lists, give raw_accel a boost — e.g., `raw_accel = raw_accel.max(RECENT_TOUCH_FLOOR)` where floor ensures normalized value ≥ some threshold.
+
+Actually a cleaner approach: compute a pure-binary "touched within last N commits" flag that contributes to the recency score independently. Instead of changing the 7-weight structure, I can fold the recent-touch flag INTO the existing weight-1 (recency) signal: recency_raw = max(accel_ratio, recent_touch_flag * T) where the flag gives a strong raw value (e.g., 3.0, matching the "maximally accelerating" constant) so it normalizes near 1.0.
+
+But normalization is min-max across files; if many files were touched in the last 10 commits, all get 3.0 → normalized to... min=0, max=3.0 → all = 1.0. Hmm, then the recency weight 0.15 applies equally to all of them, no differentiation. That still gives them all the same recency boost. In the day-175 case: update.rs touched recently → gets boost; the top-10 fragile files may not be touched recently → no boost. If both groups... the fragile files have strong churn/revert etc. — the recency boost (0.15 × 1.0 = 0.15) added to update.rs's modest history may still not beat the fragile files' total.
+
+Let me think of the exact test the task wants:
+- File A: modest risk history but recent modification → must rank ≥ File B
+- File B: strong history but no recent touch.
+
+To guarantee this within one weighted scorer, the recency signal needs enough weight to overcome history differences. The task says "raise its weight relative to the historical-fragility signals". So I should raise RISK_WEIGHTS[1] (recency) from 0.15 to something larger — but not so much that churn becomes pointless. E.g., 0.15 → 0.25, and reduce churn 0.30 → 0.20. Total must stay 1.0.
+
+But that changes many things: learned weights path, accuracy... RISK_WEIGHTS is a default used in load_learned_weights fallback and blending. Changing the default is fine — it's all internal. The learned-weights file doesn't exist in the repo (.arc/risk_weights.json absent), so defaults are what's used in practice right now.
+
+However, there's a subtlety with the test: the test must be deterministic and not depend on live repo state. The scoring functions use live git history. A unit test that calls compute_file_risk_scores() against the live repo is inherently non-deterministic, but the existing tests do exactly that (test_compute_file_risk_scores_returns_all_files, test_cross_file_coverage_reduces_risk). Hmm.
+
+The best approach for a robust test: refactor the weighted sum into a pure function that takes normalized signal arrays + weights and returns scores, then test the weighting directly with synthetic data. That's fully deterministic and directly tests the "recently-touched ranks ≥ historically-fragile" property.
+
+Let me design:
+
+```rust
+/// Weighted risk score from normalized signal vectors.
+/// `recency` is the already-normalized recency signal (index 1).
+fn weighted_risk_score(norm: &[f64], weights: &[f64; 7]) -> f64 { ... }
+```
+
+Wait — but the mutation weight and the test-density penalty are also folded in. For a pure test I can keep it simpler: extract just the 7-signal weighted sum into `score_from_signals(norms: &[f64; 7], weights: [f64; 7]) -> f64`. Then the test:
+
+- File A (recently touched, modest history): norms = [churn=0.2, recency=1.0, size=0.1, complexity=0.1, test=0.5, coupling=0.1, revert=0.0]
+- File B (strong history, no recent touch): norms = [churn=1.0, recency=0.0, size=0.3, complexity=0.3, test=0.3, coupling=0.5, revert=1.0]
+
+With default weights [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]:
+- A: 0.2*0.30 + 1.0*0.15 + 0.1*0.15 + 0.1*0.10 + 0.5*0.10 + 0.1*0.10 + 0*0.10 = 0.06+0.15+0.015+0.01+0.05+0.01+0 = 0.295
+- B: 1.0*0.30 + 0 + 0.3*0.15 + 0.3*0.10 + 0.3*0.10 + 0.5*0.10 + 1.0*0.10 = 0.30+0.045+0.03+0.03+0.05+0.10 = 0.555
+
+B wins — A does NOT rank ≥ B. So with the current weights, the test fails, as expected (that's the calibration we need to fix).
+
+With recency weight raised to 0.25 and churn lowered to 0.20:
+- A: 0.2*0.20 + 1.0*0.25 + 0.1*0.15 + 0.1*0.10 + 0.5*0.10 + 0.1*0.10 + 0 = 0.04+0.25+0.015+0.01+0.05+0.01 = 0.375
+- B: 1.0*0.20 + 0 + 0.045+0.03+0.03+0.05+0.10 = 0.455
+
+Still B wins. Need recency higher. Let me pick recency=0.30, churn=0.15:
+
+Weights: [0.15, 0.30, 0.15, 0.10, 0.10, 0.10, 0.10] sum=1.0
+- A: 0.2*0.15 + 0.30 + 0.015+0.01+0.05+0.01+0 = 0.03+0.30+0

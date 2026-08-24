@@ -1,0 +1,607 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state. I need to:
+1. Check ISSUES_TODAY.md for community issues
+2. Create session plan tasks
+3. Write issue responses
+4. Commit
+
+Let me first look at the current state of things — the session_plan directory, ISSUES_TODAY.md, and any relevant state.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && ls session_plan/ 2>/dev/null; echo… ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+No community issues today. The assessment says the backlog is completely clean. So all slots should be self-driven.
+
+The dream milestone: accumulate first validation data — risk meter at 3/5 pairs, ~2 sessions from the ≥5 cold-start threshold. The day-175 0% validation means the accumulator is producing calibration signal. The milestone-relevant work is either (a) letting 2 more sessions of data land, or (b) improving the scorer's miss-rate using available validation data (e.g., the update.rs miss).
+
+Since data accumulation is mostly passive (happens via the evolve loop calling `arc risk snapshot`), the highest-value work I can do this session is (b): improve the scorer using the now-available validation data. The day-175 0% validation: scorer's top-10 predicted commands_risk* files but the actual edit target was src/update.rs. The top-10 window + signal weighting under-weights small "one-off fix" targets.
+
+What would be a focused, small task? Ideas:
+
+1. Improve the risk scorer's miss-rate: the day-175 miss shows the top-10 window misses small one-off fix targets. Could look at how `top_risk_files` selects (top-10 window) and whether there's a way to add a "recently touched files" signal so files touched in recent sessions get weighted. Actually the miss was update.rs which was touched that very session — but the snapshot was taken before the session's commit, so the scorer couldn't have known. Hmm, actually `auto_risk_snapshot` fires only from arc's own `/commit` handler and on REPL exit opt-in, and `arc risk snapshot` in the evolve loop. The snapshot records predictions at session start. The update.rs miss means at snapshot time, update.rs wasn't flagged — it was chosen because of the SemVer false-positive bug the session was fixing. That's genuinely hard to predict — the file wasn't risky until the plan chose it. That's not a scorer failure per se; it's the reality that planning-induced edits are unpredictable. But the lesson might be: co-change coupling or recent-commit activity could help.
+
+Actually, let me think about what's genuinely useful and small:
+
+The assessment notes: "it suggests the top-10 window + signal weighting under-weights small 'one-off fix' targets."
+
+Wait — actually, I shouldn't read source code per the instructions ("Do NOT read source code files"). But I can plan from the assessment. Let me be careful: the instructions say plan from the assessment, don't read source. OK.
+
+Let me think about the best small task for the dream milestone. Options:
+
+A. Improve validation data quality: the accuracy is computed per-validation. The 0% day was because scorer's top-10 flagged risk files but the actual edit target was different. One concrete improvement: when validation runs, record NOT just whether the top-10 contained the edited file, but also the "miss distance" (rank of actual file if present, or whether it was in the full scored list at all). This gives richer data to calibrate the window. But that's instrumentation, seems moderately sized.
+
+B. Make the scorer weight "recently modified files" (git history activity) more, so files touched in past sessions get scored higher. update.rs was touched by the SemVer fix that session — but at snapshot time (session start), update.rs may well have been recently modified in previous sessions... Actually d175 16:29 was the release; the SemVer fix was d175's task. Hmm, prior sessions touched update.rs (d172-ish?). Not sure.
+
+C. Simply acknowledge and let data accumulate — pick a different self-driven task entirely. The assessment says "The next milestone-relevant work is either (a) simply letting 2 more sessions of data land, or (b) improving the scorer's miss-rate using the now-available validation data."
+
+Given I have 3 slots and no issues, what are good tasks?
+
+Slot 1 (self-driven, dream): Improve the risk scorer calibration using validation data. Concretely: a small task to make validation data richer — record per-validation detail (which files scored top-10, which were actually edited, whether actual edited files appeared in the scored list at all and at what rank). Wait, does that data already exist? The risk_validations.jsonl has ValidationEvent. Not sure of schema. I can't read source. Risk: the implementation agent will figure it out.
+
+Actually the cleanest, most defensible dream task given "3/5 pairs, ~2 sessions from threshold": the dream says "measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones. That's the first test of whether the sense organ perceives something real."
+
+Once 5 pairs land, there's a question of whether there's automation to compute that measurement. Is there? `arc risk accuracy` exists (compute_accuracy_stats). So the measurement tooling exists.
+
+Hmm. So what's genuinely missing? Let me re-read: "the day-175 validation predicted 10 files, none broke; the surprise was src/update.rs — which was touched by the SemVer fix that very session."
+
+Insight: the scorer predicts which files are at risk of FAILING, but the validation measures which files got EDITED. Those are different things! A file can be edited without failing (most edits). The day-175 0% might be measuring the wrong thing: if the task is "fix a small bug in update.rs", the risk isn't about update.rs being risky — the risk is that the FIX breaks update.rs. Actually wait, what does auto_validate_after_failure validate? It validates "predicted risky files vs which files were actually edited"? Or "predicted vs failed"? Let me think about the architecture: `replay_validate_last_snapshot()` runs the prior snapshot against commits since. Presumably it checks whether files that were committed since the snapshot overlapped the predicted risky files. So it's measuring "did the risky files get touched" — a proxy for "did risk materialize."
+
+The 0% is real signal: the top-10 predictor doesn't catch the actual edit targets. That's the calibration loop working — the day-174 task "Make the risk report legible: show per-file signal tags" was about legibility, and this is the natural next step.
+
+A genuinely useful, small, dream-advancing task: **add a "recent commit activity" signal to the file risk scorer** so recently-touched files score higher. Rationale: files touched in recent sessions have the highest probability of being touched again (edit locality / co-change). update.rs was a recent-edit file (SemVer fix happened that session... but snapshot was before). Hmm, was update.rs touched in the ~14 days before d175? The trajectory shows "src/update.rs: SemVer comparison now strips pre-release/build suffixes" as a d175 task. Prior to that... unknown.
+
+Alternatively the task could be: **report the miss-distance in the accuracy summary** — when the actual edited file wasn't in the top-10, show whether it was scored at all and its rank, plus add a signal: "files touched in last N sessions." This makes the calibration loop richer.
+
+Let me pick something concrete and small. I think the best task is:
+
+Task 1 (dream, evolve kind): Add a "recent activity" signal to the risk scorer — files modified within the last N sessions/commits get a bump, since edit locality is the strongest predictor of future edits (and the d175 miss suggests the scorer under-weights one-off fix targets that are typically recently-touched files). This is a change to commands_risk.rs (scorer) and maybe risk_meter. Keep it small: one new signal in `compute_file_risk_scores`, unit test.
+
+Hmm wait, but I don't know the exact structure of compute_file_risk_scores. The implementation agent will. The task file should describe intent + verification.
+
+Actually, let me reconsider. The instructions say tasks should touch at most 3 source files and be completable in 20 minutes. A scorer change with tests is reasonable.
+
+Task 2: What else? Given no community issues, and empty backlog, other options:
+
+- Gap doc priorities (Claude Code cross-session messaging — too big).
+- The empty-session pattern (d176 08:35, d174 08:39) — sessions where nothing got done. That's a harness/planning-level thing, not a code task.
+- Capability gaps measured against competitors: `--cloud`/`--teleport` too big. Event-driven autonomous review on PRs — too big.
+- Small UX friction: assessment doesn't surface specific product friction this session.
+
+Hmm, what about the release check (tier 8)? v0.1.17 shipped day 175. One session ago (d176) had the rtk command-substitution fix. Probably not enough accumulated for v0.1.18 yet. Assessment doesn't flag a release as due. Skip.
+
+What about making the risk accuracy report better — the ability to compute per-signal hit rates already exists (compute_per_signal_hits). 
+
+Alternatively: a task to fix the "empty session" pattern — e.g., the planner... no, that's my own planning job.
+
+What about a genuinely product-facing small improvement? The assessment lists none concretely. I could create a small product task based on the RTK fix: command substitution as non-simple — is there a test for it? Probably done.
+
+Hmm. Let me think about what would be most valuable. The dream milestone says: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs. Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+Pairs are at 3/5. Validations at 4. Two more sessions will land naturally. BUT — here's a thought — the week has d175's 0% which is great signal. Is there anything that INCREASES data throughput product-safely? The dream's earlier note: "For milestones blocked on accumulation, automate the feed; don't add more sensors." The feed IS automated (evolve.sh calls risk snapshot per session). So data accumulation is handled.
+
+So the genuinely useful work: **improve the scorer using the first validation data** — that's the "use the data to calibrate" step. The d175 miss (update.rs out of top-10) suggests: (a) signal weighting under-weights recent activity; (b) the top-10 window is too small/narrow. 
+
+I'll make Task 1: scorer calibration — add recent-commit-activity signal. And Task 2: validation miss-distance instrumentation — record richer validation data (was actual file scored, at what rank, top-N containment across N=5/10/20) so accuracy reporting gets more granular. Hmm, but is that 2 tasks on the same subsystem? That's fine, they're independent.
+
+Wait — actually I should be careful not to over-engineer. The assessment itself suggests (b) "improving the scorer's miss-rate using the now-available validation data (e.g., the update.rs miss)." So Task 1 = that. 
+
+Let me think about what a third slot should be. Options:
+
+1. Nothing (use fewer slots) — allowed? "You have 3 task slots per session." It doesn't require using all. But the harness/evolve expects tasks. I think 2-3 well-scoped tasks is fine. The planner-fallback task exists if no task files. Let me aim for 3 good ones.
+
+2. Product task: something real users experience. From the assessment, nothing concrete. But wait — the trajectory and assessment mention the dotenv work was done d176 for product. RTK fix done. Hmm.
+
+3. Self-discovered bug/UX: The "empty session" recurrence. Actually here's a concrete one: the assessment notes arcpedia unreachable from CI (302 → cloudflare) — recall/ingest are no-ops in the evolve loop. Could I do something about that? It's an external service issue — blocker requiring external action (credentials/network). Per instructions: "If you hit a blocker that requires human action... create an agent-help-wanted issue. Then move on." But arcpedia is arc's own separate agent (arcpedia.arclumen.de) — the evolve loop's endpoint. Hmm, this is documented behavior, not new. Skip or file help-wanted? It's been documented; not this session's job.
+
+4. Capability gap small-enough: What competes with Claude Code in small steps? Looking at assessment gap: "cross-session messaging" — too big. What about something like `arc` continued presence... no.
+
+5. The day-175 release had `/risk snapshot` cadence stamp. Assessment says meter at 95 snapshots, target cadence... fine.
+
+6. A good small self-driven task: **risk report legibility for the cold-start** — no, d174 did legibility.
+
+7. What about a task on the risk meter display: `format_risk_meter_line` — show pairs progress in the `/risk` output with a hint about how many more sessions needed. Small, dream-adjacent, useful: the meter is the cold-start progress bar; making it show "3/5 pairs — ~2 sessions to first calibration" helps every session's planner see the dream state. That's a nice small product/evolve task touching commands_risk_snapshots.rs.
+
+Actually wait — does the meter line already show pairs? `format_risk_meter_line` exists. Probably shows pairs/target. A hint of remaining sessions is speculative... I'd rather not invent.
+
+Let me reconsider: maybe Task 2 should be the validation miss-distance instrumentation, which directly serves the dream's measurement goal and gives accuracy reporting more signal. And Task 3... 
+
+Let me look at what the trajectory/assessment hint as highest value:
+- Dream milestone (scorer calibration using validation data) — Task 1.
+- The 0% validation suggests improving measurement; richer validation data (miss distance, top-N sweep) — Task 2.
+- Something else? The empty-session issue is about MY planning, not code.
+
+Actually — here's a clean idea for Task 3 with real user value: the assessment notes empty sessions happened 5 times recently (d176 08:35, d174 08:39, d171×2, d170×2). These are sessions where the planner wrote an assessment and no tasks. Wait, no — empty session means the evolve session produced no commits. That's not my problem to fix in code this phase.
+
+Alternatively, Task 3 could be a product polish: the `issue_responses.md` has nothing (no issues). Hmm.
+
+Let me reconsider the release: v0.1.17 was d175. d176 shipped rtk fix. That's one more meaningful change. If Task 1 and 2 land, we'd have 3 changes since v0.1.17 (rtk, scorer signal, validation detail). That's borderline for a release. I could add a release-check note but not a task. Actually the release skill says evaluate readiness — probably not enough. Skip.
+
+I think the honest plan is 2 strong tasks + maybe 1 smaller. Let me decide on 3:
+
+Task 1 (evolve, dream, core): Calibrate the risk scorer with validation data — add a "recent activity" signal (files touched by recent commits score higher) so one-off fix targets like the d175 update.rs miss get caught. Files: src/commands_risk.rs, src/commands_risk_snapshots.rs (maybe), test in commands_risk.rs. Hmm "at most 3 source files."
+
+Wait, I should be careful: I can't read the code, but the task description should tell the implementation agent what to do with enough context. Let me describe the intent, the data (d175 miss), and the verification (build + tests + existing unit tests for scoring).
+
+Task 2 (evolve, dream): Richer validation records — extend the validation/accuracy reporting to capture miss-distance: did the actually-edited file appear in the scored list at all, and at what rank; and report top-5/top-10/top-20 containment. Files: src/commands_risk_snapshots.rs, src/commands_risk_accuracy.rs. This makes the calibration loop measurable beyond binary hit/miss.
+
+Hmm, but is Task 2 maybe too speculative without knowing the schema? The ValidationEvent / ParsedSnapshot structs exist with parse functions. Richer fields = backward-compatible additive fields, parse defensively. That's fine and matches the codebase conventions ("All readers parse defensively").
+
+Task 3 (product or evolve?): Let me pick something with clear value... 
+
+Option A: A product-facing improvement from real user experience. Nothing concrete in this assessment.
+Option B: fix the trajectory warning noise? No.
+Option C: Something about the meter display — e.g., make `arc risk` (bare subcommand) print the meter + pairs progress + next-milestone hint so the dream state is visible at a glance. Small, touches commands_risk.rs / commands_risk_snapshots.rs (format_risk_meter_line). Relatively safe.
+Option D: Just do 2 tasks.
+
+Actually, let me reconsider whether there's a beatable "self-discovered bug" or improvement listed. The assessment's Capability Gaps mention: "cursor Bugbot Autofix: event-driven autonomous review/fix on PRs." Too big.
+
+Hmm, actually — one more idea from the trajectory: the recurring CI error "failed to log in to github.com using token (gh_token)" appears 3× in window but "not present in the last ~30 runs" per assessment. So resolved/noise. Skip.
+
+I'll go with 3 tasks:
+1. Scorer calibration: recent-activity signal (dream, evolve).
+2. Validation miss-distance + top-N containment reporting (dream, evolve).
+3. Risk meter visibility: surface pairs progress + horizon in `/risk`/`arc risk` output (dream-adjacent, evolve-kind; makes cold-start progress legible to every session's planner). Files: commands_risk_snapshots.rs (format_risk_meter_line) + commands_risk.rs (handle_risk bare call). At most 2 files.
+
+Hmm wait, is task 3 worth it? The meter line probably already shows pairs? "format_risk_meter_line" formats the meter — unknown content. Risk of duplicating existing output. Let me scope it as "if the pairs/target progress and remaining-session estimate aren't already shown, add them; verification = build+test." Actually, better: make the task conditional and evaluable: "add a horizon hint (estimated sessions to 5 pairs based on recent snapshot cadence)". That's concrete and useful — the dream asks "~2 sessions away"; a computed estimate from cadence data would be real.
+
+Hmm, but is that over-engineering? The dream explicitly says the milestone is "enough evolve sessions... to produce ≥5 pairs." A session-count estimate from history is genuinely useful for planner awareness — every session the planner picks risk work partly based on this. And the d129 lesson says "For milestones blocked on accumulation, automate the feed; don't add more sensors." This isn't a sensor; it's legibility of an existing meter. I'll keep it small.
+
+Actually — wait. Let me reconsider. The assessment says meter: "95 snapshots, 4 validations, pairs 3/5." Pairs grow ~1/session-ish (validations 4, pairs 3). A horizon estimate = (5-3) / avg pairs-per-session. Simple. OK.
+
+Alternatively Task 3 could be product: hmm, nothing.
+
+Let me also double-check the "Kind" for each:
+- Task 1: evolve (risk subsystem is arc's own loop/self-model). Actually... the risk sense organ is a product feature too (/risk command). But the calibration work benefits evolve loop primarily (the meter data comes from evolve sessions). The dream is about arc itself. I'll mark evolve — primary beneficiary is the loop's self-model. Hmm, but /risk is a user-facing command... The calibration improves the scorer for everyone. Honestly it's both; primary = evolve (self-model). OK.
+- Task 2: evolve.
+- Task 3: evolve (or product — meter displayed in /risk which users see). I'll say evolve.
+
+Wait, the instruction says at least 1 slot MUST be self-driven (tiers 1-3, 7). All three are self-driven. Fine. And "for this slot, prefer advancing the next milestone in DREAM.md" — done.
+
+Also: "If a task has been reverted before (check agent-self issues above)" — no agent-self issues open. OK.
+
+Task sizing:
+- Each at most 3 source files → ✓ (1-2 each).
+- 20 min completable → each is a focused single-signal/single-reporting change. ✓.
+
+Now issue_responses.md: no community issues today → note that explicitly.
+
+Also should I file an agent-help-wanted for arcpedia? It's a long-documented external blocker, not new, repeatedly noted. Doesn't block session work. Skip — filing noise issues for known-documented things isn't helpful. Actually, hmm: the instructions say if a blocker requires human action, file help-wanted then move on. arcpedia unreachable from CI — is that a blocker for this session's work? No, not blocking. Documented behavior. Skip.
+
+Let me also double check the git state is clean-ish before committing: session_plan/assessment.md exists (from Phase A1). I'll rm task_*.md first (instructions) and write new ones.
+
+One more consideration for Task 1: I must be careful about the d129 lesson "Don't add more sensors" — Task 1 is about the weight of the activity signal, not a new input source necessarily. The scorer already has signals (the report shows "per-file signal tags" from d174 legibility work). Adding a "recent activity"/edit-locality signal to watch is consistent with the dream's calibration goal: using actual outcome data (the miss) to improve the sense organ. I'll phrase it as "reweight/extend signals so recently-edited files score higher — the d175 validation showed the top-10 missed the actual edit target (update.rs)". The implementation agent will decide the exact mechanism (git log-based activity window). Verification: unit test in commands_risk.rs (scorer ranks recently-touched file higher), cargo build && cargo test.
+
+Write the files now.
+
+Task 1 file: session_plan/task_01.md
+
+Title: Calibrate risk scorer with validation data — recent-activity signal
+Kind: evolve
+Files: src/commands_risk.rs, src/commands_risk_snapshots.rs (only if needed for data access)
+Issue: none (dream milestone)
+
+Body: The day-175 validation scored 0% — the scorer's top-10 predicted commands_risk* files, but the actual edit target was src/update.rs (a small one-off SemVer fix). Calibration loop is working (this is the first real miss data), but it shows the scorer under-weights small "one-off fix" targets — exactly the files most likely to be edited soon. Add a recent-commit-activity signal: files touched in the last N sessions (e.g., last 10-14 days of git history, or last ~20 commits) get a score bump. This encodes edit-locality: a file edited recently is the most likely to be edited again (and the d175 miss target, update.rs, was touched in prior sessions). Mechanism is up to the implementer (grep git log in compute_file_risk_scores or weight an existing signal), but: (1) keep the signal optional/configurable in spirit (off for empty repos), (2) add/update a unit test asserting a recently-touched file ranks above a never-touched file with otherwise-similar signals, (3) show the new signal in the per-file signal-tags report from d174 if it's a natural fit. Must pass cargo build && cargo test. Do not touch signal tuning beyond this one addition.
+
+Hmm, "Do not touch signal tuning beyond this one addition" — good scoping guard.
+
+Wait — one concern: the d175 miss target update.rs was touched BY THE VERY SESSION — snapshot was taken at session start before the edit. Would a recent-activity signal have caught it? Only if update.rs was edited in the ~2 weeks before d175. The trajectory per-task list shows update.rs task at d175 only. Prior update.rs touches: the trajectory mentions update.rs in "Per-task activity (last 14 days)" only as the d175 task. Hmm — the SemVer fix was the only update.rs touch in 14 days? Then recent-activity wouldn't catch it either. But that's fine — the signal still improves edit-locality generally; the task is honest about the mechanism being principled, not that it specifically catches the d175 miss. Let me be honest in the task: state the hypothesis (edit locality is a strong predictor generally) and note it's the first calibration iteration using outcome data; the metric that matters is whether the top-10 hit rate improves over the next several validations. That's honest and doesn't overclaim.
+
+Task 2: miss-distance + top-N containment.
+
+Title: Richer validation records — miss distance and top-N containment for the risk calibration loop
+Kind: evolve
+Files: src/commands_risk_snapshots.rs, src/commands_risk_accuracy.rs
+Body: Today the validation record is a binary hit/miss (was the edited file in the predicted top-10?). That hides how close the scorer was. Extend the validation/accuracy reporting to capture, per validation: (a) whether the actually-edited file(s) appeared in the scored list at all, and at what rank if so; (b) containment across top-5 / top-10 / top-20, so we can see whether misses are "just outside the window" (window too small) or "nowhere near" (signal weighting wrong). Keep the JSONL records backward-compatible: additive optional fields, all readers parse defensively (existing convention). Extend the accuracy report (compute_accuracy_stats / format_accuracy_report, commands_risk_accuracy.rs) to show the top-N containment curve + rank-of-actual-file percentiles across the validation history. Tests: parse old records (no new fields) without breaking; round-trip new fields. cargo build && cargo test must pass.
+
+Task 3: meter horizon.
+
+Title: Risk meter horizon — estimated sessions to the 3/5→5/5 cold-start milestone
+Kind: evolve
+Files: src/commands_risk_snapshots.rs (format_risk_meter_line / compute_risk_meter), src/commands_risk.rs (handle_risk bare summary) if needed
+Body: The dream milestone is ≥5 matched prediction-outcome pairs; the meter shows pairs 3/5 but not the time-to-milestone. Compute from the snapshot/validation history the average pairs-per-session cadence (recent window, e.g., last 10 validations or last 14 days) and display "≈N sessions to 5 pairs" in the meter line (arc risk / /risk output) when below target; suppress when at/above target or when insufficient data (<2 validations). Pure helper + unit test. Must pass cargo build && cargo test. Don't change the meter's stored JSON schema (read-only addition to the LINE display).
+
+Hmm, wait — is "pairs 3/5 → 5/5" right? target_pairs: 5, pairs: 3. Yes.
+
+Now issue_responses.md: "No community issues today (ISSUES_TODAY.md is empty). All three slots are self-driven toward the dream milestone (risk calibrations), per the empty backlog. No issue responses needed."
+
+Then commit.
+
+Let me also make sure I don't overwrite assessment.md — instructions say rm -f session_plan/task_*.md (only task files). Keep assessment.md.
+
+Write the files.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && mkdir -p session_plan && rm -f ses… ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+No community issues today, risk meter at 3/5 pairs. Let me plan:
+
+1. **Self-driven dream work**: The dream milestone is accumulating validation data (3/5 pairs → ≥5). The assessment notes the day-175 0% validation is informative: the scorer predicted `commands_risk*` files but actual edit target was `src/update.rs`. Since there are no issues, I should advance the dream milestone. Two options: (a) let data accumulate passively, or (b) improve the scorer's miss-rate using validation data. 
+
+The dream says "next milestone — Accumulate the first validation data... Once data exists, measure whether files the scorer flagged as high-risk actually failed more often". The meter is at 3/5, ~2 sessions from threshold. So the *data accumulation* is nearly done. The best dream-advancing work now is to make the validation loop produce more data — but that's mostly automatic.
+
+Actually — a concrete, small, dream-advancing task: the day-175 0% validation revealed the scorer's top-10 window under-weights small "one-off fix" targets. Could improve the validation to also record *which* files actually broke vs predicted — but that's already happening.
+
+Alternative concrete dream-advancing task: when the risk meter hits 5/5 pairs, the dream's next milestone is "measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones". That measurement needs a report. We already have `prediction_accuracy_summary`. Hmm.
+
+Let me think about what's genuinely buildable in 20 min that advances the dream:
+
+Option A: Make the validation loop richer — currently `auto_validate_after_failure` records validations. The 0% day-175 validation predicted 10 files, none broke. What if we could surface "the actual broken file wasn't in the top-10" as a learning signal? That's already data.
+
+Option B: The dream milestone is *measurement* when data exists. The infrastructure exists (`compute_accuracy_stats`). The gap is data, which accumulates automatically. So the honest dream-advancing task might be to *speed up accumulation* — e.g., the validation loop only fires on `/commit` and (opt-in) REPL exit. Could we also validate on evolve-loop commits? Wait — `auto_risk_snapshot` does NOT fire in the evolve loop (documented). Hmm, but `arc risk snapshot` is called once per session by evolve.sh which does both snapshot + validate. So data accumulates per-session.
+
+Actually per the assessment: "pairs 3/5 toward the dream's ≥5 cold-start threshold. Target is ~2 sessions of data away." So the *simplest* dream advancement is literally letting 2 more sessions land — which is not a code task.
+
+Option C: Improve the scorer's miss-rate: the day-175 miss (update.rs) suggests top-10 window + signal weighting under-weights "one-off fix" targets. A concrete improvement: include *recently touched files* as signal (files touched in last N commits are more likely to be edited again → the update.rs case was the file touched that session... wait, update.rs was touched BY the SemVer fix that session — i.e., the validation predicted breakage but the file that "broke" was the one the agent edited. Hmm, actually reading again: "The day-175 validation predicted 10 files, none broke; the surprise was src/update.rs — which was touched by the SemVer fix that very session." So the validation recorded that update.rs broke (was edited after risk snapshot) but it wasn't in the top-10 predicted.
+
+A concrete scorer improvement: weight *recently modified* files higher. That's a genuine, focused, testable change to `compute_file_risk_scores` or the signal computation. Let me check what signals exist. I shouldn't read source per instructions... but I can plan from the assessment. The assessment says "the scorer's top-10 miss rate... suggests the top-10 window + signal weighting under-weights small 'one-off fix' targets."
+
+Hmm, I need to be careful — I'm told NOT to read source files. The assessment gives me enough.
+
+Actually wait — there's a tension. The instructions say "Do NOT read source code files. The assessment above already contains the source architecture." So I plan from the assessment.
+
+Let me decide the tasks:
+
+**Task 1 (self-driven, dream)**: Improve the risk scorer to weight recently-modified files — the day-175 0% validation showed the scorer missed `src/update.rs`, the file the agent actually edited that session. Adding a "recently modified" signal (files with edits since the last snapshot, or in the last N commits) to `compute_file_risk_scores` addresses the documented under-weighting of one-off fix targets. Files: `src/commands_risk.rs` (compute_file_risk_scores) + maybe `src/commands_risk_report.rs`. Keep ≤3 files, add a unit test.
+
+Wait — but is this the right reading? Let me re-read the assessment: "the scorer's top-10 predicted `commands_risk*` files but the actual edit target was `src/update.rs` (SemVer). The sense organ is catching its own class of misses — that's the calibration loop working, but it suggests the top-10 window + signal weighting under-weights small 'one-off fix' targets."
+
+So yes — a concrete improvement: add a recency signal. Recently-modified files (git log last ~5 commits) should get a bump. Testable: a unit test where a recently-modified file scores higher than a stale high-risk file. That's a solid 20-min task.
+
+**Task 2**: No community issues. Remaining slots... The assessment highlights: the `0% validation` data is informative but the dream says accumulate ≥5 pairs. Since accumulation is automatic, the measurement milestone ("measure whether high-risk files actually failed more often") needs a *first real readout* when pairs hit 5/5. We already have `prediction_accuracy_summary`. Hmm.
+
+What else? Capability gaps: Claude Code cross-session messaging, cloud sessions — too big for small steps (concluded by Day-173 gap doc). The daily_diary.sh? Let me look at what small product improvements might exist.
+
+Actually — maybe Task 2 should be about the validation loop's coverage: currently `auto_validate_after_failure` fires on `/commit` and REPL-exit (opt-in). The evolve loop validates via `arc risk snapshot`. But that's once per session. What about validating *more often*? Hmm, that's harness territory (scripts/evolve.sh is protected — cannot modify).
+
+Alternatively Task 2 (product): something that improves the risk report legibility for real users. The day-174 task already did "Make the risk report legible: show per-file signal tags". 
+
+Let me think about the empty-session pattern — d176 08:35, d174 08:39, d171×2, d170×2 empty sessions. That's recurrence worth noting. Not a code task per se.
+
+What about a genuine small product gap: the risk meter line (`format_risk_meter_line`) — shown to users. The pairs 3/5 toward ≥5. When it hits 5/5, the meter should show something different — e.g., "calibrated" state or first accuracy readout. That advances the dream's measurement milestone: when pairs ≥ target, surface the accuracy readout in the risk meter line. That's product + dream. Concrete and small.
+
+Actually — let me reconsider. The dream milestone says "Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones." `compute_accuracy_stats` exists and `prediction_accuracy_summary` exists. What's missing: wiring the accuracy readout into a place the user/agent sees it — e.g., the risk meter line currently shows `snapshots/pairs/validations` counts. Adding a "measured accuracy: X% (n pairs)" once pairs ≥5 makes the cold-start milestone visible the moment it's reached. That's a tight, dream-advancing product task.
+
+Task 2: When the risk meter reaches its target pairs, surface the measured validation accuracy in the meter line + risk report — the dream milestone's first readout. Files: `src/commands_risk_snapshots.rs` (RiskMeter struct + format_risk_meter_line) + `src/commands_risk_accuracy.rs` (compute_accuracy_stats already exists — just wire it). Keep ≤3 files, unit test the meter line rendering at ≥target pairs.
+
+Hmm wait, that might duplicate what already exists. The assessment says "Validation accuracy trend is a real signal: 10% (d171) → 66.7% (d172) → 66.7% (d174) → 0% (d175)" — so accuracy IS already computed somewhere and displayed (that's how the assessment knows the trend). So the readout already exists. Then Task 2 as I described might be already-done.
+
+Let me instead make Task 2 a complementary piece: **calibration nudges**. The day-175 0% validation: when a validation scores 0% (predicted nothing that broke), the loop should *learn* — record a lesson / nudge the weights. The assessment says "suggests the top-10 window + signal weighting under-weights small 'one-off fix' targets." We already have `learn_weights_from_history`! So weights learning exists.
+
+OK here's the thing — I risk inventing duplicate work. Without reading source I should plan conservatively. Let me pick genuinely-grounded gaps from the assessment:
+
+1. **Task 1 (dream/self): recency signal in the risk scorer** — grounded in the day-175 0% validation (update.rs miss). The scorer under-weights one-off fix targets; a recently-modified-files signal is the natural correction. Testable.
+
+2. **Task 2 (evolve): empty-session recurrence** — hmm, not code. Skip.
+
+Alternative Task 2: The assessment notes "arcpedia unreachable from CI (302 → cloudflare) — recall/ingest are no-ops in the evolve loop; documented, silent, not a new issue." Not actionable in-repo.
+
+What about the RTK work from day 176 — command substitution treated as non-simple. That was a safety fix. Any follow-up? Not mentioned.
+
+3. **Release check** — v0.1.17 shipped day 175. Since then: rtk command-substitution fix (day 176) + dotenv testability + spawn help/docs (day 176). That's small. A release needs "enough improvements accumulated" — probably not yet. Skip release.
+
+Since there are NO community issues and the backlog is clean, my 3 slots:
+- Task 1: dream — recency signal in risk scorer (self-driven, product+evolve... it's the risk subsystem which feeds both; primary beneficiary: the dream/self-measurement, but the scorer is a product feature users see via /risk. I'll declare Kind: product since /risk is a product command).
+- Task 2: dream — make the ≥5-pair measurement milestone actually *measure*: once pairs ≥ target, add a first-readout test/report... 
+
+Hmm. Let me think about what the dream REALLY needs next, concretely. Dream: "What's needed is enough evolve sessions with these firing to produce ≥5 matched prediction-outcome pairs. Once data exists, measure whether files the scorer flagged as high-risk actually failed more often than unflagged ones."
+
+pairs = 3. The `arc risk snapshot` call per evolve session BOTH snapshots AND runs replay-validate of prior snapshot → each session adds ~1 pair (if there were commits since prior snapshot). So 2 more sessions → 5 pairs. Data accumulation is automatic.
+
+The *measurement* step ("do high-risk files fail more often than unflagged?") — is that implemented? `prediction_accuracy_summary` exists (per assessment). `compute_accuracy_stats` exists. So the measurement primitive exists.
+
+The genuinely missing piece: the calibration loop that *uses* the measurement to improve the scorer. `learn_weights_from_history` exists! So weights already learn from history.
+
+OK so what IS the actual next gap? The day-175 0%: "the scorer's top-10 window + signal weighting under-weights small 'one-off fix' targets." Task 1 (recency signal) is the correction. That's the strongest dream-advancing task.
+
+For Task 2, let me go more modest and product-utility: the risk report. Actually — you know what, there's a cleaner idea grounded in the trajectory: "provider/API health 10 sessions, no errors." Fine.
+
+Let me look at another angle: what recurring CI fingerprints exist? "failed to log in to github.com using token (gh_token)" ×3 — but assessment says not present in last ~30 runs. Skip.
+
+Given no issues, maybe 2 strong tasks + 1 worth-doing is right. Let me make Task 2 also dream-adjacent but smaller and safer: **surface per-validation miss examples in the risk report** — when a validation scores 0%, the report should name the file that actually broke vs the top-10 predicted, so the miss becomes legible (the day-175 update.rs miss). This makes the calibration loop *legible* — a stated part of the dream ("the sense organ is catching its own class of misses"). Concrete: extend `format_risk_report` or accuracy report with "misses" — files that broke but weren't predicted. Files: `src/commands_risk_accuracy.rs` + `src/commands_risk_report.rs`. Testable with a fake validation history.
+
+Hmm, but does the validation event record WHICH file broke? Per CLAUDE.md: "ValidationEvent" exists in commands_risk_snapshots.rs. It must record predicted files + actual failures. So "miss = broke but not in predicted list" is computable. Good.
+
+Actually, let me reconsider scope. Two tasks both touching the risk subsystem — that's fine (different files). But maybe I should diversify: one task should be a genuine product/UX improvement visible to real users.
+
+Task 2 idea (product, grounded): the day-176 rtk change. No follow-up needed.
+
+What about dotenv from day 176 — "Dotenv-style API key loading" shipped day 175, made testable day 176. Done.
+
+Honestly the strongest second task remains risk-adjacent because that's where the evidence (day-175 miss) points. The assessment itself says: "The next milestone-relevant work is either (a) simply letting 2 more sessions of data land, or (b) improving the scorer's miss-rate using the now-available validation data (e.g., the update.rs miss)."
+
+So the planner's own recommendation: (b) improving the scorer's miss-rate. Task 1 does that with recency signal. That might be enough for the dream slot. Then Task 2,3: pick product/evolve improvements.
+
+For slots 2-3 with no issues: I could do a release check (skip — too soon after v0.1.17), or a product UX improvement. Let me think of concrete small product gaps NOT in the risk area.
+
+From the assessment's capability gaps: "cross-session messaging and persistent cloud sessions are the gap arc cannot close in small steps." Aider dormant. The differentiator is risk. So risk-adjacent work IS the competitive moat maintenance.
+
+Let me define:
+- Task 1 (dream, product): recency signal in scorer — fix the update.rs-class miss.
+- Task 2 (dream, evolve): sanity-check the accumulation cadence — risk snapshot currently fires once per evolve session; with auto-RISK_AUTOSNAPSHOT opt-in for interactive... The 3/5 pairs at 95 snapshots means snapshots outpacing validations massively (95 snapshots → 4 validations). Wait — 95 snapshots but only 4 validations? That's a huge pipeline gap! Pairs = 3. So the snapshot side accumulates but validation rarely fires. Why? `auto_validate_after_failure` fires on /commit handler... In the evolve loop, `arc risk snapshot` does snapshot+validate-prior. But 95 snapshots vs 4 validations suggests validation rarely finds commits-since-prior-snapshot, OR replay-validate needs matching commit spans.
+
+Hmm interesting — but pairs=3 with validations=4 means ~3 validations matched to snapshots. The bottleneck isn't my job to fix if it's intrinsic (validation only meaningful when commits happen between snapshots — in evolve that's same-session commits).
+
+Actually a real improvement: `arc risk snapshot` validates only the PRIOR snapshot. If a session runs snapshot twice... whatever. Skip deep diagnosis.
+
+Let me simplify: 
+- Task 2 (product, small): Make the risk meter target milestone visible — when pairs reach ≥5 (dream target), the meter line should flip from "pairs 3/5" to a "calibrated" state with the accuracy readout inline. This is the dream's threshold moment becoming visible. Wait — but does format_risk_meter_line already show accuracy? Unknown. The assessment quotes meter state as counts only. The dream says the milestone is measurement at ≥5 — so the meter line's job at 5/5 is to start showing "first accuracy readout". I'll spec it: when pairs ≥ target, the meter line includes measured accuracy from compute_accuracy_stats (e.g. "calibrated: 66.7% (5 pairs)"). Files: commands_risk_snapshots.rs (format_risk_meter_line) + maybe risk_accuracy. Hmm, risk of duplication with prediction_accuracy_summary which /risk accuracy already shows. But the METER LINE specifically is the always-visible surface. I think this is legit and small.
+
+Actually, let me reconsider — is this worth burning a slot on? The assessment says pairs will reach 5 in ~2 sessions regardless. At that point the meter line showing "calibrated + accuracy" gives the dream its first visible victory. It's small, testable, dream-advancing, product-visible. Yes, worth it.
+
+- Task 3 (evolve/harness): Hmm. Options: (a) empty-session pattern — what could reduce empty sessions? The assessment: "Empty session pattern (d176 08:35, d174 08:39, d171×2, d170×2) is recurrence worth noting but not new." An empty session means Phase A produced no tasks — often because nothing urgent. A small fix: when the risk meter is near target, the planner prompt could hint "N pairs to dream milestone" — wait, that's harness (evolve.sh protected; can't modify). The planner prompts come from... session_plan? No — Phase A prompts are built in scripts/evolve.sh (protected) or common.sh. Can't touch.
+
+(b) A genuinely useful evolve task: the `arcpedia` 302 unreachable — no.
+
+(c) Provider health is clean.
+
+(d) What about `skills/blindspot` — used recently? Not mentioned.
+
+Let me reconsider — maybe Task 3 should be a small but real product fix I can ground: the day-176 rtk change shipped without tests? "rtk.rs: treat command substitution ($(...), backticks) as non-simple in the RTK simplifier (safety fix; session had no other commits)." If it shipped with tests, fine; unknown. Can't verify without reading source — but tests are required by convention, so likely tested.
+
+Alternatively — Task 3: docs. The assessment notes /spawn help+docs caught up last session. Docs are current.
+
+Hmm — what about the gap doc mention "cross-session messaging... the gap arc cannot close in small steps" — a *small step* IS possible: session resume hints already exist (`session_resume_hint`). Skip.
+
+Honest option: 2 well-scoped tasks beats 3 half-baked ones. The instructions say "You have 3 task slots" but don't force filling all. Past sessions ran 1-3 tasks. I'll do 3 but make the third genuinely small and grounded:
+
+Task 3 (evolve): bump the risk snapshot cadence for the evolve loop — currently `arc risk snapshot` runs once per session; but with 95 snapshots / 4 validations, the validation side is starved. The fix: the evolve loop's snapshot call could also validate against MORE than just the prior snapshot? No — that's replay complexity. 
+
+Alternative Task 3 grounded in trajectory: "0 of last ~10 sessions had reverts" — good. "3× failed to log in gh_token" — gone.
+
+What about a *real* product gap from the last release era: v0.1.17 = "risk-sensor + dotenv era". Released day 175. Since then: dotenv testability (day 176), spawn help docs (day 176), rtk fix (day 176). Accumulated but small. Release check → not yet.
+
+Let me go with a focused Task 3: **risk validation auto-learn** — when a validation scores 0% (like day-175), the loop currently just records it. Improvement: `auto_validate_after_failure` / validation path should also call `learn_weights_from_history` when a 0%-or-low validation happens (or emit a lesson via the existing learning machinery?). But learn_weights_from_history presumably already runs on /risk history or predict... Unknown usage. Risky duplication again.
+
+Simplest safe Task 3: **make the day-175 miss class visible to the agent in-context** — after a validation, write a one-line "miss note" into the risk report/context (`risk_context_for_files` or the meter line in /risk) naming files that broke but weren't predicted. Actually this is my earlier Task 2 idea. Merge: Task 2 = "when pairs ≥ target, show calibrated accuracy in meter line"; Task 3 = "surface validation misses (files that broke not in top-N predicted) in the accuracy report".
+
+Hmm, both small report-rendering tasks. That's fine — they're each ≤3 files, testable, and directly walk the dream milestone.
+
+Wait, actually — let me sanity-check Task 1 more carefully since it's the flagship. compute_file_risk_scores presumably scores files by signals (history of failures, mutation survival, co-change coupling...). Adding "recently modified" (git log recency) is a new signal. The dream's proprioception: files touched recently are the ones about to be touched again (temporal locality — the thing being edited now is the most likely to be edited next). The day-175 miss: update.rs was edited that session by the SemVer fix — wait, no. Validation predicts which files will FAIL next, based on snapshot at session START. update.rs wasn't in top-10. Then the agent edited update.rs (SemVer fix) and... did update.rs then break? "Validation predicted 10 files, none broke; the surprise was src/update.rs — which was touched by the SemVer fix that very session." So update.rs WAS the broken file (touched = the outcome the validator records?). The validator records files modified in commits since the snapshot as "broke". So a file modified right after the snapshot → recency-at-snapshot-time was LOW for update.rs (it hadn't been touched recently before the snapshot), yet it got touched right after. Hmm — so would a recency signal have helped? Only if update.rs had recent activity BEFORE the snapshot. The SemVer fix was mid-session, after the snapshot. So recency-of-commit-history wouldn't have caught it either...
+
+Unless — the signal is "recently touched files" in a broader sense (any file touched in the last N commits across sessions, e.g. last 7 days). update.rs had day-171/172 activity (update.rs in "Recently Changed Files" per CLAUDE.md!). Yes! Look at the repo context: "Recently Changed Files" list includes src/update.rs. So update.rs IS a recently-active file. A recency signal (commits in last N days) would have flagged it. 
+
+So Task 1 spec: add a recency signal to compute_file_risk_scores — files touched in the last ~14 days (git log) get a score bump, addressing the day-175 miss where a recently-active file (update.rs) broke but wasn't in the top-10. Testable: unit test where a file with recent commits scores ≥ a file with old commits only, holding other signals equal.
+
+Good — that's grounded and concrete. For the implementation agent: read compute_file_risk_scores, find where git log / history is loaded (revert_history exists), add recency weighting, write a test. Careful: "Files: src/commands_risk.rs, maybe src/commands_risk_report.rs" — keep to 2 files max.
+
+Now finalize the three tasks:
+
+**Task 1** — Kind: product (the risk scorer serves /risk users; also dream). Files: src/commands_risk.rs (+ unit test in-file). Issue: none (self-driven).
+
+**Task 2** — Kind: product. Files: src/commands_risk_snapshots.rs, src/commands_risk_accuracy.rs. Meter line shows calibrated accuracy at target. Issue: none.
+
+Hmm wait — I need to double check format_risk_meter_line is in commands_risk_snapshots.rs — yes, per the repo structure listing.
+
+**Task 3** — Kind: evolve? or product. "Surface validation misses in the accuracy report" — files: src/commands_risk_accuracy.rs, src/commands_risk_report.rs. Issue: none.
+
+Hmm, but Task 2 and 3 both touch commands_risk_accuracy.rs. The ≤3-files rule is per task, not across tasks — fine. But maybe merge 2+3 into one? They're distinct: meter-line threshold moment vs miss legibility. Keep separate but both small.
+
+Actually, let me reconsider Task 3's beneficiary. Accuracy report is shown via /risk accuracy — a product surface. Kind: product.
+
+Wait — one concern: is there overlap between Task 2 and the existing `prediction_accuracy_summary`? The task should explicitly say: don't duplicate; the meter line currently shows counts (snapshots/validations/pairs); ADD accuracy readout only when pairs ≥ target. If accuracy already appears in the line, the agent should verify and instead make it prominent. I'll write the task defensively ("if the line already includes accuracy, tighten the transition wording at target instead").
+
+Hold on. Let me reconsider whether Task 2 might already be handled: the assessment quoted `.arc/risk_meter.json` as raw counts — the meter LINE is rendered where? `format_risk_meter_line`. Assessment's "Risk meter state" line was likely derived from the JSON directly. Can't be sure the line shows counts + "pairs 3/5 toward target". My task: at ≥target, switch to calibrated readout showing measured accuracy. Fine.
+
+Also — one more consideration for Task 2: pairs hit via evolve-loop cadence ~2 sessions out. If the task ships BEFORE pairs hit 5, the change is dormant until then — that's OK, it's a state-transition in the renderer, testable via unit test with a fake meter at target.
+
+Alright, also the issue_responses.md: no community issues → say "No community issues today — all three slots self-driven toward the dream milestone."
+
+Let me also double-check: should any task be about the empty-session pattern (evolve loop)? The assessment flags it as "recurrence worth noting but not new". A root cause: sessions where the planner finds nothing urgent produce 0 tasks. My tasks today are well-defined so this session won't be empty. It's a meta-observation; not a code task. Skip — honest.
+
+One more: "Release check" — v0.1.17 was 2 days ago; accumulated changes are small (dotenv testability, spawn docs, rtk fix, plus today's risk work). Not enough for a release yet. Note it in issue_responses as deferred.
+
+Now, kind declarations:
+- Task 1: product (risk scorer is a product surface; dream-advancing but users benefit).
+- Task 2: product.
+- Task 3: product.
+
+Hmm, at least one could be "evolve"... The rule says at least 1 slot MUST be self-driven — all three are self-driven (no issues today). Kind is about beneficiary. All three improve the /risk product surface AND the dream. I'll mark Task 1 as product and note dream alignment; maybe mark Task 3 as evolve (internal calibration legibility, mostly for the agent's own loop). Actually Task 3 (miss legibility in accuracy report) is genuinely mostly for arc's own calibration loop reading. Kind: evolve. And it must be opt-in-safe — it's inside /risk accuracy output, product-safe anyway.
+
+Let me now write the task files with enough specificity. Keep each focused.
+
+After writing, commit: `git add session_plan/ && git commit -m "Day 177 (01:38): session plan" || true`.
+
+Let me write the files.
+────────────────────────────────────────────────────────────────────────────────
+No community issues today; backlog is clean. Risk meter is at 3/5 pairs toward the dream milestone. Let me check the current plan file and then write the session plan.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cat session_plan/assessment.md 2>/… ✓ (5ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the situation clearly. Let me synthesize:
+
+**State:**
+- No open issues, no community issues
+- Risk meter: 3/5 pairs toward dream milestone (≥5 matched prediction-outcome pairs)
+- Day-175 validation: 0% — scorer predicted top-10 files, but actual edit target was `src/update.rs` (miss)
+- The dream milestone: accumulate ≥5 matched pairs, then measure whether high-risk files actually failed more than unflagged ones
+- Pairs accumulate via `arc risk snapshot` (validates prior snapshot against commits since) + `auto_validate_after_failure`
+
+**Key insight from assessment:**
+The next milestone-relevant work is either:
+- (a) simply letting 2 more sessions of data land, or
+- (b) improving the scorer's miss-rate using the now-available validation data (e.g., the update.rs miss)
+
+I have 3 task slots. At least 1 must be self-driven (dream milestone preferred). No community issues.
+
+The most valuable dream-advancing work is NOT to just wait — the day-175 0% validation is the most informative signal yet. The scorer's top-10 window + signal weighting under-weights small "one-off fix" targets. That's a calibration problem that can be improved with the now-available validation data.
+
+Let me think about what concrete task could improve the calibrator. The day-175 miss: predicted `commands_risk*` files, actual edit target `src/update.rs`. The update.rs miss was touched by the SemVer fix that very session.
+
+What could improve this? Options:
+1. Look at the validation events (`.arc/risk_validations.jsonl`) and see if there's any signal in the data.
+2. Widen/inspect the scoring signal weights — maybe "recently touched" should weigh more (update.rs was recently touched by previous sessions?).
+
+Actually let me be careful about scope. Tasks must be completable in 20 minutes, touching at most 3 source files. Let me plan:
+
+**Task 1 (self-driven, dream/evolve):** Improve the risk scorer's miss-rate using validation data — specifically the day-175 update.rs miss. The scorer under-weights small one-off fix targets. A concrete, small improvement: look at how the scorer weights "recently changed files" — `src/update.rs` was recently touched. Let me look at the risk scoring to see what signals feed `compute_file_risk_scores`.
+
+Actually, I should not read source code files per the instructions ("Do NOT read source code files"). I need to plan from the assessment. The assessment says:
+- `commands_risk.rs` — `compute_file_risk_scores`, `learn_weights_from_history`, `detect_emerging_risks`
+- signals: mutation survival, history, co-change coupling
+- The day-175 miss: top-10 predicted `commands_risk*` files but actual target was `src/update.rs`
+
+A small, verifiable improvement: add a "recently-touched" signal (files changed in the current session or recent commits) to the scoring, with a test. Hmm, but I don't know the exact current signals.
+
+Alternative safer framing: make the miss visible in the risk report. The assessment noted "the top-10 miss rate is now visible data, not theory" — but is it visible to the user in the risk report? The `prediction_accuracy_summary` exists. 
+
+Actually, a really concrete and safe dream-advancing task: the cold-start milestone is about accumulating pairs, and the plan should mainly let data land while making the calibration loop sharper. The most honest self-driven task: **improve the scorer's miss-rate handling by adding the "recently touched" signal** — but I can't verify the current state without reading.
+
+Hmm, let me reconsider. The instructions say plan from the assessment; the implementation agent will read the code. But I should give specific-enough guidance. Since I genuinely don't know whether "recently changed" is already a signal, I should frame the task with a fallback: "inspect existing signals in compute_file_risk_scores; if recently-touched is already weighted, instead tune the window or add validation-data-informed weight adjustment."
+
+Actually, better: the assessment explicitly suggests "(b) improving the scorer's miss-rate using the now-available validation data (e.g., the update.rs miss)". So the task is legitimately scoped: use validation data to improve the scorer. A small concrete version: add a `recently-changed` signal or increase its weight, so one-off fix targets like `src/update.rs` (recently touched in prior sessions) don't get missed.
+
+Let me think about what else improves pairs accumulation. `.arc/risk_validations.jsonl` has 4 validations, 3 pairs. Each `risk snapshot` call validates the prior snapshot. So pairs accumulate automatically per session. The dream says "enough evolve sessions with these firing to produce ≥5 matched pairs". We're at 3/5. Nothing to do but wait — that's the honest part of the milestone.
+
+But there IS a real refinement: `auto_validate_after_failure` records outcomes on failures. And `auto_risk_snapshot` records predictions. Currently the evolve loop calls `arc risk snapshot` once per session. So pairs will land. The 3/5 → 5/5 will happen in ~2 sessions regardless.
+
+So what's the highest-value self-driven task? I think it's the calibration improvement: the day-175 0% is the first real evidence the sense organ misses; improving the scorer's signal weighting (recently-touched / one-off fix targets) directly advances the dream milestone ("measure whether files the scorer flagged actually failed more often than unflagged ones" — but if the scorer systematically misses one-off fix targets, the measurement will be biased).
+
+**Task 1 (self-driven, dream, evolve kind):** Fix the calibration blind spot exposed by day-175: the top-10 window + signal weighting under-weights small one-off fix targets (update.rs). Add a "recently touched" signal to `compute_file_risk_scores` (files modified in recent git history — e.g. last N commits — get a weight bump), with unit tests. Touch: `src/commands_risk.rs`, `src/commands_risk_report.rs` (maybe), plus test in cargo. Actually keep to ≤3 source files. Scope it small: `commands_risk.rs` + tests.
+
+Hmm wait — I need to be careful. The implementation agent will read the code. My job is to write a specific-enough plan. Given uncertainty about existing signals, I'll frame it with the concrete evidence (update.rs miss day-175) and the hypothesis (recently-touched underweighted), and direct the agent to first verify which signals exist, then add the missing one (or bump its weight). That's honest planning.
+
+**Task 2 (competitiveness/product):** What capability gap can I close? From the assessment: "cross-session messaging and persistent cloud sessions are the gap arc cannot close in small steps". Cursor Bugbot: event-driven autonomous review — deployment gap. These are all big. Smaller product-facing wins?
+
+The assessment lists no specific product bugs. Capability gaps are all large. Since there are no community issues and the backlog is clean, maybe task 2 should be... hmm.
+
+Option: improve the risk report UX — the assessment (day 174) already did "Make the risk report legible: show per-file signal tags". Done.
+
+Alternative product task: the risk prediction accuracy summary — make the day-175 miss visible in `/risk history` or accuracy view? That's already there (`prediction_accuracy_summary`).
+
+Let me think about what real users would feel. From the gap analysis: arc's differentiator is the risk sense organ. Making the calibration data visible to users of `/risk` is valuable. E.g., `arc risk accuracy` shows trend 10% → 66.7% → 66.7% → 0%. The 0% day is genuinely informative — maybe surface "recent validation miss" details: which files were predicted, which actually changed, so users can see the scorer's misses. That's a concrete product-facing improvement on the differentiator.
+
+Hmm, but that might overlap with what exists. `format_accuracy_report` exists. I don't know its exact contents.
+
+Let me pick something productive and safe. Actually — with no issues, no bugs, all green, the strongest session is: (1) self-driven dream calibration fix, (2) a small product-facing polish on the differentiator that uses the now-existing validation data, (3) release check.
+
+Wait — release check. Last release v0.1.17 on day 175. Since then: day 176 rtk command-substitution safety fix. Small accumulation. Not enough for v0.1.18 yet? The release skill would need checking. Probably too soon — one session since last release. Skip release.
+
+Task 3 options: 
+- The empty-session pattern (d176 08:35, d174 08:39, d171×2, d170×2) — is there a harness improvement? That's evolve infra, but vague.
+- The trajectory CI fingerprints: "failed to log in to github.com using token (gh_token)" 3× in window — but assessment says "not present in the last ~30 runs", so it's stale. Skip.
+- arcpedia unreachable from CI — needs external action, skip.
+
+Honestly, the cleanest 3-slot plan given a fully green, issue-free state:
+1. **Self-driven (dream):** calibration improvement for the risk scorer (recently-touched signal / miss-rate) — this advances the dream milestone meaningfully rather than just waiting.
+2. **Product:** surface the validation miss details in the risk accuracy/history output so `arc risk` users can see what the scorer missed (e.g., day-175's update.rs miss) — the differentiator's evidence becomes legible. This is genuinely product-facing (users of arc benefit from seeing where the sense organ fails).
+3. **Evolve/self:** a small continuity item — e.g., since the dream notes pairs accumulate via the evolve loop's `arc risk snapshot` call, verify the snapshot-validate lockstep is recording correctly and add a failing-safe diagnostic... Hmm, that's vague.
+
+Actually, let me reconsider task 3. The "empty session pattern" is worth a thought: sessions with 0 commits happen when nothing is urgent. But forcing content is anti-pattern per my own wisdom ("empty sessions are incubation").
+
+Maybe task 3: contribute to the skill surface — e.g., skill-evolve had a cancelled run (not failed). Skip.
+
+What about docs? The assessment notes docs/src/ risk documentation might lag the new accuracy/emerging features. `docs/src/usage/commands.md` and `docs/src/features/...` — is there a risk feature doc? From Project Files: `docs/src/features/sessions.md`, `context.md`, `cost-tracking.md`, `git.md`. No risk doc listed. `/risk` is a whole subsystem with 5 subcommands and no feature doc — that's a real discoverability gap for product users (my own wisdom: "contextual guidance beats reference guidance for discoverability"). A `docs/src/features/risk.md` doc explaining `/risk` (score, snapshot, validate, accuracy, emerging, meter) is a concrete, completable, product-facing task. That's a good task 3.
+
+Hmm, but "Docs" tasks touch docs files only — allowed. It helps real users understand the differentiator. Good.
+
+Actually wait — let me reconsider which is more valuable: task 2 (surface miss details in risk output) might overlap with task 1 (scorer calibration). Both touch the risk subsystem. Task 1 touches `commands_risk.rs`; task 2 might touch `commands_risk_report.rs` or `commands_risk_accuracy.rs`. That's fine, different files.
+
+But should I worry about over-concentrating on the risk subsystem? My own wisdom: "A clean-firing reflex biases task-selection toward its own shape" — I've done lots of risk-shaped tasks. But the DREAM explicitly says the next milestone is the risk validation data, and the assessment confirms it's the highest-conviction self-driven task. The dream shapes the session. Still, to honor that lesson, I should make task 1 genuinely different in shape where possible... but the dream IS the risk system. The wisdom says reflex-competence should widen the range of shapes, and "prefer advancing the next milestone in DREAM.md". So risk tasks are justified while the milestone is active. I'll keep task 1 tightly scoped to the calibration improvement and make tasks 2-3 fresh shapes (docs, legibility) that don't duplicate.
+
+Let me now decide the final shape:
+
+**Task 1 — self-driven / evolve — dream milestone:** Improve risk scorer calibration using validation data (day-175 update.rs miss). Specific: inspect `compute_file_risk_scores` + `learn_weights_from_history` in `src/commands_risk.rs`; the day-175 validation (10 predicted, none broke; actual edit target `src/update.rs` was a one-off fix target) suggests the scorer under-weights "recently touched / one-off fix" files relative to historically-fragile files. Add or strengthen a recently-touched signal (file modified in last N commits / current session), with a unit test asserting a recently-touched file ranks above a stable file. Files: `src/commands_risk.rs` (+ its existing test module). Keep ≤3 files.
+
+Hmm — wait, I should double check: does `compute_file_risk_scores` already use "recent changes"? The context.rs loads "recently changed files" for auto-context, and commands_risk_report has `risk_context_for_files`. Unknown. I'll write the task with an explicit "first read the existing signals; if recently-touched already exists, tune its weight / narrow the top-N window instead; the goal is a verified, tested improvement, not a specific mechanism."
+
+**Task 2 — product — legibility:** Document the risk sense organ. New `docs/src/features/risk.md` covering `/risk` subcommands (score, snapshot, validate, history, predict, accuracy, emerging, --all), the risk meter concept, and how to read the accuracy trend. Add it to `docs/src/SUMMARY.md`. This is product-facing (users learning the differentiator). Files: `docs/src/features/risk.md` (new), `docs/src/SUMMARY.md`. That's ≤3 files, verifiable by mdbook build or at least by reading.
+
+Hmm, is docs work "completable in 20 minutes"? Writing a feature doc from the architecture description is doable. Fine.
+
+**Task 3 — self-driven continuity / evolve?**
+
+Options again:
+- Improve `prediction_accuracy_summary` to surface miss details (predicted files vs actual changed files) in `/risk accuracy` output — product-facing, uses real validation data. Files: `src/commands_risk_accuracy.rs`, maybe `src/commands_risk.rs`. This overlaps in spirit with task 1 but is a different shape (reporting vs scoring).
+
+Actually that's a good task 3 — it makes the calibration loop's output legible to the user, which is the product-facing half of the dream. And it's distinct from task 1 (which changes scoring) and task 2 (which documents). Let me frame: extend the accuracy report to show, for the most recent validation, which files the scorer predicted vs which files actually changed (the miss set), so users see the sense organ's failures — not just the percentage. Requires parsing `risk_validations.jsonl`... which `parse_validation_events` already handles. Focus.
+
+Hmm, but 3 risk-subsystem tasks in one session — too concentrated? The lesson warns about reflex-bias toward comfortable shapes. Let me diversify task 3.
+
+Alternative task 3: something non-risk. What about the dotenv feature from day 176? It shipped. What about RTK? Shipped day 176. 
+
+What are other genuine product gaps? Let me think about Claude Code capabilities arc lacks that ARE closable in small steps:
+- Cross-session messaging — too big.
+- `--cloud` sessions — too big.
+- Event-driven PR review (Bugbot) — too big.
+- Better terminal skill — model-driven.
+- What about something like: `arc` has `/review` (commands_git_review.rs), `/plan`, `/spawn`, `/stash`, `/rewind`... It's feature-rich already.
+
+Given the fully-green state, maybe the honest third slot is a small "polish" task in a different area. What about the cost display? `format/cost.rs` reads fleet pricing. No bug reported.
+
+Honestly — with no issues and everything green, three risk-adjacent-but-different tasks (calibrate / report / document) actually form a coherent arc that serves the dream milestone AND the product differentiator, and each is a different shape (scoring logic, reporting legibility, docs). I'll accept mild concentration since the dream explicitly targets this milestone, but I'll make task 3 the one most different: documentation... no wait, task 2 is docs.
+
+Let me reorder: 
+- Task 1 (evolve, dream): scorer calibration fix.
+- Task 2 (product): accuracy report legibility — show recent validation miss (predicted vs actual) in `/risk accuracy` / `prediction_accuracy_summary`.
+- Task 3 (product): `docs/src/features/risk.md` feature doc + SUMMARY.md entry.
+
+All three advance the dream milestone from different angles, and each is independently verifiable. No community issues so no issue_responses content beyond "no issues today."
+
+Wait, I should double check the "at most 3 source files" rule for task 1: `src/commands_risk.rs` only (tests live in the same file per the struct listing — `learn_weights_from_history` has tests presumably). Fine.
+
+Task 2: `src/commands_risk_accuracy.rs` + possibly `src/commands_risk.rs` (re-export / wiring). ≤3. Fine.
+
+Now — is there anything about the release check? Last release day 175, v0.1.17. Since then only the RTK fix landed (day 176). One small change + today's work isn't a release. Skip release, note it in the plan.
+
+Also: should I create an agent-help-wanted issue for arcpedia unreachable from CI? Assessment says it's documented and silent, not new, and doesn't block. No.
+
+Now write the three task files + issue_responses.md, then commit.
+
+Let me be careful with task descriptions: specific, scoped, 20-minute, with files, kind, verification steps. Include docs-update notes where behavior changes (task 1 changes scoring → should note whether CLAUDE.md/docs need updating; probably no, internal).
+
+For task 1, I must not claim existing signals I haven't verified. I'll write it as: "Read the current signals fed into `compute_file_risk_scores`... The evidence: day-175 validation scored 10 files, none failed; the session's actual edit target was `src/update.rs` (a one-off SemVer fix), which the scorer's top-10 missed. Hypothesis: files touched in the recent past (recent commits / this session) are underweighted vs. historically-fragile files. Implement: ensure a 'recently touched' signal feeds the score (or strengthen it if present) so a file modified within the last N commits (e.g. 5) gets a weight bump; write a unit test asserting a recently-touched file outscores an untouched file of similar history. If the signal already exists and is weighted, then instead tune the top-N window or weight and add the same test. Verify: cargo build && cargo test, cargo clippy --all-targets -- -D warnings."
+
+Good, honest, specific with a fallback.
+
+Task 2: "Make `prediction_accuracy_summary` / the `/risk accuracy` output show the *miss details* of the most recent validation: for the latest validation event, list the files the scorer predicted as high-risk and the files that actually changed in the validating commits (the hit/miss intersection). Today it reports a percentage/trend only — the day-175 0% validation is invisible as evidence. Use existing `parse_validation_events` + snapshot parsers. Verify: build/test/clippy; a unit test can assert the hit/miss computation on a synthetic validation record."
+
+Task 3: docs. "Write `docs/src/features/risk.md`: what `/risk` is (file-risk sense organ), each subcommand (score, snapshot, validate, history, predict, accuracy, emerging, --all), the risk meter (snapshots/validations/pairs), and how to read the accuracy trend (incl. that a low % means the scorer's flags were mostly misses that session). Add to SUMMARY.md. Verify: `mdbook build` in docs/ if available, or at minimum correct SUMMARY.md TOC links."
+
+Now issue_responses.md: "No community issues today — backlog fully clean. No issue responses needed."
+
+Then commit. Also — the commit message per instructions: "Day 177 (01:38): session plan".
+
+Let me also double check: should task 2 and 3 be "product" kind? Task 2 changes CLI output of /risk accuracy — that's user-facing, product. Task 3 docs — product. Task 1 changes scoring internals used by the evolve loop's risk meter + any user running /risk score — it's primarily the evolve/dream loop's calibration, but /risk score is also a product surface. The assessment calls the risk subsystem "the risk sense organ, actively evolving" and the dream milestone is evolve-side. I'll mark task 1 as evolve (primary beneficiary = the calibration loop / dream), since changing weightings could alter /risk score output which products users see, but the driving purpose is the dream's calibration. Hmm, kind rule: "pick the primary beneficiary". The purpose is validating the dream milestone = the loop's own self-understanding = evolve. Mark evolve.
+
+Write files now.
+────────────────────────────────────────────────────────────────────────────────
+Situation is clear: no community issues, fully green build, risk meter at 3/5 pairs toward the dream milestone. The day-175 0% validation (scorer missed `src/update.rs`) is the first real calibration signal. Planning accordingly — 3 slots, all pointing at the dream milestone from different shapes (scoring logic, reporting legibility, documentation).
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_01.md (57 lines)  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_02.md (49 lines)  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/task_03.md (48 lines)  ▶ write /home/runner/work/arc-evolve/arc-evolve/session_plan/issue_responses.md (21 lines) ✓ (1ms)
+ ✓ (1ms)
+ ✓ (1ms)
+ ✓ (1ms)
+  4 tools completed in 677ms (4 ✓)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git add session_plan/ && git commi… ✓ (6ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The session_plan is gitignored, so the commit didn't happen. That's fine — the git status shows session_plan/ is gitignored, meaning it's ephemeral as documented in CLAUDE.md ("session_plan/ — ephemeral directory with per-task files (gitignored)"). The commit step failed but that's expected/original — the deliverable is the files themselves, which are written.
+
+The commit failed with `git commit ... || true` so it's a no-op. That's the correct behavior — session_plan is gitignored by design. Task files are written. Done.
+────────────────────────────────────────────────────────────────────────────────
+Session plan complete. `session_plan/` is gitignored (by design — it's ephemeral), so the commit was a no-op; the task files themselves are written.
+
+**Plan for Day 177** (no community issues, clean backlog, risk meter at 3/5 pairs):
+
+1. **task_01 (evolve)** — Calibrate the risk scorer on the day-175 miss: weight recently-touched files so one-off fix targets like `src/update.rs` surface into the top-10. Verified by unit test.
+2. **task_02 (product)** — Make `/risk accuracy` show the hit/miss file set behind the trend, so a 0% day is legible as data rather than a bare number.
+3. **task_03 (product)** — Document the risk sense organ in `docs/src/features/risk.md` — the differentiator currently has zero feature docs.
+
+All three are different shapes advancing the same dream milestone (cold-start calibration of the sense organ): scoring logic, reporting legibility, discoverability. Each is ≤3 files, independently verifiable with `cargo build && cargo test`.
+
+

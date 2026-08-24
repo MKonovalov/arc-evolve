@@ -1,0 +1,638 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by reading the relevant code in src/commands_risk.rs to understand the current scoring signals.
+
+The task: Calibrate the risk scorer — weight recently-touched files. Let me look at `compute_file_risk_scores` and `learn_weights_from_history`.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status…  ▶ search 'fn compute_file_risk_scores|fn learn_weights_from_history' in src/commands_risk.rs ✓ (3ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 971ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search didn't find matches. Let me check the file directly. The CLAUDE.md said these functions live in src/commands_risk.rs but maybe the search tool doesn't work with that path. Let me try grep via bash.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn compute_file_risk_scor… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:300..560 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the `compute_file_risk_scores` function and `FileRisk` struct, plus the signals/weights.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:560..740 ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:739..919 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I can see the risk scoring structure. Let me continue reading to understand the weights and the final score composition.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:918..1058 ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me understand the signals:
+
+1. Churn (30-day count) — weight 0.30
+2. Recent acceleration (7-day count / 30-day, normalized) — weight 0.25
+3. Size
+4. Complexity
+5. Test density (inverted)
+6. Co-change coupling
+7. Revert history
+
+The "recent" signal is `accel` — the 7-day vs 30-day ratio. The problem: the 7-day window is a *ratio* of 7-day to 30-day changes. A file touched recently but rarely (a one-off fix to update.rs) would have: c7=1, c30=1 → accel = (1/1)/(7/30) = 4.28 which is > 1.0... wait that seems like it would be high. But then it gets normalized across all files. If many files have accel values, normalization could drown a single one-off.
+
+Wait, actually let me think about the day-175 miss: `update.rs` was a one-off SemVer fix. In the last 7 days, update.rs got 1 change (the one-off fix). If update.rs has c30=1 (only touched once in 30 days), accel = (1/1)/(7/30) = 4.28. But this is normalized across all files — normalize_scores maps a vector to 0-1. If there are other files with accel values (e.g., many files touched in the last 7 days with ratios), the single file with accel 4.28 might not win normalization if another file has a much higher ratio... but actually normalize_scores probably maps min-max. The file with the max value gets 1.0.
+
+Hmm, but the key issue: normalization is min-max based, so only the *max* file gets 1.0. A file with accel 4.28 vs another with accel 4.3 — 4.28 would get normalized to nearly 1.0 too if it's close.
+
+Let me look at normalize_scores to understand.
+
+Actually, wait. Let me re-read the description of accel:
+- c30 > 0: accel = (c7/c30) / (7/30)
+- c7 > 0, c30 == 0: 3.0 (maximally accelerating)
+- else: 0.0
+
+So a file touched once in the last 7 days that also had exactly one change in 30 days gets 4.28. Any file with c30=0 but c7=1 gets 3.0. The normalization then scales these.
+
+Hmm, but the real problem from the task: "the scorer's top-10 window missed update.rs entirely." We need a "recently touched" signal that's distinct from the accel ratio. The accel ratio has a flaw: it's a *relative* signal that can be high for a file with 1 change in 7 days AND 1 change in 30 days, OR a file with 10 changes in 7 days and 10 in 30 days — both give 4.28. Actually no wait, both are "accelerating". But a file with c7=1, c30=5 → accel = (0.2)/(0.233) = 0.857.
+
+The problem is different: the accel signal is normalized min-max across the file set, so it's relative. If there are files with higher ratios, the one-off target doesn't get the top normalized value.
+
+The hypothesis is: add a plain "recently touched" boolean/binary signal — file touched within the last N commits (say 5) — that gets a weight bump. This is a *presence* signal, not a ratio. Then a file touched in the last 5 commits gets a fixed boost, independent of how many other files are churning.
+
+Let me look at the existing tests to see if there's already a test of this shape, and check `file_change_counts` and `normalize_scores`.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn normalize_scores\|fn f… ✓ (13ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the key parts:
+- `RISK_WEIGHTS: [f64; 7] = [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]` — churn 0.30, accel/recency 0.15, size 0.15, complexity 0.10, test 0.10, coupling 0.10, revert 0.10.
+
+So there IS a recency signal (7-day count → acceleration) with weight index 1 = 0.15. The task hypothesis says recency is under-weighted. Let me look at how `file_change_counts` works — does it count commits touching the file within N days? The miss was on `src/update.rs` — a one-off SemVer fix. Let me check what happened in day 175.
+
+Let me look at the git history around day 175 and check `file_change_counts`.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:60..110  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/git.rs:845..905 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 966ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at the current signals:
+
+1. **churn** (30-day count) — weight 0.30
+2. **recency** (7-day acceleration ratio) — weight 0.15
+3. **size** — weight 0.15
+4. **complexity** — weight 0.10
+5. **test_density** — weight 0.10
+6. **coupling** — weight 0.10
+7. **revert_history** — weight 0.10
+
+The "recently touched" signal partially exists as "recency" (7-day acceleration). The day-175 miss: `update.rs` was touched by recent sessions but wasn't in top-10.
+
+Let me look at the accel calculation: 
+- `c7` = commits in last 7 days for this file
+- `c30` = commits in last 30 days
+- accel = (c7/c30) / (7/30) if c30 > 0, else if c7 > 0 then 3.0 (maximally accelerating), else 0.0
+
+The problem: after normalization, `normalize_scores` min-maxes across ALL files. If `update.rs` has 1 commit in 7 days and 1 commit in 30 days, accel = (1/1)/(7/30) = 4.29 — that's high. But wait — the issue is: does `update.rs` even show up? It was touched once in a recent session. c7=1, c30=1. accel = 4.29. Then normalization: max accel across all files. A file with c7=3, c30=3 → accel 4.29 too. A file with c7=1, c30=0 (new in last 7 days) → 3.0.
+
+Hmm, so for a file touched exactly once in the last 7 days and once in 30 days, accel = 4.29 which could be high after normalization... but normalization is min-max across files. If the top file has accel 4.29 and it's tied, then normalization gives the max file 1.0 and others scale.
+
+Actually the deeper issue: `update.rs` — a one-off fix — has a *churn* signal of 1 (30-day count), which is near the minimum. The normalization of churn: min = 0 (most files with zero churn), max = some hot file. So `update.rs` with churn=1 gets a low normalized score. The recency signal also gets normalized min-max: a file with 1 commit in 7 days gets some middle-range value.
+
+The hypothesis in the task: "under-weights recently touched files relative to historically-fragile files." The signals exist (churn, recency) but they're ratio/min-max based, so a single one-off touch gets drowned.
+
+The task says:
+- If the signal is MISSING: add it — a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score.
+- If the signal EXISTS but is weak: strengthen it.
+
+The signal partially exists as "recency" but it's a ratio signal that misses *single touches* well. Actually wait — let me reconsider. A file touched once in last 7 days has accel computed via c7>0, c30>0 path: (1/1)/(7/30) = 4.29, or if c30==0 (new file), 3.0. That's fairly strong.
+
+But the miss was that `update.rs` wasn't in top-10. Why? Because it was touched ONCE. Its accel is 4.29 but that's just one value; after normalization across all files the max might be the same 4.29 (if only one file was touched in last 7 days, it gets 1.0). Hmm, then churn: update.rs has 1 in 30 days. Other files might have more.
+
+Actually, I should check the day-175 journal to understand exactly what happened. Let me look for what the top-10 was then. Also let me check whether there's a "recency" test and existing tests for the risk scorer.
+
+The key improvement to make: a **recent-touch binary bump** — a file touched within the last ~5 commits (or modified in working tree / this session) gets a weight bump into the score. This is a distinct signal from the ratio-based acceleration: it catches one-off small fixes.
+
+Let me design:
+
+1. Add a git signal: files touched in the last N commits (e.g., `git log --name-only -5` → set of files). This is a binary "recently touched" signal.
+2. Add it as an 8th signal OR apply it as an additive bump.
+
+The task says "one scoring pathway" and "Do NOT touch the snapshot/validation/accuracy persisters." The weights system has 7 signals with learned weights machinery — adding an 8th signal would touch `RISK_WEIGHTS`, `SIGNAL_NAMES`, `label_to_index`, `load_learned_weights`... that's a fair bit and would touch persistence reading (.arc/risk_weights.json). The task says don't touch the persisters. The learned weights file has 7 weights. If I add an 8th, I'd need to handle backward compat.
+
+A cleaner surgical approach: **additive bump** like the mutation-survival term (0..MUTATION_WEIGHT). A file touched within the last ~5 commits gets a bump bounded to a small weight, e.g. `RECENCY_TOUCH_WEIGHT = 0.08`. This doesn't change the 7-weight machinery, doesn't touch persisters, is additive and bounded.
+
+But wait — the existing "recency" signal already handles "recent". Let me verify the day-175 scenario more precisely. Let me check the journal and any risk snapshots for day 175.
+
+Actually let me focus: the task's verification requires a unit test:
+
+"given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+So the test needs to call a scoring function with synthetic inputs. `compute_file_risk_scores()` reads live git/disk state, which isn't deterministic for tests. Are there existing tests? Let me check existing tests in commands_risk.rs. There's `top_n_from` which was extracted for tests. Let me look at the test module.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "#\[cfg(test)\]\|mod tests… ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the "recency" signal. Currently it's based on `file_change_counts(7)` — the 7-day count. The `raw_accel` uses c7/c30 ratio. So a file with a one-off fix (1 commit in 7 days, but also 1 commit in 30 days — since the file wasn't touched before) would get:
+
+- c30 = 1, c7 = 1
+- accel = (1/1)/(7/30) = 30/7 ≈ 4.29, clamped? No, not clamped — 4.29. Then normalized across files.
+
+Hmm wait, actually let me think about the day-175 scenario. `update.rs` was touched by recent sessions — a one-off SemVer fix. But the scorer's top-10 window missed it. Let me look at what happened. The issue: `file_change_counts(7)` counts commits in last 7 days. But hold on — this is a "commit count" signal, so a file touched 1 time in 7 days has c7=1, c30=1. If many other files have high churn (c30=5, c7=0), then the accel signal normalizes...
+
+Actually the key issue: the min-max normalization. If update.rs was touched once in the last 7 days and once in 30 days, its accel = 4.29. But if there are files that only appeared in the last 7 days (c7 > 0, c30 = 0), they get accel = 3.0. And min-max normalization with a range... Let me think about how high 4.29 ranks after normalization. If the max accel in the repo is, say, 4.29 (update.rs itself), then update.rs gets 1.0 normalized. That would put it at the top.
+
+But wait — did update.rs actually get flagged? The task says the top-10 window missed it entirely. Let me check .arc/risk files to see what happened. Actually, there's actually a subtlety: `file_change_counts` uses `--since` / git log. If update.rs's fix was committed > 7 days before the snapshot, or if... hmm.
+
+Actually, wait. Let me reconsider. The real question is what signal exists. The recency signal exists as weights[1] = 0.15 for "acceleration" (7-day vs 30-day ratio). But the task hypothesis says the scorer "systematically misses small one-off fix targets."
+
+Let me look at the actual scoring pathway more carefully:
+
+1. churn (30-day commit count), weight 0.30
+2. accel (7-day/30-day ratio), weight 0.15
+3. size (line count), weight 0.15
+4. complexity, weight 0.10
+5. test_density (1 - coverage), weight 0.10
+6. coupling, weight 0.10
+7. revert_history, weight 0.10
++ mutation survival additive (0..0.10)
++ test density penalty bump
+
+The "recently touched" signal IS present (recency = accel). But maybe it's weak. Consider: `update.rs` is small (133 lines), low complexity, maybe 1-2 commits in 7 days, 1 in 30 days → accel = 4.29 (if c30=1, c7=1) or if c30=2, c7=1 → accel = (1/2)/(7/30) = 2.14.
+
+Then normalize across all files. Since it's min-max normalized, if many files have accel 0 (not touched in 7d) then the file with 4.29 gets 1.0. That should be strong...
+
+Hmm, but wait — the actual issue may be the header resolution. Let me look at the actual risk snapshot data from day 175 to understand what happened. Let me check .arc/risk_snapshots.jsonl and risk_validations.jsonl.
+
+Actually, let me check the actual snapshot data first, since the task says "the validation scored 10 files as high-risk, none of them broke, and the session's actual edit target was src/update.rs... which the scorer's top-10 window missed entirely."
+
+Let me look at the git log to see when update.rs was last touched before day 175.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -8 -- src/update… ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me understand the day-175 miss. The validation scored 10 files as high-risk, none broke, and the actual edit target was `src/update.rs` — a one-off SemVer fix. The scorer's top-10 window missed it.
+
+Note the recent `src/update.rs` commit: `4870d10 update: compare SemVer numeric core with pre-release/build suffixes stripped`. Let me check when this was committed and whether update.rs has any 7-day/30-day churn.
+
+Let me look at how the recency signal (7-day count) is computed. `file_change_counts(7)` — this counts commits touching the file in the last 7 days. The "recency" signal here is really "recent acceleration" — 7-day vs 30-day ratio. For a file that was touched once (one-off fix) in the 7-day window but had low 30-day churn, the accel is:
+
+- c30 = 1, c7 = 1: accel = (1/1)/(7/30) = 30/7 ≈ 4.29 — clamped? no, it says "values > 1.0 mean accelerating" — no clamp shown... `raw_accel.push(accel)` — no clamp. Then normalize_scores min-max normalizes, so the max accel gets 1.0.
+
+Hmm wait, if update.rs has c30=1, c7=1, then accel = 4.29, which would be the max (assuming other files have less), giving norm_accel = 1.0. Then recency weight 0.15 → 0.15 contribution. But the file also has churn c30=1 → normalized... if update.rs has the max churn of 1? No — files like cli.rs, repl.rs have huge churn, so norm_churn for update.rs would be low.
+
+The problem: min-max normalization means a file touched once in 7 days among files touched many times gets normalized low. And the "recently touched within ~5 commits" signal is not directly present — the 7-day window is time-based, and the file set is limited to files in the 30-day window or on disk.
+
+Wait — but update.rs's commit `4870d10` was made **after** the day-175 snapshot? Let me check the dates. Day 175 would be 2026-08-22. Let me check the git log dates.
+
+Actually, let me check what happened day 175. Let me look at the journal. But first — the task: the hypothesized miss is that update.rs was "touched by recent sessions" (recent commits) but didn't surface in the top-10. The scoring uses 7-day and 30-day churn windows. But there's a subtlety: **the file scope only includes files that appeared in the 30-day git log, 7-day git log, or exist on disk in src/**. Since update.rs exists on disk, it's in the file set. But with c30 possibly 0 at the time of the snapshot (if its last commit was >30 days ago) — actually the day-175 fix commit touched update.rs, so at snapshot time it might be... let me look at the actual snapshot data.
+
+Let me check the risk_snapshots.jsonl for the day-175 snapshot and see whether update.rs was in the file set and what score it got.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "update.rs" .arc/risk_snap… ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (17 lines) ✓ (26ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -2 .arc/risk_snapshots.jsonl … ✓ (4ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the calibration signal clearly. Day 175's validation:
+- 10 files scored as high-risk, of which **1 broke** (`src/commands_risk.rs`—the scorer itself which got touched by the validation work), hits=[]
+- The actual session's edit target `src/update.rs` wasn't even in the top-10 — it was a "surprise" (a file whose change wasn't predicted).
+
+The hypothesis: recency is under-weighted. `update.rs` had been touched by recent sessions — the SemVer fix commit `4870d10` and Day 173 counter bump `7eaaf37` are recent. But `file_change_counts(7)` — let me check what the recency signal actually sees.
+
+Currently the signals fed into `compute_file_risk_scores`:
+1. churn (30-day count) — weight 0.30
+2. recency (7-day acceleration = c7/c30 ratio normalized by 7/30) — weight 0.15
+3. size (line count) — weight 0.15
+4. complexity — 0.10
+5. test_density (inverted coverage) — 0.10
+6. coupling — 0.10
+7. revert_history — 0.10
+
+The flaw: **recency is a ratio (acceleration), not an absolute recency**. A file touched once in the last 7 days with no 30-day history gets `accel = 3.0` (max). But if the file was touched MANY times in 30 days AND once in 7 days, accel = (1/N)/(7/30), which could be small. So `update.rs` — a file with modest 30-day churn — gets a small accel ratio and also modest churn, so it doesn't surface in top-10.
+
+Actually wait — let me think about what happens with `update.rs` specifically:
+- update.rs was touched in `4870d10` (the SemVer fix, day 175) and `7eaaf37` (Day 173 counter bump — that's a meta-commit touching many files). 
+- 30-day churn: maybe 2-3. 7-day churn: 1-2.
+- accel = (c7/c30)/(7/30). If c30=3, c7=1: accel = (0.333)/(0.233) = 1.43. After min-max normalization across all files, this could be moderate.
+- size: update.rs is 133 lines — small. Normalized size low.
+- complexity: low.
+- test_density: update.rs probably has tests? It has version_is_newer tests. Actually the compilable code — low risk.
+- coupling: probably low.
+- revert: probably 0.
+
+So update.rs gets a middling score and doesn't break top-10, while the ten files with high churn/size dominate.
+
+The task says:
+1. Read signals — identify whether a "recently touched" signal exists. It DOES exist (recency = 7-day acceleration ratio), but it's weak in exactly the one-off fix case: it's an *acceleration ratio*, which penalizes files with both 30-day history AND recent touch.
+2. If EXISTS but weak: strengthen it — raise its weight relative to historical signals, or make the window adaptive. Deliverable: scorer catches the update.rs-shaped miss (recently-touched one-off fix target), verified by a test.
+3. Add unit test: file with modest risk history + recent modification must rank ≥ file with strong history but no recent touch.
+
+Design decision: The existing "recency" signal is a 7-day acceleration ratio. The miss case is a file touched recently but with low absolute numbers. The best fix: add an **absolute recency signal** — a file touched within the last ~5 commits (or modified in the working tree) gets a weight bump. The task explicitly suggests: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+But there's a subtlety: `file_change_counts(7)` is date-based. The task suggests last ~5 commits. Let me think about which signal shape best catches the update.rs miss, keeps it surgical, and is testable.
+
+I need a **pure function** that maps raw signals to a score so I can unit test it without running git. Let me look at the existing tests in commands_risk.rs around line 3345 (`let sum: f64 = RISK_WEIGHTS.iter().sum();`) to see existing test patterns for the scorer.
+
+Let me look at the test module and any existing score-computation helpers.
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:2529..2619 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the structure. Let me look at how validation works — the validation data at day 175 says: 10 files were predicted (top-10), only 1 broke (scored_broke: 1) → "src/update.rs" is the *surprise* — a file that broke but wasn't predicted. Wait, actually accuracy_pct is 0.0 with scored_broke: 1? Let me re-read: `hits: []`, `scored_broke: 1`... Hmm, that's odd. Let me check the validation event format.
+
+Actually looking at the task description: "the validation scored 10 files as high-risk, none of them broke, and the session's actual edit target was `src/update.rs` (a one-off SemVer fix) — which the scorer's top-10 window missed entirely."
+
+So `src/update.rs` was edited in the session, and the risk scorer's top-10 didn't include it. The idea: recency weighting. `update.rs` had been touched by recent sessions (Day 173: "update: compare SemVer numeric core..." — actually the commit 4870d10 IS the update.rs fix). Let me check git log for update.rs in the last ~10 commits.
+
+Actually wait — the recency signal already exists ("recency" is signal index 1, weight 0.15, based on 7-day acceleration). The problem: for a one-off small fix like update.rs, the file might only have 1 commit in the last 7 days, while the top files like prompt_retry.rs have high churn. The accel normalization: for a file with c30=0 but c7>0, accel=3.0 which is high. But normalize_scores does min-max over all files, so if most files have accel=0, a file with 3.0 gets normalized to 1.0. Hmm.
+
+Wait, let me reconsider. The accel signal: `(c7/c30) / (7/30)` clamped... actually not clamped. For update.rs: it had 1 commit recently (4870d10 on day 175 or recent). Let me check the actual dates.
+
+Actually, the validation at day 175: git_hash_from b2add4d → git_hash_to 4870d10. The surprises list includes "src/update.rs" — meaning update.rs was edited between those commits (it broke — well, "scored_broke: 1" is confusing; let me look at the validation logic to understand).
+
+Let me read the validation event struct and how it computes hits/surprises.
+
+Actually, let me focus on the deliverable. The hypothesis: recency is underweighted. Let me think about what "recently touched" means in the current code:
+
+Signal 1 "recency" (index 1, weight 0.15) = 7-day acceleration of churn. It's a *ratio*, not an absolute recency. For a file with exactly one recent commit and no older commits, c30=1, c7=1, accel = (1/1)/(7/30) = 4.29. That's high. But the min-max normalization across all files matters.
+
+Actually wait — the deeper issue: `file_change_counts` counts commits touching each file in the last N days. But there's also the "session's own edits" — the working tree / uncommitted changes. During the day-175 validation, the snapshot was taken at session start (before edits), and the "surprise" was update.rs being edited during the session but not in the top-10.
+
+So the two "recently touched" notions:
+1. Files edited in the working tree right now (not yet committed) — this session's active edits.
+2. Files touched in the last few commits.
+
+The current recency signal is 7-day acceleration — a churn-ratio. It doesn't capture "touched at all recently" as an absolute signal. A one-off fix file (1 commit in 7 days, maybe 0 in 30 days before that) gets accel=3.0 raw (if c30==0 && c7>0), normalized to 1.0 if it's the max. Then weight 0.15 → contributes 0.15. Meanwhile a high-churn file has churn normalized to 1.0 → 0.30. So update.rs (0.15 from recency, maybe some size/other) competes against prompt_retry.rs with 0.49 score.
+
+So the concrete gap: recency as a *binary/absolute* "was recently touched" signal is missing. Let me design:
+
+Add an explicit "recent commit touch" signal: files modified within the last N (say 5) commits get a bump. Also include working-tree-modified files (git status --porcelain). This makes one-off fix targets like update.rs (which is in the last few commits) rank higher.
+
+But I need to be careful with normalization. If I add it as an 8th signal, I'd need to change RISK_WEIGHTS array, SIGNAL_NAMES, label_to_index, and the learned-weights machinery (which is sized to 7). The task says "Keep the change surgical: one scoring pathway, one test file. Do NOT touch the snapshot/validation/accuracy persisters." The learned weights are 7-length; changing to 8 would touch the persister formats. Better to keep 7 signals and boost recency within that, OR add an *additive* term like mutation-survival (which is additive, not part of the weights array).
+
+Look at how mutation-survival is handled: it's an additive term `score += MUTATION_WEIGHT * ms;` (0..0.10), not part of the weighted sum. That's the surgical pattern to follow. I'll add a similar additive "recent touch" term: a file touched within the last ~5 commits, or modified in the working tree, or this session's own edits gets a bump (bounded, e.g. 0..RECENT_TOUCH_WEIGHT).
+
+But the task wants a *verified improvement*: the recently-touched file must rank at or above the historically-fragile one in the scored list, given "a file with a modest risk history but a recent modification and a file with a strong history but no recent touch".
+
+Since the scoring function reads live git state, a unit test of that exact shape needs the scoring to be testable with injected signals. The current `compute_file_risk_scores()` reads git directly. Testing "recently touched ranks above historically fragile" deterministically requires either:
+1. A pure helper that computes the score given raw signal values (extracted scoring logic), tested with synthetic inputs.
+2. An actual repo-state-dependent test (flaky per the comments — they learned to avoid that).
+
+The comments explicitly mention: "Extracted so tests can exercise the prefix logic against a fixed synthetic list instead of computing live repo scores twice (which flaked when repo state shifted between the two computations mid-test)."
+
+So the cleanest approach: extract a pure scoring function that takes normalized signals + a recency-touch boolean, and test that with synthetic data. Let me design:
+
+```rust
+/// Compute the weighted risk score for one file from its normalized signals.
+/// `recent_touch` is a 0.0–1.0 recency-of-touch signal (files edited within the
+/// last few commits or in the working tree get ~1.0).
+fn composite_score(norm: &[f64; 7], recent_touch: f64, td: f64, ms: f64) -> f64
+```
+
+Hmm, but the weights come from load_learned_weights() which reads a file — in tests that would hit the repo's .arc/risk_weights.json (probably doesn't exist → falls back to defaults, deterministic).
+
+Let me restructure minimally:
+- Add `recent_touch_map`: files modified in the last 5 commits OR in the working tree, mapped to 1.0 (0.0 otherwise).
+- Add an additive term: `score += RECENT_TOUCH_WEIGHT * recent_touch` where RECENT_TOUCH_WEIGHT is a new const, say 0.15.
+
+Wait but actually there's a subtlety: should I make it purely additive, or should I also check — the task says "If the signal EXISTS but is weak: strengthen it... do not let the historical signals drown the recency signal for one-off fix targets."
+
+The existing "recency" signal is the 7-day *acceleration* ratio. For update.rs with exactly one commit in the last 7 days and none before, accel = 3.0 (the "file only appeared in the last 7 days" branch) → normalized to 1.0 if max. Actually hold on, 3.0 might not be the max in the repo. Hmm, but if update.rs has c30==0 && c7==1, accel=3.0. If another file has c30=2, c7=2, accel = (2/2)/(7/30)=4.29. So 4.29 > 3.0. Min-max normalization: update.rs gets 3.0/max... 
+
+Actually let me look at what compute_file_risk_scores returns right now for update.rs vs prompt_retry.rs — let's run it. That's the fastest way to see the gap.
+
+Let me look at the rest of the tests and the FileRisk struct first, and then write a quick probe.
+
+Actually, the pragmatic approach: run the current scorer, find update.rs's rank. Then implement the change, re-run, verify update.rs moves up. And add the pure-helper unit test.
+
+Let me check FileRisk struct and the top of the file.
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "struct FileRisk" src/comm…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -6 -- src/update… ✓ (6ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.5s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the whole picture. The task:
+
+1. Read the signals currently fed into `compute_file_risk_scores` and `learn_weights_from_history`. Identify whether a "recently touched" signal exists.
+
+Signals currently:
+- churn (30-day change count) — weight 0.30
+- recency/acceleration (7-day count ratio) — weight 0.15 (labeled "recency" but really acceleration)
+- size (line count) — 0.15
+- complexity (branch/match density) — 0.10
+- test_density — 0.10
+- coupling — 0.10
+- revert_history — 0.10
+
+The day-175 miss: `src/update.rs` was a one-off SemVer fix. The scorer's top-10 window missed it entirely. `update.rs` was touched within the last ~5 commits (4870d10 was the fix commit, 7eaaf37 touched it just before - wait, 7eaaf37 "Day 173: update day counter" - hmm, that touched DAY_COUNT, not update.rs. Actually git log -- src/update.rs shows only 2 commits: 4870d10 (the fix) and 7eaaf37 "Day 173: update day counter" — wait, does that touch src/update.rs? Let me check.
+
+Actually wait — the git log for `src/update.rs` shows:
+- 4870d10 update: compare SemVer numeric core with pre-release/build suffixes stripped
+- 7eaaf37 Day 173: update day counter
+
+Hmm, "Day 173: update day counter" — that's a commit message but the path filter is src/update.rs, so it did touch src/update.rs. Interesting.
+
+The key issue: for a one-off fix target like update.rs, the "recency" signal exists but is a *ratio* (7-day count / 30-day count normalized by 7/30). A file touched exactly ONCE in last 7 days and once in last 30 days gives accel = (1/1)/(7/30) = 4.29. That's high... but it's normalized across all files (min-max). Hmm.
+
+Actually the issue is deeper: the accel signal is only computed from `git log --since=X days ago`. Today is 2026-08-24 (Day 177). The day-175 snapshot was recorded 2026-08-22. The update.rs fix commit 4870d10 was 2026-08-22 (day 175). At the time of the day-175 snapshot (before the fix), update.rs had been touched... let me check when.
+
+Actually — the snapshot for day 175 recorded at git_hash_from b2add4d, and the validation covered commits b2add4d → 4870d10 (the update.rs fix). The snapshot's top_10 did NOT include update.rs. So at snapshot time (git_hash b2add4d), update.rs had 0 or 1 change in the last 7 days and maybe 1-2 in 30 days. Meanwhile the big files (prompt_retry.rs with churn + low-test, etc.) dominate.
+
+The issue: min-max normalization. `file_change_counts(7)` returns counts of commits touching each file in last 7 days. For most files it's 0; for the top file maybe 3-4. update.rs with 1 change would get norm_accel = (1-0)/(max-0). If max is 4, that's 0.25. Then weight 0.15 × 0.25 = 0.0375, plus churn weight ~0.30 × (1/max30).
+
+Hmm, but the "recently touched" binary property — a file touched in the working tree or this session — is genuinely MISSING. The current accel signal measures *frequency ratio* not *binary recency*. A file with a single recent commit (one-off fix) gets accel = 3.0 (maximal) when c30 == 0 and c7 > 0. But wait — that's `if c30 > 0` else `if c7 > 0 { 3.0 }`. So a file with c7=1, c30=0 gets accel 3.0. Hmm, that should be high after min-max normalization... unless other files have accel higher.
+
+Let me reconstruct what happened day 175. Actually, let me look at what the snapshot at b2add4d said. Let me check whether update.rs was in the snapshot around day 175.
+
+Actually let me look at the actual git history of update.rs more carefully — how long had it been since update.rs was touched before 4870d10?
+
+The key insight from the task: "update.rs had been touched by recent sessions; the risk history signal (mutation survival, past failures, co-change coupling) apparently didn't surface it into the top-10."
+
+Wait, actually the hypothesis in the task is: the scorer under-weights *recently touched* files relative to historically-fragile files. And the specific mechanism: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+Let me check: does update.rs appear in the last 5 commits at any point before the fix? Actually the more fundamental point: at snapshot time, the top files are the big churny files. update.rs is small (133 lines), recently touched but only once or twice, so even with accel=3.0, after min-max normalization against files with accel up to 3.0 (all c30==0 && c7>0 files get 3.0), it gets normalized to 0.0 or low.
+
+Hmm right — min-max normalization: if update.rs gets accel=3.0 and it's the max, it gets 1.0. But if any file has c7=2, c30=4 → accel = (2/4)/(7/30) = 2.14... lower. But files with c7=1, c30=0 also get 3.0. So several files tie at 3.0 → all get 1.0. Hmm.
+
+Actually, the real failure: at day-175 snapshot time, was update.rs even touched in the last 7 days? The fix commit (4870d10) came AFTER the snapshot. Before that, update.rs was last touched by... let me check the full history.
+
+Let me be practical: the task says add a "recently touched" signal if missing, or strengthen if weak. The genuine gap: **this session's own edits / working-tree modifications / last ~5 commits**. The accel signal is a 7-day frequency ratio which is diluted by normalization against other churny files.
+
+The cleanest surgical implementation that satisfies the task and the test:
+
+Add a **recently-touched binary signal**: a file modified in the working tree (uncommitted) OR touched within the last N commits (say 5) gets a direct score bump — a fixed additive term (like MUTATION_WEIGHT), e.g. `RECENCY_BUMP = 0.05`. This directly encodes "you (or a recent session) just touched this file — it's a live target, one-off fixes land here."
+
+The test shape required:
+"given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+I need a pure/computable scoring pathway so the test can construct fake signals. Let me look if there's a pure helper I can extend. The current compute_file_risk_scores does everything with live git reads — hard to unit test without mocking. But there's the `top_n_from` pure helper precedent.
+
+Best approach: extract a pure function `score_file_risk(raw_signals, weights, recent_touched) -> f64` or compute the composite score from normalized signals + recency bump. Then the test can pin: file A (modest history, recently touched) ≥ file B (strong history, not recently touched).
+
+Let me design:
+
+1. Add a helper `recently_touched_files(window: usize) -> HashSet<String>` that runs `git log --name-only --pretty=format: -<window>` (like co_change_coupling) and collects src/**/*.rs files. Also include working-tree modifications via `git status --porcelain` (paths starting with src/ ending .rs with status M/A/??... actually porcelain shows " M src/foo.rs" — but careful: in tests, run_git has the destructive-command guard; `git status --porcelain` is not destructive, fine).
+
+Wait, but there's a subtlety: the working tree in a test environment is the arc-evolve repo itself. `compute_file_risk_scores()` reads the live repo. For the unit test, I should NOT rely on live repo state — I need a pure function.
+
+Let me restructure minimally:
+
+```rust
+/// Number of recent commits that define the "recently touched" window...
+const RECENCY_WINDOW_COMMITS: usize = 5;
+/// Fixed score bump for files recently touched (working tree or last N commits).
+const RECENCY_BUMP: f64 = 0.06;
+```
+
+Add pure helper:
+
+```rust
+/// Compute the final risk score for one file from its normalized signals,
+/// learned weights, and whether it was recently touched.
+fn final_risk_score(
+    norm_churn: f64, norm_accel: f64, norm_size: f64, norm_complexity: f64,
+    norm_test: f64, norm_coupling: f64, norm_revert: f64,
+    weights: &[f64; 7],
+    mutation_survival: f64,
+    test_density: f64,
+    recently_touched: bool,
+) -> f64
+```
+
+Hmm, that's a big signature. Alternatively a small struct. But keep it surgical. Actually the existing code already computes `score` inline in the loop. I could extract exactly the score computation body into a pure fn and call it from the loop. That gives a natural test target.
+
+Let me write:
+
+```rust
+/// Pure composite-score computation for a single file, extracted from
+/// `compute_file_risk_scores` so the recency-vs-history tradeoff can be pinned
+/// by tests without reading the live repo.
+fn composite_risk_score(
+    signals: [f64; 7],      // normalized churn, accel, size, complexity, test_density, coupling, revert
+    weights: [f64; 7],
+    mutation_survival: f64,
+    test_density: f64,
+    recent_touched: bool,
+) -> f64 {
+    let mut score = 0.0;
+    for i in 0..7 {
+        score += signals[i] * weights[i];
+    }
+    if test_density >= 0.0 {  // .rs penalty
+        score += f64::max(0.0, (5.0 - test_density) * 2.0) / 100.0;
+    }
+    if mutation_survival > 0.0 {
+        score += MUTATION_WEIGHT * mutation_survival;
+    }
+    if recent_touched {
+        score += RECENCY_BUMP;
+    }
+    score
+}
+```
+
+Hmm wait, the penalty applies only to .rs files but test_density is 0.0 for non-rs too, so (5.0 - 0) * 2 / 100 = 0.1 for all non-rs files... no wait, current code gates on path.ends_with(".rs"). If I pass test_density and an is_rs flag... Actually simpler: pass an optional penalty flag. Or since all files here are src/**/*.rs anyway (file_set only collects src/ files + counts filtered to src/**/*.rs), the non-rs case can't happen except maybe src/format/mod.rs which is .rs. So all paths end with .rs. I can simplify but to keep behavior identical, keep the guard. I'll pass `is_rs: bool`.
+
+Actually, let me check: does the file_set only contain .rs files? From disk: `path.extension().is_some_and(|e| e == "rs")` — yes. From counts_30/counts_7: git.rs filters `path.starts_with("src/") && path.ends_with(".rs")` — yes. So all .rs. But keep the guard anyway for safety, or note it. I'll include is_rs for exactness.
+
+Now RECENCY_BUMP: how big? The test requirement: "file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one."
+
+So I need bump ≥ the difference between "strong history" and "modest history" scores. With 7 signals weighted: strong history = e.g. churn 1.0, revert 1.0, coupling 1.0, test 1.0, size 0.5... vs modest = churn 0.2, etc. The difference could easily be 0.2-0.4. A single fixed bump of 0.06 won't close that gap.
+
+Hmm. So the test needs a carefully chosen scenario. Let me think about what the test should pin:
+
+"given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one in the scored list."
+
+Let me pick concrete signals (normalized 0-1):
+- Recently-touched file R: churn 0.4, accel 0.4, size 0.3, complexity 0.3, test 0.3, coupling 0.2, revert 0.0 (modest everything)
+- Strong-history file H: churn 1.0, accel 0.0, size 0.8, complexity 0.5, test 0.7, coupling 1.0, revert 1.0 (strong history, no recent touch)
+
+Weights [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]:
+R base = 0.4*0.3 + 0.4*0.15 + 0.3*0.15 + 0.3*0.10 + 0.3*0.10 + 0.2*0.10 + 0 = 0.12+0.06+0.045+0.03+0.03+0.02 = 0.305
+H base = 0.3 + 0 + 0.12 + 0.05 + 0.07 + 0.10 + 0.10 = 0.74
+
+Huge gap: 0.435. A fixed bump can't bridge that without dominating everything (which would be bad — every file touched in last 5 commits gets max signal).
+
+So "recently touched" can't be a small additive bump if the test wants it to beat a *strong* history. Hmm.
+
+Wait — re-read the task: "a file with a modest risk history but a recent modification and a file with a strong history but no recent touch". "Modest" vs "strong" — the test scenario is mine to construct (I write the test). But it must reflect the real miss: update.rs had a modest history (low churn, small file) and was recently touched; the big churny files had strong history. For the scorer to catch update.rs-shaped misses, the recency signal must have real weight.
+
+But here's the thing: in the REAL day-175 snapshot, update.rs wasn't touched in the prior 7 days at all (it was a one-off fix landing that day, after the snapshot). Wait, but the task says "update.rs had been touched by recent sessions". Let me verify with actual git history.
+
+Let me check when update.rs was last touched before 4870d10 (day 175 fix).
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --format="%h %ad %s" --dat…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (7 lines) ✓ (8ms)
+ ✓ (27ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 6.5s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the picture. The day-175 validation: predicted top-10, none broke, actual edit target was `src/update.rs` which was missed. `update.rs` had 2 commits in last ~2 days but they're days apart (Aug 20, Aug 22). The recency signal (7-day counts) is `norm_accel` which is min-max normalized — with only 2 commits in 7 days vs. the historical churn of other files, it gets normalized down. Actually, the issue is subtler: `file_change_counts(7)` counts commits in the last 7 days. `update.rs` was touched by `4870d10` (Aug 22) and `7eaaf37` (Aug 20). So it should have count 2 in the 7-day window. But the accel normalization: `(c7/c30) / (7/30)`. c30 = 2, c7 = 2, so accel = (2/2)/(7/30) = 30/7 ≈ 4.29. That's clamped? No, actually accel is not clamped — it can be > 1. But after normalize_scores, the max gets 1.0. Hmm, but wait — many files will have accel 3.0 (files only appearing in last 7 days). `update.rs` accel 4.29 which could be the max. Let me check: is `update.rs` even in the top 10? It wasn't. Let me run the current scorer to see what score update.rs gets.
+
+Let me also understand what "recently touched" means here — the task says: "a file touched within the last ~5 commits (or any file modified in the working tree / this session) gets a weight bump into the score."
+
+The hypothesis in the task is that `compute_file_risk_scores` under-weights recently-touched files. Looking at the code:
+
+- Signal 0: churn (30-day count) — weight 0.30
+- Signal 1: recency/acceleration (7-day ratio) — weight 0.15
+- Signal 2: size — 0.15
+- Signal 3: complexity — 0.10
+- Signal 4: test_density — 0.10
+- Signal 5: coupling — 0.10
+- Signal 6: revert_history — 0.10
+
+Wait, the doc comment at line 75 says `RISK_WEIGHTS: [churn, recency, size, complexity, test_density, coupling, revert_history]`, and `RISK_WEIGHTS = [0.30, 0.15, 0.15, 0.10, 0.10, 0.10, 0.10]`. So signal[1] is recency. So recency exists as a signal ("recent acceleration"). But it's based on commit counts (7-day window) — not on "latest commit touched the file".
+
+The problem: `update.rs` contains very few total commits, but one of its commits was very recent — the last commit touching update.rs was `4870d10` on Aug 22 (day 175). Let me check what day 175 was. Day 175's validation covers `b2add4d` → `4870d10`. So update.rs was the edit target of that session itself.
+
+The issue: the recency signal measures *count* of changes in 7 days, not *how recent* the last touch was. A file touched once in the very last commit of the day is different from one touched 3 times across the week. But with c7 = 1, accel = (1/1)/(7/30) = 4.29... wait c30 would be 1 too. Hmm.
+
+Actually wait — but if the file was touched in only 1 commit in the last 30 days, then accel = (c7/c30)/(7/30) = (1/1)/(0.233) = 4.29. That's quite high. But normalize_scores min-maxes across all files for signal 1. Many files have accel = 3.0 (only appeared in last 7 days), so update.rs gets 1.0 if it's the max. Let me verify by running the scorer.
+
+Actually let me just run the current compute to see. Let me write a quick test to check whether update.rs is currently in top-10. Actually simpler: build and run a tiny rust test or use existing binary. The `/risk` command might print... let me check if there's a quick way. Actually let me just look at what the scorer produces by adding a debug test temporarily? That's overkill.
+
+Let me reason from the data. Day 176's top-10 included: commands_risk.rs, commands_risk_snapshots.rs, cli.rs, help_data.rs, commands_risk_report.rs, repl.rs, commands_risk_accuracy.rs, dispatch.rs, symbols.rs, commands_git.rs. No update.rs. update.rs score must have been lower than 11th place.
+
+The signals: update.rs is a small file (~133 lines), low complexity, but it does have `#[test]` markers? Let me check update.rs test density.
+
+Actually, the real question: does a "recently touched" (within last ~5 commits) signal exist? Currently the recency signal is a 7-day *count* ratio — it does not specifically capture "the file was touched in the most recent commits". The task offers a clear mechanism: add a "touched within last ~5 commits" boolean bump.
+
+Let me check what day 175's snapshot of top-10 was and what update.rs's actual score was. Let me check the day 175 snapshot — it might not exist since snapshot is taken at HEAD at the time. Let me look for hash b2add4d or 4870d10.
+
+Actually the validation for day 175 says predicted 10, hits [], surprises [src/update.rs], scored_broke 1. So one of the scored files broke (scored_broke = 1? wait it says scored_broke: 1, hits: [] — hmm, hits is empty but scored_broke is 1? That's weird. hits = files that were both predicted AND broke. scored_broke = files that broke among scored files. If scored_broke=1 and hits=[], then... one scored file broke but wasn't in the hits list? Confusing. Whatever.)
+
+The key miss: update.rs was the actual edit target and it wasn't in the top-10.
+
+Let me now check the current day 176/177 state — what score does update.rs get right now? Let me write a small standalone test via cargo test with a temporary test. Actually, I can add the test first (TDD) — that's the instruction: write a test first.
+
+Plan:
+1. Add a pure helper `recent_touch_bump` or a recency signal enhancement: files within last ~5 commits get a bump.
+2. Add unit test with synthetic data checking that a modest-history + recent-touch file ranks >= strong-history + no-recent-touch file.
+
+But `compute_file_risk_scores()` is not pure — it reads git and disk. For the unit test I need a pure function to test. Options:
+- Extract a pure scoring function that takes the raw signal vectors (or a per-file signal struct) plus a recency-touched set, and returns scores.
+- Test the signal-extraction helper (e.g., `recently_touched_files()` from git log) plus a pure "bump application" function.
+
+Let me look at how tests currently test the scorer. There's `test_compute_file_risk_scores_returns_all_files` which just checks count. There's also `top_n_from` pure helper tested elsewhere.
+
+The cleanest approach consistent with "keep surgical, one scoring pathway, one test file":
+
+1. Add a signal: "last-touch recency" — a file whose most recent commit touch is within the last ~5 commits (or working tree modified) gets a bump. Implement as:
+   - `fn recently_touched_files(n: usize) -> HashSet<String>` — runs `git log -n N --name-only` (or `git log -n N --pretty=format: --name-only`) and returns src/*.rs files touched in the last N commits. Also include working-tree-modified files from `git status --porcelain`.
+   - In the scoring loop, add `RECENCY_TOUCH_WEIGHT` (an additive bump, like MUTATION_WEIGHT) for files in that set.
+
+Wait, but "weight bump into the score" — additive bump is the existing pattern (MUTATION_WEIGHT). That keeps it bounded and complementary.
+
+But the test requires: given a file with modest history but recent modification vs a file with strong history but no recent touch, the recent one must rank >=. An additive bump could achieve that only if the bump is large enough to overcome the historical-signal differences. Hmm. Let me think about the actual numbers.
+
+Let me run the scorer to see actual values. I'll add a temporary test that prints update.rs's rank and score vs the current top-10, then design the bump.
+
+Actually, the task's spirit: "do not let the historical signals drown the recency signal for one-off fix targets" and "the recently-touched file must rank at or above the historically-fragile one in the scored list". This is a strong requirement — a pure additive bump of modest size won't necessarily flip rank in all cases. But the test shape given is: "given a file with a modest risk history but a recent modification and a file with a strong history but no recent touch, the recently-touched file must rank at or above the historically-fragile one".
+
+So the test constructs synthetic inputs — meaning I probably should extract a pure function that computes score from raw signals + recency flag, so the test can feed controlled values. Then the bump needs to be strong enough that a modest-history + recent-touch ≥ strong-history + no-touch.
+
+Hmm, but what does "modest history" vs "strong history" mean in normalized signals? Normalized signals are 0..1. Let's say modest = 0.2 in each historical signal, strong = 0.8 in a couple signals. The score difference for strong vs modest on 6 historical signals with weights summing ~0.85: if strong is 0.8 and modest 0.2 across, say, churn+size (0.45 weight), delta = 0.6*0.45 = 0.27. That's a big delta that a small bump won't flip.
+
+But actually the test is about *file rank*, not absolute threshold. The natural design: make "recently touched" a signal that enters normalization (like accel), OR scale the bump relative to the score range.
+
+Let me reconsider. Maybe the cleanest interpretation matching the codebase: the existing "recency" signal (signal 1, weight 0.15) is the *acceleration* ratio — it measures 7-day vs 30-day change *counts*. A file touched once this week and once last month has accel = 4.29 → normalized to 1.0 if it's the max. But in practice many files have c7==c30 (all changes within 7 days) giving accel = 4.29, and files that "only appeared in the last 7 days" get accel = 3.0. Hmm so accel doesn't discriminate.
+
+Wait actually — looking more carefully at the day-175 miss: update.rs had 2 commits in the 7-day window? Actually commits on Aug 20 and Aug 22 — both within 7 days of Aug 22. c7 = 2, c30 = 2, accel = (2/2)/(7/30) = 4.286. If that's the max across files, normalized = 1.0. And weight 0.15. So norm_accel contribution = 0.15. That's significant but the *size* signal (weight 0.15) and churn (0.30) may dominate for the big files.
+
+The real problem: churn (30-day count) is a *count*, so files touched 30+ times dominate (churn weight 0.30, and normalized to 1.0 for the max). update.rs has count 2 → near 0 normalized.
+
+Let me actually run the numbers. Let me write a quick throwaway test... Actually, I can run the existing binary? Let me check if there's a way to invoke the risk command non-interactively: `cargo run -- risk`? The dispatch_sub mentions `arc risk [snapshot|validate|...]`. Let me try `cargo run -- risk --all`? Hmm, might be heavy. Let me build first (needed anyway) and try.
+
+Actually, simplest: add a temporary #[test] that prints, run it with --nocapture, then remove it. Or better — I'll design the change properly and use a pure function for the test.
+
+Let me look at how the top-10 validation data is used and what the scorer's output looks like right now. Let me just run the binary.
+────────────────────────────────────────────────────────────────────────────────
+Let me look at how `file_change_counts` works and check the actual current scores to size the fix.
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 ✓ (166ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Good, it builds. Now let me look at what the actual day-175 miss means and design the fix.
+
+The problem: validation on day 175 scored 10 files as high-risk, none broke, and the session's actual edit target `src/update.rs` wasn't in the top-10. `src/update.rs` had a modest risk history but had just been touched (2 commits: one on 2026-08-20 "Day 173" and one on 2026-08-22 "update: compare SemVer...").
+
+Wait, actually the day-175 validation: `git_hash_from: b2add4d, git_hash_to: 4870d10`. The `4870d10` commit is the "update: compare SemVer" commit. So the actual edit target was `src/update.rs` and the validation says `surprises: ["src/update.rs"]` — meaning it was in the changed files but wasn't predicted (not in the top-10).
+
+Now, let me check the current signals:
+- Signal 0: churn (30-day counts) — weight 0.30
+- Signal 1: recency — 7-day acceleration ratio — weight 0.15
+- Signal 2: size
+- Signal 3: complexity
+- Signal 4: test density
+- Signal 5: coupling
+- Signal 6: revert history
+
+So "recency" signal exists — it's the 7-day acceleration. But wait — let me check how `file_change_counts(7)` works. It uses `git log --since=7 days ago`. Hmm, `--since=7 days ago` is a rolling window. So if the last commit to update.rs was 2 days ago, it should count...
+
+Wait, but the issue is that at snapshot time (day 174/175), the session edits happen AFTER the snapshot is recorded. Actually the risk snapshot is recorded via `arc risk snapshot` at session start (per session), and the validation replays `git_hash_from..git_hash_to` span. The snapshot at `git_hash_from` is the state before the session's commits.
+
+So the question: at snapshot time (before the session edits), was update.rs recently touched? Let me check. The snapshot for day 174 was hash 3f99fda. What was the last commit touching update.rs before that?
+
+The commit `4870d10` (the SemVer fix) is the END of the day-175 validation span — i.e., it's the session's edit itself. Before that, the last touch on update.rs was `7eaaf37` on 2026-08-20 (Day 173).
+
+So between 2026-08-20 and 2026-08-22 (day 175), update.rs had one recent touch (2 days before the session). That's within the 7-day window. But with counts_7 = 1 and counts_30 = 1 (only 1 commit in 30 days), the acceleration = (1/1) / (7/30) = 4.28... which is clamped? No wait, it's not clamped, it's a raw value that then gets min-max normalized.
+
+Hmm wait, but `file_change_counts` counts commits touching the file. Let me re-check: `7eaaf37 Day 173: update day counter` — wait, that commit touches `src/update.rs`? That looks like the daily "update day counter" commit. Let me check what files it touches. Actually "Day 173: update day counter" — this is likely the evolve loop's daily DAY_COUNT bump which sometimes touches src/update.rs? Hmm, let me check.
+
+Actually wait — looking at git log for src/update.rs, there are only 2 commits: 4870d10 and 7eaaf37. But 7eaaf37 is "Day 173: update day counter" — that seems odd for update.rs. Let me verify.
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git show --stat 7eaaf37 | head -20… ✓ (40ms)
+
+

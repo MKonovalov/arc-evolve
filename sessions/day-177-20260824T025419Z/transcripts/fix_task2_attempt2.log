@@ -1,0 +1,1060 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The evaluator says the diff added `compute_hit_miss_sets`, `format_last_validation`, and `fmt_file_lines` but never wired them anywhere. I need to:
+
+1. Look at the current state of `src/commands_risk_accuracy.rs` to see what's there.
+2. Wire `format_last_validation` into the accuracy report (`prediction_accuracy_summary` / `format_accuracy_report`).
+3. Possibly touch `src/commands_risk.rs` for call-site wiring.
+4. Add a unit test for the hit/miss intersection computation.
+
+Let me start by reading the relevant files.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status && git diff --stat  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs ✓ (6ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 606ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+There's an existing commit with the changes. Let me look at the current git log to understand what was already committed, and then look at the diff of the last commit.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git show -…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:100..430 ✓ (2ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 581ms (2 ✓)
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:330..660 ✓ (2ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+So the previous commit added `compute_hit_miss_sets`, `format_last_validation`, `LastValidationDetail`, and `fmt_file_lines` but never wired them. There's a doc comment referencing `commands_risk::load_last_validation_detail` which doesn't exist yet.
+
+Let me look at how `format_accuracy_report` is called and where `prediction_accuracy_summary` is, and how commands_risk.rs handles `/risk accuracy`.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'format_accuracy_report|prediction_accuracy_summary|compute_a…' in /home/runner/work/arc-evolve/arc-evolve/src  ▶ search 'load_validation_history_from|parse_validation_events|parse_a…' in /home/runner/work/arc-evolve/arc-evolve/src ✓ (9ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 678ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search returned no matches? That's strange. Let me check the search parameter - maybe the path needs to be the working directory. Let me try again.
+────────────────────────────────────────────────────────────────────────────────
+The grep returned nothing — let me retry with the correct working directory context.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "format_accuracy_report\|…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "load_validation_history_… ✓ (8ms)
+ ✓ (12ms)
+  2 tools completed in 603ms (2 ✓)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "load_validation_history_…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1600..1730 ✓ (2ms)
+ ✓ (5ms)
+  2 tools completed in 1.4s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the layout. Let me look at the relevant pieces:
+
+1. `handle_risk_accuracy` in `src/commands_risk.rs` at line 1647 — this is where the accuracy report is rendered. This is where I need to wire in `format_last_validation`.
+
+2. `src/commands_risk_snapshots.rs` — has `ValidationEvent`, `ParsedSnapshot`, `parse_all_snapshots`, `parse_validation_events`, `load_validation_history_from`, and also `parse_detailed_events` (used in commands_risk.rs), plus `parse_rich_validation_events`.
+
+Let me look at how the day-175 validation data appears in `.arc/risk_validations.jsonl` to understand what fields exist. The task said the day-175 miss should be legible. Let me look at the validation file format and snapshot file format.
+
+Let me look at the existing parsers and file formats.
+────────────────────────────────────────────────────────────────────────────────
+Now let me examine the data formats and the existing parsers.
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:300..550  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && head -c 4000 .arc/risk_validations… ✓ (3ms)
+ ✓ (5ms)
+  2 tools completed in 672ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the data formats:
+
+**Validation event JSONL** (`.arc/risk_validations.jsonl`):
+```json
+{"accuracy_pct":0.0,"day":175,"git_hash_from":"b2add4d","git_hash_to":"4870d10","hits":[],"predicted_count":10,"scored_broke":1,"surprises":["src/update.rs"],"total_scored":77,"trigger":"replay","ts":"2026-08-22T16:49:42Z"}
+```
+Fields: `accuracy_pct`, `day`, `git_hash_from`, `git_hash_to`, `hits` (array of strings), `predicted_count`, `scored_broke`, `surprises` (array of strings — touched but not predicted), `total_scored`, `trigger`, `ts`.
+
+**Snapshot JSONL** (`.arc/risk_snapshots.jsonl`):
+```json
+{"day":134,"git_hash":"0f3017f","top_10":[{"path":"src/prompt_retry.rs","score":0.49,"signals":[...]},...],"ts":"..."}
+```
+Fields: `day`, `git_hash`, `top_10` (array of {path, score, signals}).
+
+So the "last validation" detail should:
+- Take the most recent validation event (by order in the file — it's append-only, so the last line).
+- For that event, extract:
+  - `day`
+  - `ts` (timestamp string)
+  - `hits` (arrays) → these are predicted ∩ changed
+  - `surprises` (arrays) → changed but not predicted
+  - `changed` = hits + surprises
+  - `predicted` = the scorer's high-risk predictions from the snapshot this event was validated against (snapshot with `git_hash` == `git_hash_from`)
+
+Wait, but the task says the predicted files list should come from the snapshot. Let me re-read the task:
+
+> list (a) the files the scorer predicted as high-risk, and (b) the files that actually changed in the validating commits since the snapshot — and mark the intersection (hits) vs the miss set (predicted-but-untouched and touched-but-unpredicted).
+
+So `predicted` = from the snapshot at `git_hash_from` (the snapshot this event validates). The `hits`/`surprises` in the validation record already give us the intersection and touched-unpredicted. We can derive:
+- `hits` = validation["hits"] (already the intersection)
+- `touched_unpredicted` = validation["surprises"]
+- `predicted` = snapshot.get(git_hash == git_hash_from).predicted — but wait, actually there's a subtlety: the snapshot `predicted` may include files that aren't in `predicted_count`. Actually the snapshot `top_10` paths are the predictions.
+- `predicted_untouched` = predicted − changed (where changed = hits + surprises)
+
+But hold on — the existing `compute_hit_miss_sets` computes from `predicted` and `changed` lists directly. The validation JSONL already has `hits` and `surprises` which were computed at record time. But those hits/surprises were computed against the snapshot's prediction set (the top-10). So we have two options:
+
+1. Reuse the validation record's `hits`/`surprises` arrays directly (they're already the intersection split) — but then `predicted_untouched` still needs to be derived by subtracting changed from predicted.
+
+2. Use the snapshot's predicted list + the validation's changed files (hits+surprises), and compute hit/miss sets via `compute_hit_miss_sets`.
+
+The task explicitly demands a unit test for "the hit/miss intersection computation on a synthetic validation record (predicted list vs changed list, assert the hit set, the miss set, and the both-missed case)". That maps to `compute_hit_miss_sets(predicted, changed)` — predicted vs changed lists.
+
+The existing `compute_hit_miss_sets` function is already there (lines 368-396). Now what's missing:
+1. A loader `load_last_validation_detail` in commands_risk.rs (referenced in the doc comment of `format_last_validation`) that:
+   - reads `.arc/risk_snapshots.jsonl` and `.arc/risk_validations.jsonl`
+   - finds the last validation event
+   - finds the snapshot with `git_hash == git_hash_from` (or falls back to the last snapshot?)
+   - builds a `LastValidationDetail`
+2. Wiring in `handle_risk_accuracy` to call `format_last_validation` and print it.
+3. A unit test for `compute_hit_miss_sets`.
+
+Wait — but the doc comment says `load_last_validation_detail` lives in commands_risk.rs. Let me check what's actually in the current state. The git show showed the commit only added `src/commands_risk_accuracy.rs` (149 lines). So `compute_hit_miss_sets`, `format_last_validation`, `fmt_file_lines`, `LastValidationDetail` were added but nothing wired them.
+
+Let me think about where to put the loader. The task says:
+
+> 2. Reuse the existing parsers — `parse_validation_events` / `load_validation_history_from` (src/commands_risk_snapshots.rs) and the snapshot parser — rather than inventing new file formats. The wiring stays in src/commands_risk.rs; keep the report pure/formatting-only.
+
+So the loader/go-between that reads files and produces `LastValidationDetail` should be in commands_risk.rs (the wiring), and commands_risk_accuracy.rs keeps only the pure formatting. But hmm, the loading itself is arguably data-gathering, not formatting. The task says "The wiring stays in src/commands_risk.rs; keep the report pure/formatting-only." So I'll put a `load_last_validation_detail` function in commands_risk.rs that reads the two JSONL files, finds the most recent validation + its associated snapshot, builds the `LastValidationDetail`, and then `handle_risk_accuracy` calls `format_last_validation(load_last_validation_detail(...).as_ref())`.
+
+Actually, wait. Let me reconsider what data `LastValidationDetail` needs:
+
+```rust
+pub(crate) struct LastValidationDetail {
+    pub(crate) day: u32,
+    pub(crate) ts: String,
+    pub(crate) accuracy_pct: f64,
+    pub(crate) predicted: Vec<String>,
+    pub(crate) changed: Vec<String>,
+    pub(crate) hits: Vec<String>,
+    pub(crate) predicted_untouched: Vec<String>,
+    pub(crate) touched_unpredicted: Vec<String>,
+}
+```
+
+The loader needs the raw validation JSONL to get `hits` and `surprises` arrays as strings (note: `parse_validation_events`/`ValidationEvent` only keeps counts, not the file lists!). So `load_validation_history_from` returns `ValidationEvent` with just counts. To get the actual file lists, we need to parse the raw JSONL fields `hits` and `surprises` arrays.
+
+Hmm. Options:
+1. Parse the raw validation JSONL directly in the loader for the last line (reuse the same file, minimal parsing — but that's "inventing" a new parse? No — it's reusing the existing file format, just reading the arrays that `parse_validation_events` deliberately discards).
+2. Use `parse_validation_events` to find the last event, then read the file again for the full detail.
+
+Actually, there's `parse_rich_validation_events` in commands_risk_snapshots.rs — let me check what that returns. Line 175 mentioned "accuracy readers (`parse_validation_events`, `parse_rich_validation_events`)". Let me look at that. It's probably a `DetailedValidationEvent` with `hit_signals` — maybe with file names too. Let me check.
+
+Also there's `parse_detailed_events` in commands_risk.rs (called at line 1659). Let me look at those to see if they carry the file lists.
+
+Let me read the relevant parts of commands_risk_snapshots.rs around line 175 and any function that returns detailed events with hits/surprises file lists.
+────────────────────────────────────────────────────────────────────────────────
+Let me look at the detailed event parsers and the re-export/wiring structure.
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:160..290  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "parse_rich_validation_ev… ✓ (2ms)
+ ✓ (11ms)
+  2 tools completed in 779ms (2 ✓)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:130..250  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1410..1500 ✓ (2ms)
+ ✓ (3ms)
+  2 tools completed in 660ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the data structures well. Let me look at the current state of the accuracy module's `format_accuracy_report` (line 216) and the existing imports in `commands_risk.rs` at line 41.
+────────────────────────────────────────────────────────────────────────────────
+Let me look at the current `format_accuracy_report` and the imports in `commands_risk.rs`.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_accuracy.rs:195..315  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1..61 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 945ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a good picture. The plan:
+
+1. Add a wiring function in `commands_risk.rs` — `load_last_validation_detail()` — that:
+   - Reads snapshot + validation content from the CLI paths
+   - Reuses `parse_validation_events` (or `parse_rich_validation_events`) to get the last validation event
+   - Reuses `parse_all_snapshots` to find the snapshot with the matching `git_hash_from` (or the one for the same day, or the most recent snapshot before the validation)
+   - Builds `LastValidationDetail` with predicted (from snapshot top_10), changed (hits + surprises from validation), then `compute_hit_miss_sets`
+   
+2. Wire it into `handle_risk_accuracy` — call it and print `format_last_validation`.
+
+3. Add unit tests for `compute_hit_miss_sets` in `commands_risk_accuracy.rs`.
+
+Let me think about how to match the predicted files for the last validation. The validation record has `git_hash_from` and `git_hash_to`. The snapshots have `git_hash` and `day`. So the best way to find the predicted set for a validation event is to find the snapshot whose `git_hash` == `git_hash_from` of the validation.
+
+Let me check a validation record — the last one:
+```json
+{"accuracy_pct":0.0,"day":175,"git_hash_from":"b2add4d","git_hash_to":"4870d10","hits":[],"predicted_count":10,"scored_broke":1,"surprises":["src/update.rs"],"total_scored":77,"trigger":"replay","ts":"2026-08-22T16:49:42Z"}
+```
+
+So I need a snapshot with git_hash `b2add4d`. Let me check that exists in the snapshots file. Also note the day-175 miss: scorer predicted `commands_risk*` files while the session actually edited `src/update.rs`. Wait — actually the snapshot at day 175 git_hash b2add4d would contain the top_10 predictions. Let me check what predictions that snapshot had.
+
+Let me grep for b2add4d in the snapshot file. Also check how `parse_rich_validation_events` gets the last event, and how `parse_validation_events` ordering works.
+
+Also, I need to consider: the task says "reuse the existing parsers — parse_validation_events / load_validation_history_from and the snapshot parser". The `ValidationEvent` struct in commands_risk_snapshots.rs doesn't carry hits/surprises detail, but has day/hit_count/total_changed. The `RichValidationEvent` in commands_risk.rs carries hits/surprises. For the last validation detail we need the actual file lists. So best approach: build in commands_risk.rs using `parse_rich_validation_events` (private but in the same file) + `parse_all_snapshots` to get predicted list.
+
+Wait — the task said "Reuse the existing parsers — parse_validation_events / load_validation_history_from (src/commands_risk_snapshots.rs) and the snapshot parser — rather than inventing new file formats. The wiring stays in src/commands_risk.rs; keep the report pure/formatting-only."
+
+So the wiring function `load_last_validation_detail` (mentioned in the doc comment of `format_last_validation`) goes in commands_risk.rs. It should reuse:
+- `parse_all_snapshots` for the snapshot predicted lists
+- Parse the last validation event to get hits/surprises
+
+For the validation event with hits/surprises detail, I can use `parse_rich_validation_events` (already exists in commands_risk.rs). That's an existing parser too. Actually, its hits/surprises are the "changed" files — hits = predicted ∩ changed effectively stored, surprises = changed − predicted. Actually per auto_validate_after_failure: hits = files in changed that were predicted; surprises = changed not predicted. So changed = hits ∪ surprises.
+
+The predicted set for the validation = snapshot top_10 at the matching git_hash_from (or the day). Let me verify there's a snapshot with git_hash b2add4d.
+
+Let me also double-check how many snapshots exist for a given day — multiple snapshots per day exist (e.g. day 136 twice). parse_all_snapshots keeps all of them; the "most recent" would be the last one in the file with that day. But the cleanest association is by git_hash — the validation's `git_hash_from` should exactly match the snapshot's `git_hash`. Let me verify.
+
+Also let me check `write_risk_snapshot_to` to see what git_hash is stored.
+
+Let me now check for b2add4d in the snapshots file and look at the write_risk_snapshot_to function.
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -c "b2add… (9 lines)  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn write_risk_snapshot_to… ✓ (3ms)
+ ✓ (28ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 672ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The snapshot for day 175 has git_hash "b2add4d" and the validation for day 175 has git_hash_from "b2add4d". So the association between snapshots and validations is via `git_hash_from` == snapshot `git_hash`.
+
+Let me confirm: 
+- Day 171 validation: git_hash_from d76b695, git_hash_to c96395b. Snapshot day 171 has git_hash d76b695? Let me check.
+- Day 172 validation: git_hash_from c96395b. Snapshot day 172 git_hash c96395b?
+- Day 174 validation: git_hash_from 467588b. Snapshot day 174 git_hash 467588b?
+- Day 175 validation: git_hash_from b2add4d. Snapshot day 175 git_hash b2add4d ✓ (confirmed above).
+
+Let me verify the snapshots' git hashes quickly to confirm the association key.
+────────────────────────────────────────────────────────────────────────────────
+The association key is clearly `git_hash_from` (validation) == `git_hash` (snapshot). Let me verify this for all validations:
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (17 lines) ✓ (25ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The join key is confirmed: `git_hash_from` in validation == `git_hash` in snapshot. Let me check whether snapshots for days 172 and 174 have the same hashes. Let me print all snapshots' days/hashes and check for all validations.
+────────────────────────────────────────────────────────────────────────────────
+Association confirmed. Now let me check exact top-10 predictions for the days in question and look at the `RichValidationEvent` usage for the recent-events section (which already parses hits/surprises per event including ts):
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && python3 -c " (16 lines)  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1540..1640 ✓ (1ms)
+ ✓ (26ms)
+  2 tools completed in 628ms (2 ✓)
+
+Now I understand the full picture. The evaluator is right: the previous commit added dead code (`compute_hit_miss_sets, format_last_validation, LastValidationDetail, fmt_file_lines`) in `commands_risk_accuracy.rs` but never wired it. I need to:
+
+1. Add a data-gathering helper in commands_risk.rs (wiring) that cross-references the last validation with its snapshot (via `git_hash_from` ↔ `git_hash`) using existing parsers.
+2. Call it from `handle_risk_accuracy` and render via format_last_validation.
+3. Re-export the new symbols and add the required unit tests.
+
+Let me check the format imports and existing `use` statements:
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "use crate::commands_risk_…  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && sed -n '210,330p' src/commands_ris… ✓ (4ms)
+ ✓ (5ms)
+  2 tools completed in 1.0s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have full understanding. Let me check the current file state of the previously committed changes and figure out the cleanest wiring.
+
+Current state:
+- `src/commands_risk_accuracy.rs` has unchanged: `format_accuracy_report(stats)` — takes only `&AccuracyStats`.
+- Dead code in `commands_risk_accuracy.rs`: `LastValidationDetail` struct, `compute_hit_miss_sets`, `format_last_validation`, `fmt_file_lines` — **not used anywhere**.
+
+The task says:
+1. Add a "last validation" detail block to the accuracy report — list (a) predicted files, (b) actually-changed files, and mark hits vs miss set.
+2. Reuse existing parsers (`parse_validation_events`/`load_validation_history_from` and snapshot parser). Wiring stays in `commands_risk.rs`; report stays pure/formatting-only.
+3. Add a unit test for the hit/miss intersection computation.
+
+The cleanest approach:
+- In `commands_risk_accuracy.rs`:
+  - `LastValidationDetail` (add a `changed` field already there; check it has `predicted`, `changed`, `hits`, `predicted_untouched`, `touched_unpredicted`, `day`, `ts`, `accuracy_pct`).
+  - `compute_hit_miss_sets(predicted, changed) -> (hits, predicted_untouched, touched_unpredicted)`.
+  - `format_last_validation(detail: Option<&LastValidationDetail>) -> String`.
+  - `fmt_file_lines`.
+  - Add unit tests for `compute_hit_miss_sets` (hit set, miss set, both-missed case) and maybe `format_last_validation`.
+- In `commands_risk.rs`:
+  - Add `load_last_validation_detail()` that reads both JSONL files, uses existing parsers:
+    - `parse_validation_events` for validation summary events, OR better `parse_rich_validation_events` (which keeps hits/surprises/ts) — but the task says reuse `parse_validation_events`/`load_validation_history_from` and snapshot parser. `parse_rich_validation_events` is private to commands_risk.rs, that's fine since the wiring is in commands_risk.rs. But the task explicitly says "Reuse the existing parsers — parse_validation_events / load_validation_history_from (src/commands_risk_snapshots.rs) and the snapshot parser". Hmm. `parse_validation_events` gives only counts (hit_count, total_changed, accuracy_pct, day) — no file lists! The file lists (hits/surprises) are in the JSONL raw. `parse_rich_validation_events` preserves hits/surprises and ts. 
+
+    Wait — the task says reuse existing parsers rather than inventing new file formats. `parse_rich_validation_events` is an existing parser in commands_risk.rs (private). It covers hits/surprises/ts/day/accuracy. And `parse_all_snapshots` (snapshot parser) is in commands_risk_snapshots.rs. The association is `git_hash_from` ↔ `git_hash`. But `parse_rich_validation_events` doesn't parse `git_hash_from`/`git_hash_to`! The `RichValidationEvent` struct only has ts, day, hits, surprises, accuracy_pct.
+
+    Options:
+    a. Extend `RichValidationEvent` with `git_hash_from: String` field, parse it in `parse_rich_validation_events`. Then in the wiring, find the last rich event, find the snapshot whose `git_hash == git_hash_from`, and use its `predicted` list (from `parse_all_snapshots`). Then compute hit/miss sets via `compute_hit_miss_sets`.
+    
+    That reuses existing parsers (parse_rich_validation_events is existing, parse_all_snapshots existing) — just adds one field to the rich struct. The task says "Reuse the existing parsers — parse_validation_events / load_validation_history_from and the snapshot parser — rather than inventing new file formats." Adding a field to RichValidationEvent is a small extension, not inventing a new file format. And the file lists are essential — ValidationEvent (the plain one from parse_validation_events) lacks the per-file lists.
+
+    Actually wait — should I worry about changing `RichValidationEvent` shape affecting tests? There's a test at line 4312 with `RichValidationEvent { ... }` struct literal, and probably format_recent_events test. Adding a field with `..Default::default()`? The struct doesn't derive Default. Let me check test at 4312.
+
+    b. Alternative: In the wiring, parse the last line of JSONL directly (read last non-empty line, serde_json parse, extract hits/surprises/git_hash_from/ts/day/accuracy_pct). That avoids touching RichValidationEvent but "invents" parsing logic rather than reusing. The task explicitly says reuse the parsers.
+
+    Option (a) is cleaner and matches the task instruction. Let me check the RichValidationEvent test usage.
+
+Let me check line 4300-4330 for the test.
+
+Also, check `handle_risk_accuracy` — it currently prints report then returns early if no validation data. I need to render the last-validation block even when there's no data ("no validation data yet" cold-start line). The task says: "If a file list is empty (no snapshot/validation data yet), print a clear 'no validation data yet' line instead of an empty block". So the block should be appended to the accuracy report.
+
+Design decision: Should `format_accuracy_report` take the detail? The task says "In the accuracy report (prediction_accuracy_summary / format_accuracy_report ...), add a 'last validation' detail block". Note: `prediction_accuracy_summary` is in `commands_risk_report.rs` and it's the /status summary — it calls `format_accuracy_report`? Let me check. Line 218 in commands_risk_report.rs: `pub(crate) fn prediction_accuracy_summary() -> Option<(f64, usize, &'static str)>`. That's a summary tuple, not a report. The accuracy report itself is `format_accuracy_report` in commands_risk_accuracy.rs, called from `handle_risk_accuracy` in commands_risk.rs (line 1669) and from a test.
+
+Simplest approach honoring "wiring stays in commands_risk.rs; keep the report pure/formatting-only":
+- `format_accuracy_report(stats)` — keep as-is (pure).
+- In `handle_risk_accuracy`, after printing the report, print `format_last_validation(load_last_validation_detail())`. The wiring function `load_last_validation_detail` lives in commands_risk.rs and reuses parsers. `format_last_validation` lives in commands_risk_accuracy.rs (pure formatting).
+
+But the task says "In the accuracy report ... add a 'last validation' detail block". If I print it as a separate section after the report in handle_risk_accuracy, that still appears as part of the `/risk accuracy` output — effectively in the report. That's acceptable and keeps purity. But is it part of "the accuracy report"? The evaluator's complaint was about wiring — "the 'last validation' detail block is never rendered in the accuracy report". Printing it within handle_risk_accuracy as a section of the accuracy output satisfies that.
+
+However, to be safe and truly wire it INTO the report, I could change `format_accuracy_report` signature to accept `Option<&LastValidationDetail>` and append the block. But that changes the function signature used elsewhere (test at 1023 uses `format_accuracy_report(&stats)`). I could make the new param optional with default... Rust doesn't have default args. I could add a second function `format_accuracy_report_with_detail(stats, detail)` and have `format_accuracy_report` call it with None. That's clean:
+
+```rust
+pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
+    format_accuracy_report_with_detail(stats, None)
+}
+
+pub(crate) fn format_accuracy_report_with_detail(stats: &AccuracyStats, detail: Option<&LastValidationDetail>) -> String {
+    // existing body, plus append format_last_validation(detail) at the end
+}
+```
+
+Wait, but the existing format_accuracy_report returns early with "No prediction accuracy data yet" when total_validations == 0. Should the "last validation" block still show in that case? Task says cold-start "no validation data yet" line should be shown instead of empty block. If there are zero validations, `format_last_validation(None)` renders exactly "No validation data yet..." block. So even in the zero case, we should append it after the "No prediction accuracy data yet" heading. Hmm, but the current early-return message already explains how to collect data. Adding the "no validation data yet" block after it would be redundant but harmless and satisfies the task explicitly.
+
+Actually, let me think about what the evaluator wants. The evaluator feedback: "the 'last validation' detail block is never rendered in the accuracy report, commands_risk.rs is untouched, and no unit test for the hit/miss intersection was added. Worse, the dead code breaks the required gate: cargo clippy ... fails with 4 'never used' errors".
+
+So the requirements:
+1. Wire `compute_hit_miss_sets` / `format_last_validation` / `LastValidationDetail` / `fmt_file_lines` so clippy doesn't complain (4 never-used: `LastValidationDetail`, `compute_hit_miss_sets`, `format_last_validation`, `fmt_file_lines`).
+2. Render the block in the accuracy report (touching commands_risk.rs for wiring).
+3. Add unit test for hit/miss intersection.
+
+Plan:
+- In `commands_risk_accuracy.rs`:
+  - `format_last_validation` is pub(crate), `LastValidationDetail` pub(crate), `compute_hit_miss_sets` pub(crate), `fmt_file_lines` private but called by format_last_validation → used.
+  - Add a helper `load_last_validation_detail` — NO, that's wiring; task says wiring stays in commands_risk.rs. Actually the detail says "The wiring stays in src/commands_risk.rs; keep the report pure/formatting-only." So put `load_last_validation_detail` in commands_risk.rs.
+  - Add unit tests for `compute_hit_miss_sets` (hit set, miss set, both-missed case) and maybe one for format_last_validation cold-start line.
+
+- In `commands_risk.rs`:
+  - Re-export `compute_hit_miss_sets`, `format_last_validation`, `LastValidationDetail` from commands_risk_accuracy (add to the `pub(crate) use` block at line 40).
+  - Extend `RichValidationEvent` with `git_hash_from: String` and parse it in `parse_rich_validation_events`.
+  - Add `load_last_validation_detail()` that:
+    - reads both files,
+    - parses rich validation events (or directly... use existing parsers)
+    - if no validations → return None
+    - last rich event, get git_hash_from
+    - parse all snapshots, find snapshot whose git_hash == git_hash_from → predicted list (or empty if not found)
+    - changed = hits ++ surprises from the rich event
+    - compute hit/miss sets via `compute_hit_miss_sets`
+    - build `LastValidationDetail { day, ts, accuracy_pct, predicted, changed, hits, predicted_untouched, touched_unpredicted }`
+  - In `handle_risk_accuracy`, after `format_accuracy_report`, print `format_last_validation(load_last_validation_detail().as_ref())`.
+
+Wait — but should the block be inside `format_accuracy_report` (as part of the accuracy report) or printed separately in handle_risk_accuracy? The task text: "In the accuracy report (prediction_accuracy_summary / format_accuracy_report in src/commands_risk_accuracy.rs), add a 'last validation' detail block: for the most recent validation event, list (a) ... and (b) ...". 
+
+Hmm, `prediction_accuracy_summary` is actually in `commands_risk_report.rs` (the file map says so), but the task's parenthetical attributes it to commands_risk_accuracy.rs — the task author may have conflated. The important part: the accuracy report displayed by `/risk accuracy` should include the block. I'll add it inside `format_accuracy_report` so it's genuinely part of the report. I'll extend the signature:
+
+```rust
+pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
+    format_accuracy_report_with_detail(stats, None)
+}
+
+pub(crate) fn format_accuracy_report_with_detail(stats: &AccuracyStats, last_validation: Option<&LastValidationDetail>) -> String { ... }
+```
+
+Then in `handle_risk_accuracy`:
+```rust
+let detail = load_last_validation_detail();
+let report = format_accuracy_report_with_detail(&stats, detail.as_ref());
+```
+
+But the cold-start case: format_accuracy_report returns early "No prediction accuracy data yet" when total_validations == 0. With the two-fn split, the with_detail version should still append the last-validation block (which shows "No validation data yet" cold-start line when detail is None). Let me restructure:
+
+```rust
+pub(crate) fn format_accuracy_report(stats: &AccuracyStats) -> String {
+    format_accuracy_report_with_detail(stats, None)
+}
+
+pub(crate) fn format_accuracy_report_with_detail(
+    stats: &AccuracyStats,
+    last_validation: Option<&LastValidationDetail>,
+) -> String {
+    let mut out = String::new();
+    if stats.total_validations == 0 {
+        out.push_str(&format!(
+            "\n{BOLD}{CYAN}  No prediction accuracy data yet.{RESET}\n\n\
+             {DIM}  Accuracy tracking starts automatically when watch commands\n\
+             {DIM}  detect failures and validate them against risk predictions.\n\n\
+             {DIM}  Run {RESET}/risk snapshot{DIM} first, then trigger a watch failure{RESET}\n\
+             {DIM}  to begin collecting data.{RESET}\n"
+        ));
+    } else {
+        out.push_str(&format_accuracy_box(stats)); // the box+per-signal part
+    }
+    out.push_str(&format_last_validation(last_validation));
+    out
+}
+```
+
+Hmm wait, that changes the existing early-return behavior slightly: now "No prediction accuracy data yet" ALSO shows the last-validation cold-start line. Is that OK? The task says: "If a file list is empty (no snapshot/validation data yet), print a clear 'no validation data yet' line instead of an empty block — the cold-start state is itself a fact worth showing." So yes, showing it in the zero case is explicitly desired.
+
+But careful: the existing test at line 1023 calls `format_accuracy_report(&stats)` and asserts `report.contains("Pairs: 1/5")` etc. With the split, `format_accuracy_report` → with_detail(None) → the detail block with None renders "No validation data yet..." — for a stats with 1 validation (test case). Does that break the test? The assertions check "Pairs: 1/5" and "cold start" — those come from the box, still present. The appended cold-start line doesn't break those assertions. But wait, the test with a None lift: `assert!(report.contains("cold start") && report.contains("1/5"))`. Fine.
+
+But also there's the empty-stats test? Let me check — `test_compute_accuracy_stats_empty` doesn't call format_accuracy_report. There's `format_accuracy_report` called in tests around line 1023 (2 usages). Let me check any test asserting the full report content that might break with the appended block. Let me search.
+
+Also, careful with should the block be before or after? Put "Last Validation" at the end of the accuracy report (after per-signal). Actually, semantically it's the *evidence* behind the number — could be right after the box. Order: box → per-signal → last validation block? Or box → last validation → per-signal? The task says "add a 'last validation' detail block". I'll append at the end after per-signal — simplest and cleanest. Actually hmm, "evidence behind the number" suggests near the top. But there's no strong requirement. Append at end is fine and keeps the box as the headline.
+
+Wait, but actually - reconsider. The two-fn split adds a public-ish wrapper that is only used by tests + handle_risk_accuracy. Clippy might complain the wrapper `format_accuracy_report` is unused? No — it's pub(crate) and used in tests and re-exported... Let me check where `format_accuracy_report` is re-exported: commands_risk.rs line 40-41 re-exports `compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend`. Those re-exports — are they used anywhere? The comment says commands_risk_report.rs uses them. Let me check commands_risk_report.rs line 397 area and prediction_accuracy_summary implementation.
+
+Let me look at commands_risk_report.rs around 200-260 and 380-400.
+
+Also check where format_accuracy_report is actually called in non-test code: only `handle_risk_accuracy` (line 1669) per the grep. And re-exported in commands_risk.rs but the re-export list has items that may be unused — `compute_per_signal_hits` re-export... Actually clippy with -D warnings — dead_code lints apply to pub(crate) items only if unused... `pub(crate)` items that are never used trigger dead_code warnings. Currently the crate compiles (build passes) with `format_accuracy_report` used by handle_risk_accuracy and tests. The re-exported items `compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend` are used within commands_risk.rs (compute_accuracy_stats, format_accuracy_report at 1669; AccuracyTrend maybe in effectiveness code). compute_per_signal_hits used at 1665. OK.
+
+Now — will adding everything create any unused warnings? `load_last_validation_detail` used in handle_risk_accuracy. `compute_hit_miss_sets` used by `load_last_validation_detail` (in commands_risk.rs) and tests. `format_last_validation` used within commands_risk_accuracy (by format_accuracy_report_with_detail) and tests. `LastValidationDetail` constructed in commands_risk.rs, consumed in accuracy module — the field `predicted` etc. all used by format. `fmt_file_lines` used by format_last_validation. Good.
+
+Now the RichValidationEvent extension. Let me check the test at 4312 that constructs RichValidationEvent — adding a field requires updating that literal or deriving Default. Let me view it.
+────────────────────────────────────────────────────────────────────────────────
+Let me check the existing tests for `RichValidationEvent and format_accuracy_report`, plus the `commands_risk_report.rs` usage:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:4290..4370  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_report.rs:200..275 ✓ (1ms)
+ ✓ (2ms)
+  2 tools completed in 1.4s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have a full picture. Let me design the wiring:
+
+**Plan:**
+
+1. In `src/commands_risk.rs`:
+   - Add a `load_last_validation_detail` function that:
+     - Reads `RISK_VALIDATION_PATH` and `RISK_SNAPSHOT_PATH`.
+     - Uses `parse_rich_validation_events` on validation content and `parse_all_snapshots` on snapshot content (both existing parsers).
+     - Finds the last validation event (in file order), and looks up the snapshot whose `git_hash` == validation's `git_hash_from`.
+     - Builds the `LastValidationDetail` using `compute_hit_miss_sets(predicted, changed)`.
+     - `changed` = hits ++ surprises from the validation event.
+   - Wire into `handle_risk_accuracy`: after `format_accuracy_report`, append `format_last_validation(...)` section.
+   - Re-export `LastValidationDetail`, `compute_hit_miss_sets`, `format_last_validation`, `load_last_validation_detail` from `commands_risk_accuracy.rs` (via the `pub(crate) use`).
+   - Add unit test for `load_last_validation_detail` (synthetic JSONL) that asserts hits/misses via `compute_hit_miss_sets`.
+
+2. In `src/commands_risk_accuracy.rs`:
+   - The dead code (`compute_hit_miss_sets`, `format_last_validation`, `LastValidationDetail`, `fmt_file_lines`) already exists. I need to check its correctness and complete it:
+     - `format_last_validation` references `d.hits.len()`, `d.changed.len()`, etc. — all fields exist on `LastValidationDetail`.
+     - `d.accuracy_pct` — exists.
+     - `fmt_file_lines` — exists.
+   - Add a unit test for `compute_hit_miss_sets` on a synthetic record (predicted vs changed): assert hit set, miss set (both halves), and the both-missed case (predicted empty ∩ changed disjoint, etc.).
+
+Let me also double check `format_last_validation` — every field used is present. It uses `d.changed`, `d.predicted`, `d.hits`, `d.predicted_untouched`, `d.touched_unpredicted`, `d.day`, `d.accuracy_pct`, `d.ts`. All exist.
+
+One thing: in `format_last_validation` the miss rendering — when `miss_count == 0` it adds "— none —". Good.
+
+Now, where should `load_last_validation_detail` live? The task says "Keep it <=3 source files; if the accuracy module is already huge, put the new small helper + format fn there and only touch commands_risk.rs for the call-site wiring." The `LastValidationDetail` + format + compute already live in `commands_risk_accuracy.rs`. The data-gathering function `load_last_validation_detail` that reads files and reuses parsers — the doc comment on `format_last_validation` says "the data is gathered by `commands_risk::load_last_validation_detail` which reuses the existing JSONL parsers". So that function should be in `commands_risk.rs` (the wiring module). But it needs `RichValidationEvent`/`parse_rich_validation_events` which are private to commands_risk.rs, and `parse_all_snapshots` which is re-exported there. So putting `load_last_validation_detail` in commands_risk.rs is natural.
+
+However — for testability, better to make the function take content strings rather than paths, or take paths. Let me design it to be testable without creating temp files: 
+
+```rust
+/// Gather the "last validation" evidence detail by cross-referencing the
+/// most recent validation event against the snapshot it was validated from.
+/// Reuses the existing JSONL parsers (`parse_rich_validation_events`,
+/// `parse_all_snapshots`) — no new file formats. Returns `None` when there
+/// is no usable validation record yet (cold start).
+pub(crate) fn load_last_validation_detail(
+    validation_content: &str,
+    snapshot_content: &str,
+) -> Option<LastValidationDetail> {
+    let validations = parse_rich_validation_events(validation_content);
+    let last = validations.last()?;
+    let snapshots = parse_all_snapshots(snapshot_content);
+    // Look up the snapshot this validation was validated FROM by git hash
+    // association (the dedup key `last_snapshot_git_hash` uses).
+    let from_hash = ... // need git_hash_from!
+}
+```
+
+Problem: `RichValidationEvent` doesn't carry `git_hash_from`. I need the association. Options:
+- Extend `RichValidationEvent` with `git_hash_from: String`, and update `parse_rich_validation_events` to parse it. This is a small, backward-compatible addition — `git_hash_from` is present in the JSONL for all events (old events too? Let me check: the day-171 event has `git_hash_from` and `git_hash_to` — all four events do). The `RichValidationEvent` is also constructed in tests — I'd need to add the field there (one test at line 4312).
+- Or parse the association separately in `load_last_validation_detail` from the JSONL directly. But that duplicates parsing.
+
+The cleaner approach: extend `RichValidationEvent` to carry the `git_hash_from`/`git_hash_to` association. But wait — what if a validation event in the wild lacks `git_hash_from`? `parse_rich_validation_events` would set it to empty string, and the lookup would fail → detail = None → cold-start message. That's acceptable graceful degradation, but for old events without the field... all current events have it. OK.
+
+Actually, wait — is there a simpler approach? The validation record already carries hits/surprises which ARE the changed files. The "predicted" list comes from the snapshot. The association by git hash... Alternatively the snapshot `day` matches validation `day` (day 171 → snapshot day 171, day 175 → snapshot day 175). But day association is weaker (multiple snapshots per day). git_hash_from is exact. Let me use git_hash_from.
+
+Let me extend `RichValidationEvent` with `git_hash_from: String`. Then the lookup:
+
+```rust
+let snapshot = snapshots.iter().find(|s| s.git_hash == last.git_hash_from)?;
+let changed: Vec<String> = last.hits.iter().chain(last.surprises.iter()).cloned().collect();
+let (hits, predicted_untouched, touched_unpredicted) = compute_hit_miss_sets(&snapshot.predicted, &changed);
+Some(LastValidationDetail {
+    day: last.day,
+    ts: last.ts.clone(),
+    accuracy_pct: last.accuracy_pct,
+    predicted: snapshot.predicted.clone(),
+    changed,
+    hits,
+    predicted_untouched,
+    touched_unpredicted,
+})
+```
+
+Hmm — but hits from compute_hit_miss_sets is predicted ∩ changed. Since changed = hits ++ surprises from the validation record, predicted ∩ changed == the validation's hits (assuming the snapshot predicted list matches what the validation was scored against). They should be identical, but compute_hit_miss_sets is authoritative set math and the task wants the report to "mark the intersection (hits) vs the miss set". Using the computed sets is more robust if snapshot prediction list and scoring population diverge slightly.
+
+Wait — actually there's a subtlety: the validation's `surprises` list for day 171 includes non-src files like `.arc/risk_snapshots.jsonl`, `CLAUDE.md`, commit messages, etc. (garbage from a botched git log parse). If we include surprises in `changed`, the "Actually changed" list will show those junk entries. Hmm. For the day-175 case: predictions were `src/commands_risk.rs`, `src/commands_risk_accuracy.rs`, etc., and changed was `src/update.rs` (surprise). Showing `src/update.rs` as "actually changed" is exactly the legibility the task wants.
+
+For day 171, the surprises include junk (commit messages, DAY_COUNT). But that's the data — the report shows what the validator actually recorded. The task says: "list the files that actually changed in the validating commits since the snapshot". The validation record IS the source of truth for what changed. I'll include all hits+surprises as "changed". That's honest.
+
+Actually, wait — there's a question about how the detail should relate to the display. The `accuracy_pct` shown in the report is the validation's own accuracy_pct (e.g., 0% for day 175), and hits.len()/changed.len() from the record. Good.
+
+Now — should I filter `changed` to only src/ files? The auto_validate paths filter to src/ files when computing, but the CLI `/risk validate` path (replay) recorded surprises in day 171 like `.arc/risk_snapshots.jsonl` — hmm, actually looking at it, day 171's surprises are weird (commit messages as "files"). That was a legacy recording artifact. For the "legible miss" goal, I'll show the record as-is. It's the truth of what was recorded. Fine.
+
+Now about `RichValidationEvent.git_hash_from` — need to update:
+1. `parse_rich_validation_events` to parse it.
+2. The test at line 4312 constructing `RichValidationEvent { ... }` — add the field.
+3. Any other construction sites — search says only test at 4312 plus creation in parse function. Let me check for others.
+
+Also need `use crate::commands_risk_accuracy::...` re-export additions in commands_risk.rs: `compute_hit_miss_sets, format_last_validation, LastValidationDetail`.
+
+Now the test requirement: "Add a unit test for the hit/miss intersection computation on a synthetic validation record (predicted list vs changed list, assert the hit set, the miss set, and the both-missed case). Do not delete existing tests."
+
+That test goes in `commands_risk_accuracy.rs` `tests` module for `compute_hit_miss_sets` directly. I'll write:
+
+```rust
+#[test]
+fn test_compute_hit_miss_sets_partitions_hits_and_misses() {
+    let predicted = vec!["src/commands_risk.rs", "src/commands_risk_accuracy.rs", "src/watch.rs"];
+    let changed = vec!["src/commands_risk_accuracy.rs", "src/update.rs"];
+    let (hits, predicted_untouched, touched_unpredicted) = compute_hit_miss_sets(&predicted, &changed);
+    assert_eq!(hits, vec!["src/commands_risk_accuracy.rs"]);
+    assert_eq!(predicted_untouched, vec!["src/commands_risk.rs", "src/watch.rs"]);
+    assert_eq!(touched_unpredicted, vec!["src/update.rs"]);
+}
+
+#[test]
+fn test_compute_hit_miss_sets_both_missed_case() {
+    // Disjoint lists — zero hits, everything is a miss.
+    let predicted = vec!["src/a.rs", "src/b.rs"];
+    let changed = vec!["src/c.rs"];
+    let (hits, predicted_untouched, touched_unpredicted) = compute_hit_miss_sets(&predicted, &changed);
+    assert!(hits.is_empty());
+    assert_eq!(predicted_untouched, vec!["src/a.rs", "src/b.rs"]);
+    assert_eq!(touched_unpredicted, vec!["src/c.rs"]);
+}
+```
+
+Wait — but the task explicitly says "for the most recent validation event, list (a) the files the scorer predicted as high-risk, and (b) the files that actually changed in the validating commits since the snapshot". Maybe also add a test for `load_last_validation_detail` in commands_risk.rs to verify the wiring with a synthetic validation + snapshot record. The evaluator complained "no unit test for the hit/miss intersection was added" — the core requirement is the compute test. I'll also add a wiring test in commands_risk.rs for `load_last_validation_detail` — it constructs a synthetic validation JSONL and a synthetic snapshot JSONL, asserts the detail's predicted/changed/hits/misses. That gives end-to-end coverage.
+
+Let me also verify the `handler` flow:
+- `handle_risk_accuracy` currently: computes stats, prints `format_accuracy_report`, then if no data returns, then prints signal breakdown, recent events, learning status.
+- I'll add the last-validation detail section. Where? The task says "in the accuracy report (prediction_accuracy_summary / format_accuracy_report ...)" — the report function is `format_accuracy_report`. But the evaluator note says the block was never rendered. The cleanest: append the detail block right after the accuracy box in `handle_risk_accuracy`. Options:
+
+(a) Put the detail into `format_accuracy_report` — but that function only takes `&AccuracyStats`; the detail needs the raw validation/snapshot content. Changing its signature would ripple to tests (`format_accuracy_report(&stats)` — line 1023 test). I could keep signature the same and append detail separately in the handler.
+
+(b) In `handle_risk_accuracy`, after printing the report (and not returning early when data exists), also print `format_last_validation(load_last_validation_detail(...))`.
+
+But note that `handle_risk_accuracy` returns early `if stats.total_validations == 0`. When there are 0 validations, `format_accuracy_report` already prints the "No prediction accuracy data yet" block with cold-start instructions. If I add the last-validation None message after that, it'd be redundant. So: only render the detail when there is at least one validation. With data present, `load_last_validation_detail` returns Some (if association found) or None (if no git_hash_from match — e.g., legacy events without snapshot). The None case prints "No validation data yet..." which is a bit misleading when there IS validation data but no matching snapshot. Hmm.
+
+Let me reconsider: the None message says "No validation data yet — run /risk snapshot first...". If there are validations but no matching snapshot association, that message is wrong. But that's an edge case; the current data always has associations. Still, I could make the message slightly more generic. Actually the task says: "If a file list is empty (no snapshot/validation data yet), print a clear 'no validation data yet' line instead of an empty block". So the None → "No validation data yet" line is what's asked. But to be safe for the validations-without-snapshot case, I could differentiate: if validations exist but no snapshot match, say something like "no snapshot association for the last validation". Let me keep it simple but accurate — I'll refine the None message to cover both: the existing message covers cold start; for the mismatch case it'd be slightly off but extremely rare. Actually, let me make `load_last_validation_detail` return None only when there's genuinely no usable record (no validations at all OR no matching snapshot). The message "No validation data yet" is acceptable, but let me tweak to "No validation detail available yet..." Hmm, but the task literally asks for a clear "no validation data yet" style line. I'll keep the cold-start message but the wording can mention both possibilities subtly.
+
+Actually — cleaner: in `handle_risk_accuracy`, the early return when `total_validations == 0` already shows the cold-start block from `format_accuracy_report`. So the `format_last_validation(None)` block would only be rendered when validations > 0. In that case if detail is None (no snapshot match), the message "No validation data yet" would be wrong. Let me update `format_last_validation`'s None message to be accurate for both: "No validation evidence yet — the last validation event could not be paired with a snapshot." Hmm, but that's wordy. 
+
+Let me think about what's actually best. I'll write the None branch to say:
+
+```
+── Last Validation ──
+  No validation evidence yet — run /risk snapshot first, then
+  /risk validate (or trigger a watch failure) to record it.
+```
+
+When validations > 0 but no snapshot pairing, this message is slightly misleading but the situation is rare. Given the task's explicit instruction to print a "no validation data yet" line for the empty case, I'll keep the existing message as-is. It's fine.
+
+Now, section header style: existing sections use `\n{BOLD}  Recent Validation Events{RESET}\n`. The `format_last_validation` uses `\n{BOLD}  ── Last Validation — Day {}{RESET}\n`. That's consistent enough with the box style. OK.
+
+Let me now also double check: does `commands_risk_accuracy.rs` currently compile? The evaluator said clippy fails with 4 "never used" errors — meaning `compute_hit_miss_sets`, `format_last_validation`, `LastValidationDetail` (pub but never used... actually pub(crate) struct unused → dead_code warning), and `fmt_file_lines` are dead. Wiring them will fix that.
+
+Now, the re-export in commands_risk.rs line 40-42 needs to add:
+```rust
+pub(crate) use crate::commands_risk_accuracy::{
+    compute_accuracy_stats, compute_hit_miss_sets, compute_per_signal_hits,
+    format_accuracy_report, format_last_validation, AccuracyTrend, LastValidationDetail,
+};
+```
+
+Then in `commands_risk.rs`, add `load_last_validation_detail`. Where? Near `handle_risk_accuracy` (before it). It needs `parse_rich_validation_events` (already in this module), `parse_all_snapshots` (re-exported), `compute_hit_miss_sets` + `LastValidationDetail` (via re-export).
+
+Wait — one concern: `parse_rich_validation_events` is defined at line 1439, and `handle_risk_accuracy` at 1647. Both in the same module, ordering doesn't matter in Rust. Good.
+
+Now let me also make sure `handle_risk_accuracy` gets the detail — modify:
+
+```rust
+    // Section 1: Overall accuracy summary
+    let report = format_accuracy_report(&stats);
+    print!("{report}");
+
+    // If no data, the accuracy report already explains what to do — stop here
+    if stats.total_validations == 0 {
+        return;
+    }
+
+    let snapshot_content = ...  // already loaded
+    let validation_content = ... // already loaded
+```
+
+Wait, the current code loads `snapshot_content` and `validation_content` AFTER the early return (lines 1657-1658). I need to load them before, or just add the detail section after the early return, reading the files again. Cleanest: move the content reads up before the early-return, or add a separate section after recent events. Let me restructure minimally:
+
+```rust
+    let report = format_accuracy_report(&stats);
+    print!("{report}");
+
+    // If no data, the accuracy report already explains what to do — stop here
+    if stats.total_validations == 0 {
+        return;
+    }
+
+    // Section 1b: Last-validation evidence block (predicted vs actually-changed
+    // files, hit/miss sets) — the look at a miss, not just the number.
+    let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+    let last_detail = load_last_validation_detail(&validation_content, &snapshot_content);
+    print!("{}", format_last_validation(last_detail.as_ref()));
+```
+
+But the existing code at lines 1657-1658 re-reads the same files. I could move those reads up to before the early return and reuse. Let me restructure:
+
+```rust
+    let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+
+    // Section 1: Overall accuracy summary
+    let report = format_accuracy_report(&stats);
+    print!("{report}");
+
+    // If no data, the accuracy report already explains what to do — stop here
+    if stats.total_validations == 0 {
+        return;
+    }
+
+    // Section 1b: Last-validation evidence ...
+    let last_detail = load_last_validation_detail(&validation_content, &snapshot_content);
+    print!("{}", format_last_validation(last_detail.as_ref()));
+
+    // Section 2: Per-signal breakdown
+    ... (uses snapshot_content, validation_content — now in scope)
+```
+
+That's a minimal edit. 
+
+Now `load_last_validation_detail`:
+
+```rust
+/// Gather the "last validation" evidence block for the accuracy report:
+/// the scorer's high-risk predictions from the snapshot a validation was
+/// validated against, the files that actually changed in the validating
+/// commits, and the hit/miss partition.
+///
+/// Reuses the existing JSONL parsers (`parse_rich_validation_events`,
+/// `parse_all_snapshots`) — no new file formats. The snapshot association is
+/// the same key the harness dedups on: the validation's `git_hash_from` must
+/// match a snapshot's `git_hash`. Returns `None` when there is no usable
+/// record yet (cold start) or the last event can't be paired with a snapshot.
+fn load_last_validation_detail(
+    validation_content: &str,
+    snapshot_content: &str,
+) -> Option<LastValidationDetail> {
+    let last = parse_rich_validation_events(validation_content).last()?;
+    if last.git_hash_from.is_empty() {
+        return None; // legacy event without an association — nothing to pair
+    }
+    let snapshot = parse_all_snapshots(snapshot_content)
+        .into_iter()
+        .find(|s| s.git_hash == last.git_hash_from)?;
+    let changed: Vec<String> = last
+        .hits
+        .iter()
+        .chain(last.surprises.iter())
+        .cloned()
+        .collect();
+    let (hits, predicted_untouched, touched_unpredicted) =
+        compute_hit_miss_sets(&snapshot.predicted, &changed);
+    Some(LastValidationDetail {
+        day: last.day,
+        ts: last.ts.clone(),
+        accuracy_pct: last.accuracy_pct,
+        predicted: snapshot.predicted.clone(),
+        changed: changed.clone(),
+        hits,
+        predicted_untouched,
+        touched_unpredicted,
+    })
+}
+```
+
+Hmm — day here is the validation's day. The header says "Last Validation — Day N". Good.
+
+Now extend `RichValidationEvent`:
+
+```rust
+struct RichValidationEvent {
+    ts: String,
+    day: u32,
+    hits: Vec<String>,
+    surprises: Vec<String>,
+    accuracy_pct: f64,
+    /// Snapshot git hash this validation was validated from (the association
+    /// key used to pair it with its predictions). Empty on legacy events.
+    git_hash_from: String,
+}
+```
+
+And in `parse_rich_validation_events`:
+```rust
+        let git_hash_from = val["git_hash_from"].as_str().unwrap_or("").to_string();
+        ...
+        events.push(RichValidationEvent {
+            ts,
+            day,
+            hits,
+            surprises,
+            accuracy_pct,
+            git_hash_from,
+        });
+```
+
+And update the test at line 4312:
+```rust
+        let events = vec![RichValidationEvent {
+            ts: "2026-08-1✓0Z".to_string(),
+            day: 164,
+            hits: vec!["src/foo.rs".to_string()],
+            surprises: vec![],
+            accuracy_pct: 100.0,
+            git_hash_from: String::new(),
+        }];
+```
+
+Let me check if there are other constructions of RichValidationEvent — grep. Only line 4312 (test) plus parse fn. But wait, there might be `format_recent_events` tests that construct it. Let me grep for `RichValidationEvent {`.
+
+Now the "no validation data yet" message in `format_last_validation` — check the format string. It has `\x20` escapes inside a `format!` with continuation lines. Let me trace:
+
+```rust
+return format!(
+    "\n{BOLD}  ── Last Validation ──{RESET}\n\
+     \x20 {DIM}No validation data yet — run {RESET}/risk snapshot{RESET}{DIM} first, then\n\
+     \x20 {DIM}trigger a watch failure (or {RESET}/risk validate{RESET}{DIM}) to record it.{RESET}\n"
+);
+```
+
+Wait, there's no trailing `\` on the first line `\n{BOLD}...{RESET}\n\` — yes there is (`{RESET}\n\`). Line 2: `     \x20 {DIM}No...then\n\`. Hmm — Rust string continuation with `\` at end of line strips the newline AND leading whitespace of the next line. So `\n\` at end of line 1 then line 2 starts with spaces then `\x20`. After a line-continuation backslash, leading whitespace on the next line is stripped, so `\x20` renders as a single space. Let me verify this renders sensibly: 
+
+Line1: `\n{BOLD}  ── Last Validation ──{RESET}\n` (after `\` continuation, the leading whitespace of line 2 stripped)
+Line2: `\x20 {DIM}No validation data yet — run ...` → renders as ` No validation data yet — run /risk snapshot first, then`
+Line3: `\x20 {DIM}trigger a watch failure (or /risk validate) to record it.`
+
+So output:
+```
+
+── Last Validation ──
+ No validation data yet — run /risk snapshot first, then
+ trigger a watch failure (or /risk validate) to record it.
+```
+
+Good.
+
+Now, the `format_last_validation` Some branch. Let me re-check the code (lines 405-463) once more for correctness. The header: `\n{BOLD}  ── Last Validation — Day {}{RESET}\n`. Then accuracy line. Then predicted, changed. Then hits. Then misses. Then ts. Looks complete and consistent.
+
+One issue: `out.push_str(&format!("  {BOLD}Predicted high-risk{RESET} ({}):{}", d.predicted.len(), fmt_file_lines(&d.predicted, 8)));` — `fmt_file_lines` returns a string starting with a space `" {DIM}— none —{RESET}\n"` for empty, or `"      • {p}\n"` for each. So "Predicted high-risk (10):      • src/...". OK.
+
+Now — the unit test for `compute_hit_miss_sets` in `commands_risk_accuracy.rs`. There's already a `tests` module. I'll add the test there. Also the wiring test in commands_risk.rs using synthetic content — the module already has `snapshot_jsonl` helper in its tests. I'll add a validation JSONL builder inline.
+
+Let me also double-check the `format` imports needed in `commands_risk.rs` — it has `use crate::format::*;` so BOLD/RESET/DIM etc. are available. The `print!` calls use those.
+
+Now write the edits.
+
+First, edit `commands_risk_accuracy.rs`:
+- Add test(s) at the end of the existing tests module.
+
+Second, edit `commands_risk.rs`:
+- Re-export additions (line 40-42).
+- Extend `RichValidationEvent` + parse fn + test construction.
+- Add `load_last_validation_detail` function.
+- Wire into `handle_risk_accuracy`.
+- Add wiring test.
+
+Let me check whether `LastValidationDetail` fields are all `pub(crate)` — yes (lines 339-356).
+
+Let me now make the edits. First re-export in commands_risk.rs:
+
+```rust
+pub(crate) use crate::commands_risk_accuracy::{
+    compute_accuracy_stats, compute_hit_miss_sets, compute_per_signal_hits,
+    format_accuracy_report, format_last_validation, AccuracyTrend, LastValidationDetail,
+};
+```
+
+Then RichValidationEvent change.
+
+Then load_last_validation_detail — place it right before `handle_risk_accuracy` (before line 1646 `/// Handle the /risk accuracy subcommand.`).
+
+Then modify handle_risk_accuracy.
+
+Let me look at the exact current text around 1646-1675 to edit precisely.
+────────────────────────────────────────────────────────────────────────────────
+Now I have the full picture. The plan:
+
+1. **`commands_risk_accuracy.rs`**: add unit tests for `compute_hit_miss_sets` (already-written but unused code gets wired).
+2. **`commands_risk.rs`**: 
+   • re-export the new symbols,
+   • extend `RichValidationEvent with git_hash_from` (the snapshot-association key),
+   • add `load_last_validation_detail` (reuses `parse_rich_validation_events + parse_all_snapshots`),
+   • wire it into `handle_risk_accuracy`,
+   • add a wiring test.
+
+Let me check all RichValidationEvent construction sites:
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "RichValidationEvent {" sr…  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:36..51 ✓ (1ms)
+ ✓ (4ms)
+  2 tools completed in 1.6s (2 ✓)
+
+Now I have everything. Let me implement. First, re-export the new symbols in `commands_risk.rs`:
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (3 → 4 lines)
+    pub(crate) use crate::commands_risk_accuracy::{
+  -     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
+  +     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report,
+  +     format_last_validation, AccuracyTrend, LastValidationDetail,
+    };
+ ✓ (1ms)
+    pub(crate) use crate::commands_risk_accuracy::{
+  -     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report, AccuracyTrend,
+  +     compute_accuracy_stats, compute_per_signal_hits, format_accuracy_report,
+  +     format_last_validation, AccuracyTrend, LastValidationDetail,
+    };
+
+Now add the `git_hash_from field to RichValidationEvent` and populate it in the parser:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (51 → 57 lines)
+        hits: Vec<String>,
+        surprises: Vec<String>,
+        accuracy_pct: f64,
+  +     /// The snapshot association key (`git_hash_from` in the JSONL) — used to
+  +     /// look up the scorer's predicted files from the matching snapshot when
+  +     /// building the last-validation evidence block.
+  +     git_hash_from: String,
+    }
+    
+    /// Parse rich validation events from JSONL content (preserves hit/surprise file lists).
+  ···
+                })
+                .unwrap_or_default();
+            let accuracy_pct = val["accuracy_pct"].as_f64().unwrap_or(0.0);
+  +         let git_hash_from = val["git_hash_from"].as_str().unwrap_or("").to_string();
+    
+            events.push(RichValidationEvent {
+                ts,
+  ···
+                hits,
+  ... (6 more lines)
+ ✓ (1ms)
+        hits: Vec<String>,
+        surprises: Vec<String>,
+        accuracy_pct: f64,
+  +     /// The snapshot association key (`git_hash_from` in the JSONL) — used to
+  +     /// look up the scorer's predicted files from the matching snapshot when
+  +     /// building the last-validation evidence block.
+  +     git_hash_from: String,
+    }
+  ... (13 more lines)
+
+Now fix the test construction site that needs the new field:
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (7 → 8 lines)
+                hits: vec!["src/foo.rs".to_string()],
+                surprises: vec![],
+                accuracy_pct: 100.0,
+  +             git_hash_from: "snap000".to_string(),
+            }];
+ ✓ (2ms)
+                hits: vec!["src/foo.rs".to_string()],
+                surprises: vec![],
+                accuracy_pct: 100.0,
+  +             git_hash_from: "snap000".to_string(),
+            }];
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now add the `load_last_validation_detail` function. Place it right after `format_recent_events` (before `format_learning_status`) or near `parse_rich_validation_events`. Let me add it right after `parse_rich_validation_events` definition. Let me find the exact end of parse_rich_validation_events now.
+────────────────────────────────────────────────────────────────────────────────
+Now add the data-gathering helper. Let me place it right after `parse_rich_validation_events`:
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn parse_rich_validation_… ✓ (4ms)
+
+
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (1 → 57 lines)
+  + /// Build the evidence block data for the **most recent** validation event:
+  + /// the scorer's predicted high-risk files (from the snapshot this event was
+  + /// validated against) vs the files that actually changed, partitioned into
+  + /// hits and the two miss halves.
+  + ///
+  + /// Reuses the existing parsers — `parse_rich_validation_events` for the
+  + /// validation record (which preserves per-file `hits`/`surprises`) and
+  + /// `parse_all_snapshots` for the snapshot's `predicted` list — rather than
+  + /// inventing a new file format. Association key: the validation's
+  + /// `git_hash_from` matches the snapshot's `git_hash` (the snapshot recorded
+  + /// at the hash the validation span starts from).
+  + ///
+  + /// `None` when there is no usable validation record (empty ledger, unparseable
+  + /// line, or no snapshot matching the association key) — the caller renders a
+  + /// cold-start line instead of an empty block.
+  + fn load_last_validation_detail(
+  +     validation_content: &str,
+  +     snapshot_content: &str,
+  + ) -> Option<LastValidationDetail> {
+  +     let last = parse_rich_validation_events(validation_content).pop()?;
+  ... (37 more lines)
+ ✓ (1ms)
+  + /// Build the evidence block data for the **most recent** validation event:
+  + /// the scorer's predicted high-risk files (from the snapshot this event was
+  + /// validated against) vs the files that actually changed, partitioned into
+  + /// hits and the two miss halves.
+  + ///
+  + /// Reuses the existing parsers — `parse_rich_validation_events` for the
+  + /// validation record (which preserves per-file `hits`/`surprises`) and
+  + /// `parse_all_snapshots` for the snapshot's `predicted` list — rather than
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now wire it into `handle_risk_accuracy`. Let me look at the current structure again:
+
+```rust
+fn handle_risk_accuracy() {
+    let events = load_validation_history_from(std::path::Path::new(RISK_VALIDATION_PATH));
+    let mut stats = compute_accuracy_stats(&events);
+
+    // per-signal...
+    let snapshot_content = std::fs::read_to_string(RISK_SNAPSHOT_PATH).unwrap_or_default();
+    let validation_content = std::fs::read_to_string(RISK_VALIDATION_PATH).unwrap_or_default();
+    ...
+    // Section 1: Overall accuracy summary
+    let report = format_accuracy_report(&stats);
+    print!("{report}");
+
+    // If no data, the accuracy report already explains what to do — stop here
+    if stats.total_validations == 0 {
+        return;
+    }
+
+    // Section 2: Per-signal breakdown
+    ...
+```
+
+I want to insert the "Last Validation" evidence block. The task says: "add a 'last validation' detail block: for the most recent validation event, list (a) the files the scorer predicted as high-risk, and (b) the files that actually changed in the validating commits since the snapshot — and mark the intersection (hits) vs the miss set".
+
+Where to place it? The natural spot: immediately after Section 1 (overall accuracy summary), before the per-signal breakdown — it's the evidence behind the number. And when `stats.total_validations == 0`, we should still show the cold-start line from `format_last_validation(None)` — the task notes: "If a file list is empty (no snapshot/validation data yet), print a clear 'no validation data yet' line instead of an empty block — the cold-start state is itself a fact worth showing."
+
+Currently the code returns early when total_validations == 0 because format_accuracy_report already explains. But now we can add the "no validation data yet" line too. Actually `format_accuracy_report` returns the "No prediction accuracy data yet" message. Let me add the last-validation block right after section 1, regardless of validation count — `format_last_validation(None)` renders the cold-start line.
+
+The snapshot_content and validation_content are read unconditionally already. And load_last_validation_detail takes both. Since validation_content/snapshot_content are already read before section 1 (for per-signal), I can compute the detail right after reading them.
+
+Order of reading: let me restructure minimally. Let me re-read the current handle_risk_accuracy function as it stands (it shifted lines after my edits).
+────────────────────────────────────────────────────────────────────────────────
+Now wire it into `handle_risk_accuracy`. Let me re-read the current state of that function:
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "fn handle_risk_accuracy" … ✓ (3ms)
+
+
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1710..1765 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I need to wire the last-validation block into `handle_risk_accuracy`. The task says: "In the accuracy report (`prediction_accuracy_summary` / `format_accuracy_report` in src/commands_risk_accuracy.rs), add a 'last validation' detail block". But the data gathering needs the raw JSONL content, which `format_accuracy_report(stats)` doesn't have. The wiring note says: "The wiring stays in src/commands_risk.rs; keep the report pure/formatting-only."
+
+So the pure formatting fn `format_last_validation(detail: Option<&LastValidationDetail>)` lives in commands_risk_accuracy.rs, and the data gathering `load_last_validation_detail` lives in commands_risk.rs, wired into `handle_risk_accuracy`. That matches exactly what the previous commit's doc comments already promised ("gathered by `commands_risk::load_last_validation_detail` which reuses the existing JSONL parsers").
+
+Where to place the block in the output? The task says "In the accuracy report... add a 'last validation' detail block". The natural spot is right after Section 1 (overall accuracy summary) — that's the accuracy report itself. Since the detail block is about the accuracy evidence, adding it right after the box in the same print is good. But since `format_accuracy_report` only takes stats, and the wiring lives in commands_risk.rs, I'll add the call after the accuracy report print, e.g., right after "Section 1: Overall accuracy summary" print, before the per-signal breakdown. Actually the block is called "Last Validation" and contains the miss set — best placed immediately after the accuracy box so the user sees number → evidence together.
+
+Let me add:
+```rust
+    // Section 1b: Last-validation evidence block — the miss set behind the
+    // number (predicted vs actually-changed files). Rendered even when no
+    // validations exist yet (cold-start line) — absence of data is itself a fact.
+    let last_detail = load_last_validation_detail(&validation_content, &snapshot_content);
+    let last_section = format_last_validation(last_detail.as_ref());
+    print!("{last_section}");
+```
+
+Since handle_risk_accuracy early-returns when `stats.total_validations == 0`, the cold-start line in format_last_validation(None) would never be shown... Actually wait — after the report prints the "No prediction accuracy data yet" box and returns early, we never reach section 1b. The task note says: "If a file list is empty (no snapshot/validation data yet), print a clear 'no validation data yet' line instead of an empty block — the cold-start state is itself a fact worth showing."
+
+The cold-start case: when there are no validations, `format_accuracy_report` already shows the "No prediction accuracy data yet" block, and handle_risk_accuracy returns early. So the "no validation data yet" line from format_last_validation(None) would only appear when there ARE validations but the last one can't be associated with a snapshot (e.g. missing snapshot / empty predicted / empty changed). That's still a useful case (weird ledger state) — and the None-branch is exercised when validations exist but the association fails.
+
+Hmm, but should the cold-start line show even when there are zero validations? The early return means not. Let me reconsider: maybe move the last-validation block BEFORE the early return so it shows even with no data. Actually the cleanest: render the last-validation block right after the accuracy box. When total_validations == 0, load_last_validation_detail returns None (empty ledger → parse gives empty → pop() → None), so format_last_validation(None) shows the cold-start line. But then the early return would skip it.
+
+Option: move the early return AFTER the last-validation print, so:
+```
+report → print
+last section → print   (covers cold-start and evidence blocks)
+if stats.total_validations == 0 { return; }
+per-signal → recent → learning
+```
+That way the cold-start line always shows, which matches the task note ("the cold-start state is itself a fact worth showing"). Let me restructure that way.
+
+Actually wait — format_accuracy_report itself, for the zero-validations case, already prints a detailed "No prediction accuracy data yet" message covering what to do. Adding another "No validation data yet — run /risk snapshot first..." line after it is slightly redundant but consistent with the note that cold-start is worth showing, and the format_last_validation(None) branch is shared with the "validations exist but can't associate" case. I'll put it after the accuracy box and move the early return after it.
+
+Let me write it.
+────────────────────────────────────────────────────────────────────────────────
+Now wire in the last-validation block into `handle_risk_accuracy`, placing it right after the accuracy box (before the early return so the cold-start line shows too):
+  ╭─ Turn 24 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs (8 → 18 lines)
+    // Section 1: Overall accuracy summary
+        let report = format_accuracy_report(&stats);
+        print!("{report}");
+  + 
+  +     // Section 1b: Last-validation evidence block — the miss set behind the
+  +     // accuracy number (predicted vs actually-changed files, with hits). The
+  +     // data is gathered here (reusing the existing JSONL parsers); the render
+  +     // stays pure/formatting-only in the accuracy module. When no validation
+  +     // or snapshot data exists yet, this prints the cold-start line — absence
+  +     // of evidence is itself a fact worth showing.
+  +     let last_detail = load_last_validation_detail(&validation_content, &snapshot_content);
+  +     let last_section = format_last_validation(last_detail.as_ref());
+  +     print!("{last_section}");
+    
+        // If no data, the accuracy report already explains what to do — stop here
+        if stats.total_validations == 0 {
+ ✓ (2ms)
+    // Section 1: Overall accuracy summary
+        let report = format_accuracy_report(&stats);
+        print!("{report}");
+  + 
+  +     // Section 1b: Last-validation evidence block — the miss set behind the
+  +     // accuracy number (predicted vs actually-changed files, with hits). The
+  +     // data is gathered here (reusing the existing JSONL parsers); the render
+  +     // stays pure/formatting-only in the accuracy module. When no validation
+  ... (8 more lines)
+
+
