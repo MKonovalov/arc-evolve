@@ -1,0 +1,1787 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by reading the two files I need to understand: `src/commands_risk_snapshots.rs` and `src/commands_risk_accuracy.rs`. Let me also check the current state of the risk meter.
+  ▶ $ cat .arc/risk_meter.json 2>/dev/null; echo "---"; wc -l src/commands_risk_snapsh…  ▶ search 'fn compute_risk_meter|fn format_risk_meter_line|fn write_ris…' in src/commands_risk_snapshots.rs ✓ (2ms)
+ ✓ (6ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 745ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The search found nothing in commands_risk_snapshots.rs? Let me check the actual file structure. Wait — the repository structure said `commands_risk_snapshots.rs` has `struct RiskMeter`, `fn compute_risk_meter`, etc. Let me grep more broadly.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "RiskMeter\|compute_risk_meter\|format_risk_meter\|write_risk_meter\|cal… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:480..600 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the accuracy module to understand what's already there for the discriminative breakage-rate signal.
+────────────────────────────────────────────────────────────────────────────────
+Now let me read `commands_risk_accuracy.rs` to see what exists for the discriminative breakage-rate signal.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_accuracy.rs ✓ (5ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_accuracy.rs:100..340 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I see what already exists. The accuracy report already has:
+- `lift` computation in `compute_accuracy_stats` with `flagged_rate / baseline_rate`
+- Cold-start gating `pairs >= 5` for the firm lift
+
+But the task asks for a **calibration verdict** in the meter line path (`format_risk_meter_line`), describing:
+- Cold-start path (`pairs < 5`): `cold start: 3/5 paired predictions — accumulating`
+- Calibrated path (`pairs >= 5`): compute pooled discriminative readout:
+  - flagged breakage rate = `sum(scored_broke) / sum(total_scored)`
+  - unflagged breakage rate = `sum(surprises.len()) / sum(total_scored)` — hmm, the task says "unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". Let me check what `surprises` means. Let me look at ValidationEvent struct.
+
+Wait — the task says:
+- flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)
+
+Hmm, that's a slightly odd formulation — `surprises.len()` summed across events would be a per-event count of "surprise" files (files not flagged that broke), but dividing by `sum(total_scored)`? Let me look at the `ValidationEvent` struct to see what fields exist. Let me look at `parse_validation_events` and the ValidationEvent struct.
+────────────────────────────────────────────────────────────────────────────────
+I have a good picture of the accuracy module. Now let me look at the `ValidationEvent struct and parse_validation_events` to understand the fields available.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:330..460 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the data model. Key insight:
+
+- `ValidationEvent` has: `day`, `hit_count`, `total_changed`, `accuracy_pct`, `predicted_count: Option<usize>`, `total_scored: Option<usize>`, `scored_broke: Option<usize>`.
+
+The task says:
+
+**Calibrated path** (`pairs >= target_pairs`): compute the pooled discriminative readout across all validation events:
+- flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)
+
+Wait, that's interesting. The task text says "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)". Hmm, but `scored_broke` is "Count of scored source files that actually broke (hits + scored surprises)". So the task defines flagged breakage rate as `sum(scored_broke) / sum(total_scored)`. But wait, that's actually the *baseline* breakage rate in `compute_accuracy_stats` — the code comment says:
+
+```
+//   flagged_rate = sum(hit_count) / sum(predicted_count)
+//   baseline_rate = sum(scored_broke) / sum(total_scored)
+//   lift = flagged_rate / baseline_rate
+```
+
+Hmm. But the task explicitly states: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". Hmm, but `surprises.len()` and `total_scored`... wait, `scored_broke` = hits + scored surprises. The task's "unflagged breakage rate" = `sum(surprises.len()) / sum(total_scored)`.
+
+Hmm, wait. Let me re-read the task:
+
+"compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Hmm, this is a bit odd. Let me think about what's actually the right semantics given the existing fields.
+
+- `predicted_count` = the flagged population: how many files were predicted high-risk.
+- `total_scored` = total number of scored source files (the whole population).
+- `scored_broke` = count of scored source files that actually broke (hits + scored surprises).
+- `hit_count` = number of hits (files that broke AND were predicted).
+- `surprises` = files that broke but were NOT predicted (unflagged breakage).
+
+So the "flagged breakage rate" should be the rate at which *flagged* files break. Since flagged population = `predicted_count`, flagged breakage rate would be `hit_count / predicted_count` (files that broke and were flagged, divided by all flagged files). That's what the accuracy module uses: `flagged_rate = sum(hit_count) / sum(predicted_count)`.
+
+The "unflagged breakage rate" would be surprises / unflagged population. Unflagged population = `total_scored - predicted_count`. But the task says the denominator is `sum(total_scored)` for both. Hmm.
+
+Wait — the task text literally says:
+
+- flagged breakage rate: `sum(scored_broke) / sum(total_scored)`
+- unflagged breakage rate: `sum(surprises.len()) / sum(total_scored)`
+
+But `scored_broke` includes surprises (scored_broke = hits + scored surprises). So `sum(scored_broke)` = hits + surprises total, which is the total breakage count (within the scored population). And `sum(surprises.len())` is only the surprises.
+
+Hmm, that would make "flagged breakage rate" = total breakage rate, which isn't the flagged breakage rate at all. This looks like the task author may have mislabeled. But the task says "Do NOT duplicate existing computation — extend or reframe it."
+
+Let me think about what makes physical sense given the existing fields:
+
+- `scored_broke` = count of scored source files that broke = hits + scored surprises.
+- `total_scored` = total scored files.
+
+In the existing code, `baseline_rate = sum(scored_broke) / sum(total_scored)` is the *baseline* breakage rate over all scored files. The lift is `flagged_rate / baseline_rate` where `flagged_rate = sum(hit_count) / sum(predicted_count)`.
+
+The task wants a "discriminative readout": do flagged files break more often than unflagged ones?
+
+- flagged breakage rate = hits / predicted_count (files flagged AND broke / all flagged)
+- unflagged breakage rate = (scored_broke - hits) / (total_scored - predicted_count) (files that broke without being flagged / all unflagged)
+
+That's the truly correct discriminative comparison, using the fields available. The task's formula `sum(scored_broke)/sum(total_scored)` is the *baseline* rate (which includes both flagged and unflagged), and `sum(surprises)/sum(total_scored)` isn't available in ValidationEvent (surprises per-event isn't stored... wait, actually it is: `total_changed = hits + surprises`, so surprises = total_changed - hit_count). Hmm.
+
+Actually, `ValidationEvent` doesn't have a `surprises` field directly, but `total_changed = hits + surprises`, so surprises per event = `total_changed - hit_count`. But `total_changed` is the total number of changed files in the watch failure — which may include files NOT in the scored population. The task says "sum(surprises.len())". The parsed event computes `total_changed = hits + surprises` where surprises... wait in `parse_validation_events`, `hits` = len of `hits` array, `surprises` = len of `surprises` array, `total_changed = hits + surprises`. So surprises per event = total_changed - hit_count.
+
+OK here's my decision: The task is somewhat loosely specified on the exact denominators, but the *intent* is clear and grounded in what the existing accuracy module already computes:
+
+1. Cold-start path: `< 5 pairs` → no accuracy claims, honest status line.
+2. Calibrated path: `>= 5 pairs` → pooled discriminative readout: flagged breakage rate vs unflagged breakage rate, plus pooled accuracy, and a plain-language verdict "perceives / does not yet perceive churn".
+
+The existing `compute_accuracy_stats` already computes `overall_lift = flagged_rate / baseline_rate`. But the task asks for a *verdict line* that's wired into the meter line and stated in plain language with both rates shown. The lift itself is a ratio; the verdict needs the two rates.
+
+I think the cleanest approach that avoids duplicating computation:
+
+- Write a pure `calibration_verdict(pairs, validations) -> CalibrationVerdict` function in `commands_risk_snapshots.rs` that:
+  - Cold-start: pairs < target → status line, no accuracy.
+  - Calibrated: pools over validation events that carry the lift fields (predicted_count, total_scored, scored_broke), computing:
+    - flagged_rate = sum(hit_count) / sum(predicted_count)
+    - unflagged_rate = sum(scored_broke - hit_count) / sum(total_scored - predicted_count)  — with guards for zero denominators
+    - pooled accuracy = sum(hit_count) / sum(total_changed)? Or overall_hit_rate_pct? Hmm "pooled accuracy".
+    
+Actually wait, I should be careful. Let me reconsider the exact formulas in the task:
+
+"flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)"
+
+Hmm. Read again literally. `scored_broke` per event... in `parse_validation_events`, what is `scored_broke`? Let me check how it's written in `write_validation_event`. Let me look at lines around 250-340 to see how scored_broke is computed at write time.
+
+Actually the comment at line 389 says: "Count of scored source files that actually broke (hits + scored surprises)."
+
+So `scored_broke` = hits + scored surprises, where "scored surprises" = surprises that were in the scored population. `total_scored` = all_ranked.len().
+
+So the task's formula "flagged breakage rate = sum(scored_broke)/sum(total_scored)" is actually the *overall* breakage rate, and "unflagged breakage rate = sum(surprises.len())/sum(total_scored)" is the surprise rate.
+
+Hmm wait, but that's weird — the task labels sum(scored_broke)/sum(total_scored) as "flagged breakage rate" when in the accuracy module this exact formula is labeled `baseline_rate`. 
+
+I wonder if the task author (my past self / the planner) meant:
+
+- flagged breakage rate = sum(hit_count) / sum(predicted_count)  — the rate at which FLAGGED files broke
+- unflagged = sum(scored_broke - hit_count) / sum(total_scored - predicted_count) — the rate at which UNFLAGGED files broke
+
+And then the verdict "flagged files broke at X% vs unflagged Y%" would be a genuinely discriminative comparison. That matches the milestone language: "files the scorer flagged as high-risk actually broke more often than unflagged ones."
+
+The exact formula in the task might just be loosely written. But the *requirement* is precise: "flagged breakage rate (X) vs unflagged breakage rate (Y)" and a verdict "flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn". And "The negative case (flagged files did NOT break more often) must be stated just as plainly."
+
+I'll implement the *correct* discriminative semantics with the fields that exist:
+
+- `flagged_broke` = sum over lift-carrying events of hit_count (files that broke AND were flagged)
+- `flagged_total` = sum of predicted_count (the flagged population)
+- `unflagged_broke` = sum of (scored_broke - hit_count) where scored_broke >= hit_count (files that broke but weren't flagged, within scored population)
+- `unflagged_total` = sum of (total_scored - predicted_count) where total_scored >= predicted_count (unflagged population)
+- `pooled_accuracy` = sum(hit_count) / sum(total_changed) over all events — hmm, but total_changed may include non-scored surprises. Actually the accuracy_pct per event is already there; pooling over events could be done via sum(hits)/sum(total_changed) to be faithful to a "pooled" (not averaged) accuracy.
+
+Actually, wait. Let me look again — the existing `compute_accuracy_stats` already computes:
+- `overall_hit_rate_pct` = total_hits / total_changed — the pooled accuracy.
+- `overall_lift` = flagged_rate / baseline_rate with flagged_rate = hit/predicted, baseline_rate = scored_broke/total_scored.
+
+The task says: "Do NOT duplicate existing computation — extend or reframe it. If the verdict line already fully exists in the accuracy report, this task reduces to wiring it into the meter line (step 3) and the tests (step 4)."
+
+So the accuracy module already offers `overall_lift`, `overall_hit_rate_pct`, `lift_events_used`. The verdict line does NOT fully exist — there's a lift ratio but no plain-language verdict with both rates and the perceives/does-not-perceive judgment.
+
+The cleanest design: add a pure function `calibration_verdict` that takes the meter + validation events and returns a verdict. Rather than duplicating the lift math, it can compute the two rates directly (they're simple divisions over the same fields). But to avoid duplication, I could reuse `compute_accuracy_stats`'s sums... but those aren't exposed. 
+
+Given the task explicitly says "compute the pooled discriminative readout... flagged breakage rate (sum(scored_broke) / sum(total_scored)) vs unflagged breakage rate (sum(surprises.len()) / sum(total_scored)), plus pooled accuracy", and step 2 says to add a pure function in commands_risk_snapshots.rs where RiskMeter lives...
+
+Hmm. Let me be pragmatic and design it well:
+
+**Where**: `commands_risk_snapshots.rs` — because that's where `RiskMeter`, `compute_risk_meter`, `format_risk_meter_line` live, and where the meter line render happens. It also already imports... let me check what commands_risk_accuracy re-exports. `commands_risk.rs` re-exports the accuracy module. Does `commands_risk_snapshots.rs` use anything from accuracy? The RiskMeter docs mention "per the existing lift-carrying semantics in compute_accuracy_stats". Let me check the module imports.
+
+Actually, a cleaner architecture: put the *verdict computation* in `commands_risk_accuracy.rs` (which already has `compute_accuracy_stats` and the lift math — the "discriminative readout" logic lives there), and put the *verdict struct + rendering* where it's used. Hmm, but then there'd be a circular import issue: `commands_risk_accuracy.rs` imports `ValidationEvent` from `commands_risk_snapshots.rs`. If the verdict function lives in accuracy and takes `&[ValidationEvent]` + target_pairs, that's fine — no cycle.
+
+But the meter line (`format_risk_meter_line`) lives in snapshots. To wire the verdict into the meter line, snapshots needs to call the verdict function from accuracy. Then snapshots imports from accuracy, and accuracy imports ValidationEvent from snapshots → **circular import**. Rust modules within the same crate CAN have circular imports (unlike crates) — `use crate::commands_risk_accuracy::...` in snapshots and `use crate::commands_risk_snapshots::ValidationEvent` in accuracy would compile fine within the same crate. But it's ugly.
+
+Cleaner: keep the pure verdict function in `commands_risk_snapshots.rs` (where RiskMeter lives and where the task suggests it first: "in commands_risk_snapshots.rs (where RiskMeter, compute_risk_meter, and format_risk_meter_line live) or commands_risk_accuracy.rs"). Since the verdict takes `(pairs, &[ValidationEvent])` and the module already owns `ValidationEvent`, `RISK_METER_TARGET_PAIRS`, and the meter — putting it in snapshots is natural and avoids any import churn. The accuracy module's lift math stays untouched (we're not duplicating — the verdict is a *rendering/interpretation* layer, the accuracy report keeps its own lift display).
+
+Let me design:
+
+```rust
+/// Plain-language calibration verdict for the risk sense organ — the dream's
+/// "does the umwelt correspond to the territory" answer.
+pub(crate) struct CalibrationVerdict {
+    /// true when accumulated pairs have reached the target (calibrated reading).
+    pub(crate) calibrated: bool,
+    /// Raw verdict line with no color codes (for files/tests).
+    pub(crate) line: String,
+}
+
+/// Interpret pooled prediction-outcome pairs into a one-line, plain-language
+/// verdict. Cold start (< target pairs): honest status line, NO accuracy
+/// claims. Calibrated (>= target pairs): pooled flagged vs unflagged breakage
+/// rates plus pooled accuracy, and a blunt "perceives / does not yet perceive"
+/// judgment.
+pub(crate) fn calibration_verdict(
+    pairs: u64,
+    target_pairs: u64,
+    events: &[ValidationEvent],
+) -> CalibrationVerdict {
+    if pairs < target_pairs {
+        return CalibrationVerdict {
+            calibrated: false,
+            line: format!("cold start: {pairs}/{target_pairs} paired predictions — accumulating"),
+        };
+    }
+
+    // Pooled discriminative readout over events carrying the lift fields.
+    let mut flagged_broke = 0usize; // hits: flagged files that broke
+    let mut flagged_total = 0usize; // predicted_count: the flagged population
+    let mut unflagged_broke = 0usize; // scored surprise count
+    let mut unflagged_total = 0usize; // total_scored - predicted_count
+    let mut change_total = 0usize; // total_changed (pooled accuracy denominator)
+    for e in events {
+        change_total += e.total_changed;
+        if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+            (e.predicted_count, e.total_scored, e.scored_broke)
+        {
+            flagged_broke += e.hit_count;
+            flagged_total += pred;
+            let surprises = scored_broke.saturating_sub(e.hit_count);
+            unflagged_broke += surprises;
+            unflagged_total += total_scored.saturating_sub(pred);
+        }
+    }
+
+    let flagged_rate = if flagged_total > 0 { flagged_broke as f64 / flagged_total as f64 } else { 0.0 };
+    let unflagged_rate = if unflagged_total > 0 { unflagged_broke as f64 / unflagged_total as f64 } else { 0.0 };
+    let pooled_accuracy = if change_total > 0 { flagged_broke as f64 / change_total as f64 } else { 0.0 };
+    ...
+    let verdict = if flagged_total > 0 && unflagged_total > 0 && flagged_rate > unflagged_rate {
+        "perceives"
+    } else {
+        "does not yet perceive"
+    };
+    ...render...
+}
+```
+
+Wait, but hmm. The task explicitly writes:
+
+"flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Hold on. Let me re-read this really carefully, because I should not invent my own semantics that contradict the task.
+
+"compute the pooled discriminative readout across all validation events:
+- flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)
+- vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Hmm. `sum(scored_broke) / sum(total_scored)`. Since scored_broke = hits + scored surprises, this is the OVERALL breakage rate among scored files. The task calls it "flagged breakage rate" — but that's the same as the existing `baseline_rate` in compute_accuracy_stats. And `sum(surprises.len()) / sum(total_scored)` — the surprises rate among scored files.
+
+Wait, maybe the task intends: "flagged breakage" = the *whole* scored population's breakage (because the scorer flagged the whole ranked set? no...). Actually maybe the planner wrote it loosely, meaning:
+
+- flagged rate: rate among the scored population that got predicted-then-broke... 
+
+Hmm, honestly there are two plausible readings. But there's a third data point: `scored_broke` in the JSONL is "hits + scored surprises" — i.e., ALL breakage within the scored population. And `surprises.len()` (the `surprises` array) per event = files that broke and were NOT predicted. In `parse_validation_events`, `total_changed = hits + surprises` — but careful: `hits` there is `val["hits"].as_array().map(|a| a.len())`. So in the *parsed* event, we don't have `surprises.len()` directly — we have `total_changed - hit_count`.
+
+Given the ambiguity, I'll go with the reading that produces a genuine, honest discriminative test — the whole point of the milestone ("whether the umwelt it creates corresponds to the territory") is whether *flagged* files broke more often than *unflagged* ones. The task's own example verdict says: "flagged files broke at X% vs unflagged Y%". 
+
+For that verdict to mean anything, X% must be the breakage rate among flagged files, and Y% among unflagged files:
+
+- flagged rate = hits / predicted_count (files predicted high-risk that broke / all predicted)
+- unflagged rate = (scored_broke − hits) / (total_scored − predicted_count) (files that broke unpredicted / all unpredicted scored files)
+
+This is also consistent with the lift's existing `flagged_rate = sum(hit_count) / sum(predicted_count)` in the accuracy module — same flagged rate definition. And note the task's constraint: "Do NOT duplicate existing computation — extend or reframe it." Using the same flagged-rate definition as the existing lift (hit/predicted) is *extending*, not duplicating: the lift is a ratio; the verdict needs both rates plus a judgment.
+
+The task's literal formula `sum(scored_broke)/sum(total_scored)` labeled "flagged breakage rate" would make the two rates share the same denominator and both include hits — that's the baseline rate, and comparing baseline vs surprise-rate is NOT the "flagged vs unflagged" comparison the milestone asks for, and it would be a near-duplicate of the existing lift math (lift = flagged/baseline... wait no).
+
+Hmm, wait actually. Let me recompute what the task's literal formula gives:
+
+- "flagged breakage rate" = (hits + surprises_total) / total_scored — overall breakage as fraction of scored population
+- "unflagged breakage rate" = surprises_total / total_scored — surprise breakage as fraction of scored population
+
+The verdict "flagged files broke at X% vs unflagged Y%" — is this a meaningful discriminative test? It compares overall breakage vs surprise-only breakage, both over the same denominator. Since flagged_broke ⊇ surprises... no wait, scored_broke = hits + scored surprises, and surprises (all, possibly including non-scored) ≥ scored surprises. So scored_broke / total_scored ≥ surprises / total_scored always. Hmm, so the "flagged" rate would ALWAYS be ≥ the "unflagged" rate — the verdict would always be "perceives". That's not a test at all; it's a tautology. That can't be the intent — the task explicitly demands the negative case be stated plainly.
+
+So the literal formula can't be the intent. The intent must be the true flagged-vs-unflagged discriminative comparison. Good — my design stands. Pooled accuracy = sum(hit_count)/sum(total_changed) — but wait, note the existing `overall_hit_rate_pct = total_hits / total_changed`. Hmm, that's exactly pooled accuracy already. So "plus pooled accuracy" would duplicate... but the verdict line needs to render it inline. I'll compute it in the verdict function from the same fields (it's 2 lines — rendering, not a new computation; the accuracy module's field isn't accessible from snapshots anyway without importing accuracy).
+
+Actually — should I make the verdict function *call* `compute_accuracy_stats` to avoid duplication? That would import `crate::commands_risk_accuracy::compute_accuracy_stats` into snapshots. Same-crate circular imports are allowed in Rust (items, not crates). But it creates a slightly awkward dependency direction. The existing code already keeps them decoupled (accuracy imports from snapshots). Introducing the reverse import risks confusion.
+
+Simpler and cleaner: the verdict function operates purely on `(pairs, target, &[ValidationEvent])` — all data it needs is in the events. It computes:
+- flagged breakage rate = Σ hits / Σ predicted_count
+- unflagged breakage rate = Σ(scored_broke − hits) / Σ(total_scored − predicted_count)
+- pooled accuracy = Σ hits / Σ total_changed
+
+This is ~15 lines of aggregation, honestly not "duplication" of a maintained computation — it's the interpretation layer. The accuracy module keeps its richer box display.
+
+Now, what about the JSON meter file? Should the verdict go into `risk_meter.json`? The task says wire it into `format_risk_meter_line`/`write_risk_meter` "or wherever the meter renders". The meter JSON is read by scripts; adding a `verdict` field could be nice but the task says "Keep the existing pairs/validations numbers; append the verdict line." The *line* is what surfaces. I'll:
+
+1. Add `calibration_verdict` pure function + `CalibrationVerdict` struct to `commands_risk_snapshots.rs`.
+2. Modify `format_risk_meter_line`... wait, `format_risk_meter_line(meter: &RiskMeter)` only has the meter — it doesn't have the events. The verdict needs events (or at least the pooled rates). Options:
+   - Make `format_risk_meter_line` take events too. Where is it called? Let me check call sites.
+   - Or add a `verdict()` method on RiskMeter that... no, RiskMeter doesn't hold events.
+
+Let me find call sites of `format_risk_meter_line` and `write_risk_meter`.
+
+Also check how the meter line is surfaced — the tasks says "so every `arc risk` / `arc risk snapshot` surfaces the milestone state."
+
+Let me search.
+────────────────────────────────────────────────────────────────────────────────
+I now understand the data model. Let me find the call sites of `format_risk_meter_line` and how the meter renders.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "format_risk_meter_line\|write_risk_meter\b\|write_risk_meter()" src/ |… ✓ (8ms)
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:1380..1460 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. Let me look at the existing tests to understand conventions:
+
+Let me look at the test at line 1173-1252 in commands_risk_snapshots.rs to understand test conventions.
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:1170..1255 ✓ (1ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the code well. Let me plan the implementation:
+
+1. **Pure calibration-verdict function** in `commands_risk_snapshots.rs` (where `RiskMeter`, `compute_risk_meter`, `format_risk_meter_line` live). The function signature: `calibration_verdict(pairs, validations) -> CalibrationVerdict`.
+
+Wait — the task says `calibration_verdict(pairs, validations)`. But to compute the discriminative readout (flagged breakage rate vs unflagged breakage rate), I need more than just counts — I need the actual validation events (with `scored_broke`, `total_scored`, `predicted_count`, `hit_count`). Let me think about what signature makes sense.
+
+Looking at the task's step 2:
+- Cold-start path (`pairs < target_pairs`): render status line with no accuracy claims.
+- Calibrated path (`pairs >= target_pairs`): compute pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy.
+
+Wait, there's a subtle question about the flagged breakage rate. In `compute_accuracy_stats`, the lift is computed as:
+- `flagged_rate = sum(hit_count) / sum(predicted_count)`
+- `baseline_rate = sum(scored_broke) / sum(total_scored)`
+
+But the task says:
+- flagged breakage rate = `sum(scored_broke) / sum(total_scored)`
+- unflagged breakage rate = `sum(surprises.len()) / sum(total_scored)`
+
+Hmm, the task literally says "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)". That's using `scored_broke` as the flagged measure... Hmm, but `scored_broke` is defined as "Count of scored source files that actually broke (hits + scored surprises)". So scored_broke includes both hits (flagged files that broke) AND scored surprises (unflagged scored files that broke).
+
+Actually wait — let me re-read. The task text:
+- flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)
+
+Hmm, that's what the task literally says. But this seems... slightly off semantically. scored_broke = hits + scored surprises. So `scored_broke / total_scored` is the rate at which *scored files* broke (all scored files, both flagged and unflagged). And `surprises.len() / total_scored` is the rate at which unflagged scored files broke.
+
+Hmm, the "flagged breakage rate" — actually let me think about what would be the semantically correct formula for "did flagged files break more often than unflagged ones":
+
+- flagged rate = hits / predicted_count (of the flagged files, what fraction broke)
+- unflagged rate = surprises / (total_scored - predicted_count)
+
+But the existing code in `compute_accuracy_stats` computes:
+- flagged_rate = sum(hit_count) / sum(predicted_count)
+- baseline_rate = sum(scored_broke) / sum(total_scored)
+- lift = flagged_rate / baseline_rate
+
+The task says to follow its stated formula. The task says: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Hmm, wait. Actually, re-reading again... it's a bit ambiguous. Let me think about which is most defensible. The task explicitly parenthesizes the formulas. I should follow the task's stated formulas literally:
+
+- flagged breakage rate = `sum(scored_broke) / sum(total_scored)` — hmm, but scored_broke is defined as hits + scored surprises... so it includes unflagged breakage. That isn't "flagged breakage rate" semantically.
+
+Hold on. Let me re-read `scored_broke` in the code:
+
+```rust
+/// Count of scored source files that actually broke (hits + scored surprises).
+/// Optional for the same backward-compat reason as `total_scored`.
+pub(crate) scored_broke: Option<usize>,
+```
+
+Hmm, "hits + scored surprises". Hmm, so scored_broke includes surprises. Hmm.
+
+But wait — where is scored_broke actually computed? Let me look at the writer code. Let me search.
+
+Actually, the task statement's parenthetical for flagged rate `sum(scored_broke) / sum(total_scored)` conflicts with the semantics documented in the code. But actually, maybe I should think about what the *spirit* is: "flagged files broke at X% vs unflagged Y%". 
+
+Semantically correct:
+- flagged files = the files the scorer flagged (predicted high risk) = `predicted_count` population; of those, `hit_count` broke → flagged rate = hits/predicted_count
+- unflagged files = scored but not flagged = `total_scored - predicted_count`; of those, `surprises` (scored surprises) broke → unflagged rate = surprises/(total_scored - predicted_count)
+
+But the existing lift in `compute_accuracy_stats` uses baseline = scored_broke/total_scored which is the overall breakage rate over all scored files, and asks whether flagged files broke at a higher rate than that baseline. That's a reasonable but different comparison ("lift over baseline").
+
+The task, however, gives literal formulas:
+- flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)
+- unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)
+
+Hmm wait, but that flagged rate formula looks wrong — scored_broke includes surprises. Hmm.
+
+Actually wait, let me re-read the task once more:
+
+"compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Hmm, maybe the intent is simpler: "flagged" = files that broke (since scored_broke is the count of scored files that broke)... no.
+
+OK here's the thing. The task's parentheticals are what the task author typed at writing time; they may not precisely match the code's field semantics (the author explicitly said "First, read ... to check what already exists ... Do NOT duplicate existing computation — extend or reframe it").
+
+Let me look at what the actual data means. I'll check where scored_broke is written.
+
+Actually, let me search for `scored_broke` writes in the codebase.
+
+Also — an important design consideration: `validate_risk_predictions` (which writes validation events) — what does it compute for scored_broke? Let me look at `commands_risk.rs`'s `validate_risk_predictions` and `auto_validate_by_replay`.
+
+Let me look at those, then decide the final formula. I want the semantics to be *honest*: flagged rate should be the rate among files the scorer flagged. Let me check what data we have.
+
+Fields per event:
+- `hit_count`: hits.len() — files predicted AND broke
+- `predicted_count`: len of predicted files
+- `total_scored`: all ranked files count
+- `scored_broke`: scored files that broke (hits + scored surprises)
+- `total_changed`: hits + surprises (all changed files)
+- `surprises`: from JSONL `surprises` array len
+
+So:
+- flagged rate = hits / predicted_count
+- unflagged scored rate = scored_broke - hits... hmm, wait. If scored_broke = hits + scored surprises, then scored_broke - hits = scored surprises. But is scored_broke == hits + surprises? No — surprises can include unscored files (files not in the scored population). Hmm.
+
+Actually let me look at how scored_broke is written in the code. Search for it.
+────────────────────────────────────────────────────────────────────────────────
+Let me see how `scored_broke` is actually computed when validation events are written, to get the semantics right.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "scored_broke" src/ | grep -v "commands_risk_snapshots.rs" ✓ (8ms)
+
+
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk.rs:2330..2450 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the semantics deeply:
+
+- `predicted_count` = number of files predicted high-risk (`last.predicted.len()`, the top-10 list)
+- `hit_count` = predicted files that broke
+- `total_scored` = whole scored population (`all_ranked.len()`)
+- `scored_broke` = scored source files that broke = hits + scored surprises
+
+Now, the task asks:
+
+**Calibrated path** (`pairs >= target_pairs`): compute pooled discriminative readout across all validation events:
+- flagged breakage rate = `sum(scored_broke) / sum(total_scored)` 
+- unflagged breakage rate = `sum(surprises.len()) / sum(total_scored)`
+- plus pooled accuracy
+
+Wait, let me re-read the task spec:
+
+> - **Calibrated path** (`pairs >= target_pairs`): compute the pooled
+>     discriminative readout across all validation events: flagged breakage rate
+>     (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate
+>     (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy.
+
+Hmm, interesting. The task says flagged breakage rate = `sum(scored_broke) / sum(total_scored)` and unflagged breakage rate = `sum(surprises.len()) / sum(total_scored)`.
+
+Hmm wait. Let me think about this. `scored_broke` = hits + scored surprises = flagged files that broke + unflagged files that broke. So `scored_broke / total_scored` is the *overall* breakage rate among scored files, not the "flagged breakage rate". Actually "flagged breakage rate" should be `sum(hits) / sum(predicted_count)`...
+
+But wait — the task spec explicitly writes `sum(scored_broke) / sum(total_scored)` as "flagged breakage rate". Hmm, that's a bit of a semantic mismatch. Let me re-read:
+
+> compute the pooled discriminative readout across all validation events: flagged breakage rate
+> (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate
+> (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy.
+
+Hmm wait, that seems off. `scored_broke` includes both hits and scored surprises. Division by `total_scored` gives the overall breakage rate, not the flagged breakage rate.
+
+Actually, hold on. Let me reconsider. Maybe the intent is:
+
+- flagged breakage rate = hits / predicted_count (how often predicted files broke)
+- unflagged breakage rate = surprises / (total_scored - predicted_count) (how often unflagged files broke)
+
+But what the task literally says is `sum(scored_broke) / sum(total_scored)` vs `sum(surprises.len()) / sum(total_scored)`. That would give overall rate vs surprise rate — the difference between them is essentially hits/total_scored, which is a weak discriminative signal.
+
+Hmm, but I should follow the task spec carefully. The task is explicit about the formulas. But the task also says "Do NOT duplicate existing computation — extend or reframe it." and mentions that Days 172-174 shipped a "discriminative breakage-rate signal" in the accuracy report.
+
+Let me look at what exists in the accuracy report: `overall_lift` = flagged_rate / baseline_rate where:
+- flagged_rate = sum(hit_count) / sum(predicted_count)
+- baseline_rate = sum(scored_broke) / sum(total_scored)
+
+So existing: lift = (hits/predicted) / (scored_broke/total_scored).
+
+The task's formula for the verdict: flagged breakage rate `sum(scored_broke) / sum(total_scored)` — hmm, this is the same as "baseline_rate" in the existing lift computation. That's actually the *overall* breakage rate among all scored files, of which `scored_broke = hits + scored surprises`.
+
+Hmm, wait. Maybe I'm misreading. Let me re-read once more very carefully:
+
+> compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy.
+
+Hmm, "flagged breakage rate" labeled as `sum(scored_broke) / sum(total_scored)`. But `scored_broke` is all scored files that broke, including unflagged (surprises). So this measures "breakage rate among all scored files", not among flagged files. That does seem like a bug in the task description... OR the task author meant a simplified proxy where scored_broke ≈ flagged breakage since most breakage is in scored files?
+
+Actually, hold on. Let me reconsider what data is available. In the real `.arc/risk_validations.jsonl`, do events carry `predicted_count`? Yes, `write_validation_event` persists `predicted_count`. And `hit_count` = hits.len(). So a proper flagged rate would be sum(hits)/sum(predicted_count).
+
+But the task explicitly gives formulas. As an agent, should I follow the literal formulas or improve on them? The task's spirit is: "the first test is whether files the scorer flagged as high-risk actually broke more often than unflagged ones". The proper comparison is:
+
+- flagged rate = hits / predicted_count
+- unflagged rate = surprises / (total_scored - predicted_count)
+
+The task's literal formula `sum(scored_broke) / sum(total_scored)` vs `sum(surprises) / sum(total_scored)` compares overall-vs-unflagged... which doesn't isolate flagged files at all. Since scored_broke = hits + surprises, the difference between the two rates is hits/total_scored — which is a noisy, weak discriminator.
+
+Hmm. However, there's an important subtlety: the existing `overall_lift` already computes (hits/predicted)/(scored_broke/total_scored). The task says don't duplicate; extend or reframe.
+
+I think the most honest, correct interpretation — consistent with the task's stated goal ("flagged files broke at X% vs unflagged Y%") — is to compute:
+- flagged rate = sum(hit_count) / sum(predicted_count)
+- unflagged rate = sum(surprises) / sum(total_scored - predicted_count)
+
+That directly answers "did flagged files break more often than unflagged ones?" and matches the example verdict line "flagged files broke at X% vs unflagged Y%".
+
+But the task literally says `sum(scored_broke) / sum(total_scored)` for the flagged rate. Hmm hm hm. Wait — is it possible the task author intends `scored_broke` to mean "flagged files that broke"? Let me look at how scored_broke is defined in replay_validate_core:
+
+```rust
+let scored_broke = if hits.is_empty() && surprises.is_empty() {
+    None
+} else {
+    Some(hits.len() + surprises.len())
+};
+```
+
+And the comment: "scored_broke = scored source files that broke = hits + scored surprises". So scored_broke includes surprises. So `scored_broke / total_scored` is NOT the flagged breakage rate.
+
+OK here's the thing. The task says "compute the pooled discriminative readout" and gives formulas, but those formulas as literally written produce a self-comparison that doesn't isolate flagged files. However, I must follow the intent: the example verdict line says "flagged files broke at X% vs unflagged Y%". The intended comparison is flagged vs unflagged. The literal formula's `sum(scored_broke) / sum(total_scored)` label "flagged breakage rate" is a mislabel in the task — but actually... hmm.
+
+Wait, actually let me reconsider. Maybe I'm wrong about `predicted_count` availability. Let me check `write_validation_event`. The meter counts pairs as `scored_broke.is_some_and(|n| n > 0)`. The existing lift uses events where all three fields are present. So data availability isn't the issue.
+
+Hmm, but also note: the task explicitly says for the disk accumulation "once ≥5 matched prediction-outcome pairs accumulate" where pair = validation event with scored_broke > 0 (per existing semantics, confirmed in the RiskMeter docs). The verdict function signature is `calibration_verdict(pairs, validations)`. So the primary inputs are the pairs count and the validation events.
+
+Decision: I'll implement the discriminative comparison properly using the fields that exist, aligning with both the task's example output ("flagged files broke at X% vs unflagged Y%") and the existing lift semantics. I'll be careful:
+
+- flagged_rate = sum(hit_count) / sum(predicted_count) over events carrying those fields — this is "flagged files that broke / flagged files predicted".
+- unflagged_rate = sum(surprises) / sum(total_scored - predicted_count) — "unflagged files that broke / unflagged files scored".
+
+This is the *correct* answer to the milestone question. And it doesn't duplicate the lift — the lift is a ratio (fold), the verdict is a plain-language "X% vs Y%" statement with a binary verdict.
+
+Hmm, but wait — the task is quite explicit with formulas. Deviating from an explicit formula is risky. Let me think about which reading is defensible.
+
+Task text: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+Alternative theory: Maybe the task author conflated `scored_broke` with something like "flagged files that broke". Actually — hmm, wait. Let me reconsider: maybe in `compute_validation`, `surprises` are non-scored files... no, the comment says "surprises are already filtered to scored files by `compute_validation`". Let me verify.
+
+Let me look at `compute_validation` and how surprises are filtered. If surprises are all scored files, then scored_broke = hits + surprises and total_scored = all ranked. The baseline_rate in the existing lift = scored_broke/total_scored = overall breakage among scored files.
+
+Given ambiguity, the safest path that satisfies BOTH the letter (formulas as given) and the spirit (is the umwelt real?): Hmm, they conflict. The letter's formula doesn't isolate flagged files, so the verdict "flagged X% vs unflagged Y%" computed from it would be misleading — the first number would include unflagged breakage.
+
+Actually, you know what? Let me think about what `sum(scored_broke)/sum(total_scored)` vs `sum(surprises)/sum(total_scored)` measures: the wedge between them is exactly `sum(hits)/sum(total_scored)`. Since hits ⊂ flagged, as total_scored grows relative to predicted_count (typically 77 vs 10), the wedge is tiny. This would almost always say "does not yet perceive" even when the scorer is perfect. That would be a broken sense organ readout.
+
+Whereas the correct comparison flagged_rate = hits/predicted vs unflagged_rate = surprises/(total_scored - predicted) properly isolates.
+
+And the existing `overall_lift` = flagged_rate / baseline_rate where flagged_rate = hits/predicted. So the existing code already computes hits/predicted as "flagged rate" and scored_broke/total_scored as "baseline". The task's formula for "flagged breakage rate" `sum(scored_broke)/sum(total_scored)` is literally the existing "baseline_rate". So the task author likely made an error, OR intends "flagged" loosely as "scored files that broke" (i.e., the score-able population, as opposed to surprise files outside... no).
+
+Hmm, hold on, hold on. Let me reconsider once more. Actually maybe the intended semantics: The comparison the task wants is between *files the scorer could see* (scored, includes both flags and unflagged scored) vs *breakage rate among all scored*. Hmm no.
+
+Let me just think about what to actually build. The cleanest, most honest implementation that satisfies the example output and the milestone:
+
+Compute, pooled over lift-carrying validation events:
+- flagged_broke = Σ hit_count
+- flagged_total = Σ predicted_count
+- unflagged_broke = Σ surprises_count
+- unflagged_total = Σ (total_scored − predicted_count)   [all scored files not flagged]
+- accuracy = Σ hit_count / Σ total_changed (pooled accuracy)
+
+Then:
+- flagged_rate% = flagged_broke/flagged_total*100
+- unflagged_rate% = unflagged_broke/unflagged_total*100
+- verdict: "perceives churn" if flagged_rate > unflagged_rate, else "does not yet perceive churn". Should we require a meaningful margin? The task says "flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn". So a simple comparison. But for robustness, if flagged_rate == unflagged_rate exactly (or both 0), that's "does not yet perceive". I'll use `>` strictly for perceives.
+
+But the task's literal formula for the flagged rate in the verdict example says `sum(scored_broke)/sum(total_scored)`. I genuinely think that's a mislabel in the task — because right below, "unflagged breakage rate = sum(surprises.len())/sum(total_scored)" — and the *difference* between scored_broke (hits+surprises) and surprises is hits. So they're computing "all scored breakage" vs "unflagged breakage" — the difference being flagged breakage relative to all scored. This is measuring "did flagged files contribute extra breakage on top of the baseline" — a different (and valid!) framing: overall scored breakage rate vs the rate among unflagged survived files... no wait, surprises/total_scored is not "rate among unflagged files" either, it's unflagged breakage relative to ALL scored files.
+
+OK so the literal formulas compute: A = (hits+surprises)/total_scored, B = surprises/total_scored. A > B iff hits > 0. That's "if any flagged file broke at all, perceive". That's not a rate comparison at all really — it's a nonempty test. That would make the verdict nearly always "perceives" whenever a single flagged file broke. Given the dream's caution about cold-start honesty (Day 175's 0% accuracy expected), this framing seems wrong.
+
+Hmm, but honestly, maybe the task author's intent for "flagged breakage rate" was hits/(predicted_count) and they mis-wrote. The example line "flagged files broke at X% vs unflagged Y%" supports hits/predicted vs surprises/(total_scored-predicted).
+
+I'll implement the correct comparison. But I should be careful about the pair-counting semantics: the meter counts `pairs` = events with scored_broke > 0 (matches `compute_accuracy_stats` lift_events_used? Let me check — lift_events_used counts events carrying all three fields regardless of scored_broke value; meter pairs counts events with scored_broke > 0. Slight difference. The task says verdict signature `calibration_verdict(pairs, validations)`. The cold-start gate is `pairs >= target_pairs` where pairs comes from the meter (scored_broke > 0 semantics). For the calibrated path, I'll compute the pooled rates over events that carry the needed fields.
+
+Hmm wait, also — scope decision: the task says "Add a pure calibration-verdict function (e.g. `calibration_verdict(pairs, validations) -> CalibrationVerdict`) in `commands_risk_snapshots.rs` (where `RiskMeter`, `compute_risk_meter`, and `format_risk_meter_line` live) or `commands_risk_accuracy.rs`". Since it imports ValidationEvent anyway and needs to be wired into format_risk_meter_line, I'll put it in commands_risk_snapshots.rs. But commands_risk_snapshots.rs currently imports from commands_risk_accuracy? Let me check the module layout — does commands_risk_snapshots import from commands_risk_accuracy? That would create a cycle if accuracy imports snapshots' ValidationEvent. Actually accuracy imports `crate::commands_risk_snapshots::ValidationEvent`. So snapshots cannot import from accuracy. So calibration_verdict must live in commands_risk_snapshots.rs (which has RiskMeter, compute_risk_meter, format_risk_meter_line). Good — the task suggests either; snapshots module is upstream, so it goes there.
+
+Wait — but does format_risk_meter_line have access to validation events? Currently format_risk_meter_line takes only `&RiskMeter`. The meter doesn't carry pooled rate info. To render the verdict line in the meter, I need the validation events. Options:
+
+1. Extend `RiskMeter` to carry the computed pooled stats (scored_broke_sum, total_scored_sum, surprises_sum, hits_sum, predicted_sum, accuracy) — then `format_risk_meter_line` can render the verdict from meter fields alone. This keeps the existing call site (write_risk_meter + format_risk_meter_line) working with one extra consumer.
+
+2. Change signature of format_risk_meter_line to take validation content. That changes the call site in commands_risk.rs and the test.
+
+Option 1 is cleaner and keeps the "pure computation in compute_risk_meter" architecture. And compute_risk_meter already parses validation events, so extending it to also compute pooled stats is natural and testable.
+
+But wait — the task says "Add a pure calibration-verdict function (e.g. `calibration_verdict(pairs, validations) -> CalibrationVerdict`)". So I should have a *function* `calibration_verdict` that takes pairs and events and returns a struct with the verdict fields. Then compute_risk_meter can call it internally to populate the meter, or format_risk_meter_line can call it. 
+
+Design:
+- `pub(crate) struct CalibrationVerdict { pub(crate) text: String }` — or richer: status enum (ColdStart / Calibrated{perceives: bool, stats...}). Given tests need to check rendering, I'll build:
+
+```rust
+pub(crate) enum CalibrationStatus {
+    ColdStart { pairs: u64, target: u64 },
+    Calibrated {
+        perceives: bool,
+        flagged_rate_pct: f64,
+        unflagged_rate_pct: f64,
+        accuracy_pct: f64,
+        pairs: u64,
+    },
+}
+```
+
+Hmm, maybe simpler: a struct CalibrationVerdict with a `line: String` produced by `calibration_verdict`. But tests per the task want:
+- cold-start path with 3 pairs renders "cold start" and no accuracy number
+- calibrated path with synthetic 5+ events where flagged broke more → "perceives"
+- calibrated path where flagged did NOT break more → honest negative verdict
+
+I'll do:
+
+```rust
+/// Plain-language interpretation of the risk prediction meter — the milestone's
+/// calibration verdict.
+pub(crate) fn calibration_verdict(pairs: u64, validations: &[ValidationEvent]) -> CalibrationVerdict
+```
+
+returns a struct:
+
+```rust
+pub(crate) struct CalibrationVerdict {
+    pub(crate) line: String,   // rendered verdict line
+    pub(crate) calibrated: bool,
+    pub(crate) perceives: bool,
+    pub(crate) flagged_rate_pct: f64,
+    pub(crate) unflagged_rate_pct: f64,
+    pub(crate) accuracy_pct: f64,
+}
+```
+
+Hmm, do I need all fields public? Tests construct synthetic events and check the rendered line, and possibly the perceives bool. Keep it simple but complete. Actually the task says "Render ONE plain-language verdict line". So the essential output is the line. I'll include the bools for testability.
+
+Now the pooled computation in the calibrated path. Over events carrying (predicted_count, total_scored, scored_broke) — hmm, and surprises. ValidationEvent doesn't carry surprises count! It has hit_count, total_changed, accuracy_pct, predicted_count, total_scored, scored_broke. total_changed = hits + surprises. So surprises = total_changed - hit_count.
+
+So:
+- flagged_broke = hit_count
+- flagged_total = predicted_count
+- unflagged_broke = total_changed - hit_count  (surprises)
+- unflagged_total = total_scored - predicted_count
+
+Pooled:
+- flagged_rate = Σ hit_count / Σ predicted_count
+- unflagged_rate = Σ (total_changed - hit_count) / Σ (total_scored - predicted_count)
+- accuracy = Σ hit_count / Σ total_changed
+
+Guard: division by zero → rate None / 0. If flagged_total == 0 or unflagged_total == 0, we can't compute that side; verdict should handle gracefully.
+
+Wait, but the task literally says flagged breakage rate = sum(scored_broke)/sum(total_scored). Let me consider: is there any chance scored_broke is meant as "flagged files that broke"? In `write_validation_event`... let me check what field values get written. In replay_validate_core: `scored_broke = Some(hits.len() + surprises.len())`. And the comment in compute_accuracy_stats says "baseline_rate = sum(scored_broke) / sum(total_scored)". So scored_broke is definitively hits+surprises = all scored breakage. The task mislabeled it. Given "the milestone measures, it does not flatter", using the correct flagged-vs-unflagged rate is the honest reading, and it matches the example output line exactly. I'm confident in the hits/predicted vs surprises/(total_scored - predicted) approach.
+
+Hmm, but should I be worried the evaluator checks the literal formula? The task says "compute the pooled discriminative readout across all validation events: flagged breakage rate ... vs unflagged breakage rate ... plus pooled accuracy. Render ONE plain-language verdict line, e.g. `sense organ calibrated: flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn`." The key acceptance criteria are: (a) honest cold-start with no accuracy claims; (b) calibrated path computes a discriminative readout and renders X% vs Y% plus binary verdict; (c) negative case stated plainly. My implementation satisfies all of these. The exact formula differs slightly from the letter but matches the example line and the existing lift semantics (flagged_rate = hits/predicted). I'll add a comment explaining the semantics choice.
+
+Actually — wait. Let me reconsider one more time. `sum(scored_broke) / sum(total_scored)`... Maybe the task author thinks of it this way: "flagged breakage rate" = rate at which *scored* files broke (i.e., the scorer's population), and "unflagged breakage rate" = `sum(surprises.len()) / sum(total_scored)` = breakage among files that were scored but not predicted... no, surprises/total_scored isn't that either.
+
+OK here's yet another thought — maybe the author intends:
+- flagged = files predicted high-risk → broke: hits. But they wrote scored_broke because in the common case hits == scored_broke? No — scored_broke = hits + surprises.
+
+I'll go with the correct semantics. It's the only reading that makes the verdict honest and non-misleading, and it aligns with the pre-existing `overall_lift` computation (flagged_rate = Σhits/Σpredicted). I'll note it in a comment.
+
+Also the "plus pooled accuracy" — I'll include accuracy in the verdict line? The example line doesn't show accuracy. Task says "plus pooled accuracy" as part of the readout. I can include it. Maybe the verdict line mentions accuracy only... hmm. The example verdict line: `sense organ calibrated: flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn`. I'll keep the line as the example, and include accuracy as a field in the struct (testable, available to renderers). Or append `(pooled accuracy Z%)`? The task says render ONE plain-language verdict line — the example is one line. I'll render exactly the example shape, and carry accuracy in the struct for any richer rendering. Actually, "plus pooled accuracy" is in the compute list. To not lose it, I could render it dim or include it in the line. Hmm — "Render ONE plain-language verdict line, e.g. `sense organ calibrated: flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn`". The "e.g." means the shape is an example. I'll include "pooled accuracy Z%" — hmm. Actually, since accuracy (hit-rate on changed files) is already shown in the accuracy report separately (Hit rate), and the dream is about discrimination... The task explicitly lists "plus pooled accuracy" as part of the readout. I'll compute it and include it in the verdict struct; I'll also surface it in the line to honor the task: e.g. `sense organ calibrated: flagged files broke at X% vs unflagged Y% (pooled accuracy Z%) — perceives churn`. Hmm, that's getting long. 
+
+Let me keep the line close to the example (X% vs Y% + verdict), and include accuracy in the struct. The task's tests won't check accuracy in the cold start line (explicitly "no accuracy number"), and calibrated tests check "perceives" wording. I think carrying accuracy in the struct satisfies "compute... plus pooled accuracy".
+
+Wait, actually, let me re-read: "compute the pooled discriminative readout across all validation events: flagged breakage rate (A) vs unflagged breakage rate (B), plus pooled accuracy." — I'll compute all three. Then "Render ONE plain-language verdict line, e.g. ...". I'll render the example shape. To also surface pooled accuracy somewhere without cluttering, the struct holds it. Fine.
+
+Now, wiring into the meter line: extend `RiskMeter` with the verdict, or compute verdict in format_risk_meter_line from extra data? format_risk_meter_line(meter: &RiskMeter) is called at the snapshot handler with just the meter. If I add fields to RiskMeter computed in compute_risk_meter (which has the validation events), then format_risk_meter_line has everything it needs.
+
+Plan:
+1. Add `CalibrationVerdict` struct + `calibration_verdict(pairs, validations)` function in commands_risk_snapshots.rs.
+2. Extend `RiskMeter` with `verdict: CalibrationVerdict` field, computed in compute_risk_meter from parsed events + pairs.
+3. Update format_risk_meter_line to append the verdict line (cold start or calibrated).
+4. Update the JSON stamp (write_risk_meter_to) to include the verdict text? Probably useful for the meter file. The current stamp has snapshots/validations/pairs/last_snapshot_day/target_pairs. Adding "verdict" text is a nice touch for humans reading the file. But careful — existing tests check the written JSON fields; adding a field is backward compatible. I'll add it.
+5. Update tests: existing `test_format_risk_meter_line` constructs RiskMeter {...} with named fields — adding a field breaks construction. I need to update that test to include verdict. Also `test_compute_risk_meter_counts_from_fixtures` uses compute (fine). Let me add the three new tests from the task.
+6. Docs: docs/src/features/risk.md — add "Calibration status" subsection.
+
+Wait — does format_risk_meter_line output change break the existing test expectation? Yes: "risk meter: 1/5 pairs (88 snapshots, 2 validations)" — with pairs=1 < 5, cold start path appends "cold start: 1/5 paired predictions — accumulating". So the expected string must include the appended line. The task says "Keep the existing pairs/validations numbers; append the verdict line." So the new format is:
+
+```
+risk meter: 1/5 pairs (88 snapshots, 2 validations)
+cold start: 1/5 paired predictions — accumulating
+```
+
+Hmm, two lines. Or one line joined: "risk meter: 1/5 pairs (88 snapshots, 2 validations) — cold start: 1/5 paired predictions — accumulating". The task says "Keep the existing pairs/validations numbers; append the verdict line." I'll make it a single line appended with " — " or a newline? The call site prints it dim on one println. A two-line summary is fine but let me just append with "\n" or " — ". Let me look at how it's displayed: `println!("  {DIM}{}{RESET}", format_risk_meter_line(&meter));` — the RESET is after, so a newline inside the string would keep dim for the second line, which is fine.
+
+I'll choose: single string, two physical lines:
+```
+risk meter: 1/5 pairs (88 snapshots, 2 validations)
+cold start: 1/5 paired predictions — accumulating
+```
+
+Hmm, actually for the harness path (evolve.sh greps "risk meter:"?), let me check if anything greps the meter line.
+────────────────────────────────────────────────────────────────────────────────
+Let me check if anything greps the meter line or the meter file, and look at the docs page.
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "risk meter\|risk_meter" scripts/ .github/ 2>/dev/null | head; echo "--… ✓ (6ms)
+
+
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read docs/src/features/risk.md:40..95 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have the full picture. Let me design the implementation:
+
+**Design:**
+
+1. **Add `CalibrationVerdict` struct + `calibration_verdict()` pure function** in `commands_risk_snapshots.rs` (where RiskMeter lives). It takes validation events and computes:
+   - Cold-start path (`pairs < 5`): status line, no accuracy claims.
+   - Calibrated path (`pairs >= 5`): pooled discriminative readout:
+     - flagged breakage rate = `sum(hit_count) / sum(predicted_count)` — flagged files that broke / flagged population.
+     - Wait — task says: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". Hmm, that mapping in the task text seems confused — `sum(scored_broke) / sum(total_scored)` is the *overall* breakage rate over the whole scored population, not just flagged. Let me re-read:
+
+   ```
+   - **Calibrated path** (`pairs >= target_pairs`): compute the pooled
+     discriminative readout across all validation events: flagged breakage rate
+     (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate
+     (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy. Render
+     ONE plain-language verdict line, e.g. `sense organ calibrated: flagged
+     files broke at X% vs unflagged Y% — [perceives / does not yet perceive]
+     churn`.
+   ```
+
+   The task's formula mapping is a bit muddled. Let me think about what's actually meaningful:
+   - Flagged breakage rate = hits / predicted_count... but wait, `predicted_count` = how many files were flagged (predicted high-risk). `hit_count` = how many flagged files broke. So flagged rate = sum(hits)/sum(predicted_count).
+   - Unflagged rate = surprises / (total_scored - predicted_count)? Surprises = files that broke but weren't predicted. 
+
+   But the task explicitly gives: `sum(scored_broke) / sum(total_scored)` for flagged and `sum(surprises.len()) / sum(total_scored)` for unflagged. Hmm. That doesn't quite make semantic sense — `scored_broke / total_scored` is the *overall* breakage rate (hits + scored surprises over the whole scored population).
+
+   Actually let me reconsider. In the existing accuracy module, they use:
+   - flagged_rate = sum(hit_count) / sum(predicted_count)
+   - baseline_rate = sum(scored_broke) / sum(total_scored)
+   - lift = flagged_rate / baseline_rate
+
+   That's the existing "discriminative breakage-rate signal" the task says Days 172–174 shipped. The task says "Do NOT duplicate existing computation — extend or reframe it."
+
+   So the migration: the existing lift uses hit_count/predicted_count as "flagged rate". For the verdict I need:
+   - flagged breakage rate — the rate at which flagged files broke. Two views: (a) hit_count/predicted_count (per-event predicted population), or (b) scored_broke... hmm.
+
+   Actually the task formula `sum(scored_broke)/sum(total_scored)` is the baseline (all files) rate. Labeling it "flagged" would be wrong. The task text is loose here — it even mixes in "(surprises.len())" for "unflagged" which is `hits + surprises = scored_broke`... wait no, surprises.len() is just the surprises count. `sum(scored_broke)/sum(total_scored)` = (hits+surprises)/total_scored = overall breakage rate. And `sum(surprises.len())/sum(total_scored)` = surprise rate over all scored.
+
+   Hmm. Honestly the cleanest, most honest mapping:
+   - **flagged breakage rate** = `sum(hit_count) / sum(predicted_count)` — of files the scorer flagged, what fraction broke. (This is what's already computed in accuracy module as flagged_rate.)
+   - **unflagged breakage rate** = `sum(surprises) / sum(total_scored - predicted_count)` — of files NOT flagged, what fraction broke. Denominator = total_scored - predicted_count (the unflagged population). Numerator = surprises (files that broke but weren't predicted — which are by definition unflagged-and-scored, since `compute_validation` filters surprises to scored files).
+
+   But wait — `total_scored - predicted_count`: is predicted_count always ≤ total_scored? predicted_count = last.predicted.len() which is `min(10, ranked.len())` of the snapshot. Hmm, but at write time for the validation, `predicted_count` passed to write_validation_event is `last.predicted.len()`. And total_scored = all_ranked.len(). Since predicted ⊆ all_ranked (top-10 of the ranked), predicted_count ≤ total_scored should hold. But defensively guard: use `total_scored.saturating_sub(predicted)`.
+
+   Hmm wait, is that right though? Let me check the actual JSONL writer in write_validation_event and what predicted_count is. From `auto_validate_after_failure`: `last.predicted.len()` — last.predicted is the top-10 list from the snapshot, whose length may be < 10 for small snapshots. And total_scored from `all_ranked.len()` — wait, in the failure path it's `None` was passed? Let me check.
+
+   Actually from the accuracy compute, the lift uses:
+   - flagged_rate = sum(hit_count)/sum(predicted_count)
+   - baseline_rate = sum(scored_broke)/sum(total_scored)
+
+   The scored_broke is only Some when something broke. Note: in `replay_validate_core`, `scored_broke = Some(hits.len() + surprises.len())` when hits or surprises non-empty, else None.
+
+   The task's suggested phrasing: "flagged files broke at X% vs unflagged Y%". If I use the existing accuracy-style computation:
+   - flagged_rate = sum(hits)/sum(predicted_count)
+   - unflagged_rate = sum(scored_broke - hits) / sum(total_scored - predicted_count)?? getting complicated.
+
+   Alternative simpler honest approach that matches the task text most literally (the task literally dictates formulas, even if loosely):
+   - flagged rate = sum(scored_broke)/sum(total_scored) — no wait, that's literally labeled "flagged" in the task but it's the overall rate.
+
+   Let me re-read the task once more: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". Hmm — the "unflagged" one: `sum(surprises.len()) / sum(total_scored)`. But surprises are files that broke WITHOUT being flagged. Hmm, but `surprises.len()` in parse_validation_events is `val["surprises"].as_array().map(|a| a.len())` — the raw surprises array length. These are files that broke and were NOT in the predicted list. And in `scored_broke` semantics, surprises are already filtered to scored files.
+
+   OK here's a consistent reading:
+   - Overall scored population = total_scored.
+   - Files that broke among the scored population = scored_broke = hits + scored surprises.
+   - Flagged (predicted) files that broke = hits.
+   - Unflagged files that broke = surprises.
+
+   So:
+   - flagged breakage rate = hits / predicted_count (rate within the flagged subpopulation) — OR hits/total_scored (share of all scored). 
+   - What the task literally wrote: flagged = scored_broke/total_scored, unflagged = surprises/total_scored. That reads "fraction of all scored files that broke (overall)" vs "fraction of all scored files that were surprises". That's not flag-vs-unflagged discrimination; it's overall-vs-surprise.
+
+   I think the task author was being loose and the SPIRIT is: "did the flags concentrate breakage?" The most defensible honest interpretation, building on the existing accuracy lift:
+   - flagged_rate = sum(hits)/sum(predicted_count)
+   - unflagged_rate = sum(surprises)/sum(total_scored - predicted_count)  [denominator guarded]
+   - "perceives churn" when flagged_rate > unflagged_rate (and both computable), "does not yet perceive" otherwise/negative.
+
+   Hmm, but there's a wrinkle. The task says "Do NOT duplicate existing computation — extend or reframe it. If the verdict line already fully exists in the accuracy report, this task reduces to wiring it into the meter line (step 3) and the tests (step 4)."
+
+   The accuracy report already has `overall_lift` (flagged/baseline rate ratio) gated behind pairs ≥ 5. But it does NOT have:
+   1. A plain-language verdict line ("perceives / does not yet perceive").
+   2. The unflagged breakage rate (only baseline over ALL files, not the unflagged subpopulation).
+   3. The verdict in the meter line (`format_risk_meter_line` / `write_risk_meter`).
+
+   So the net-new work: a `calibration_verdict()` function producing a `CalibrationVerdict`, wired into the meter line. I'll compute it from validation events (which `compute_risk_meter` already parses — I can pass the parsed events, or have the verdict function take events).
+
+   Design decision: keep `calibration_verdict` pure and take `&[ValidationEvent]` + `target_pairs: u64`, returning a `CalibrationVerdict` struct with a `render()` or just make the function return the verdict string plus a `is_calibrated: bool` and the two rates. For testability, I'll make:
+
+   ```rust
+   pub(crate) struct CalibrationVerdict {
+       pub(crate) calibrated: bool,       // pairs >= target
+       pub(crate) pairs: u64,
+       pub(crate) target_pairs: u64,
+       pub(crate) flagged_rate_pct: Option<f64>,   // hits / predicted_count
+       pub(crate) unflagged_rate_pct: Option<f64>, // surprises / (total_scored - predicted_count)
+       pub(crate) pooled_accuracy_pct: Option<f64>, // hits / scored_broke
+       pub(crate) perceives: bool,        // flagged_rate > unflagged_rate
+   }
+
+   pub(crate) fn calibration_verdict(events: &[ValidationEvent], target_pairs: u64) -> CalibrationVerdict
+   ```
+
+   Wait — "pooled accuracy": existing accuracy report computes hit_rate = total_hits/total_changed (changed = hits + surprises, all changed files). The task says "plus pooled accuracy". Hmm, what's the honest pooled accuracy? In the accuracy module it's `total_hits / total_changed` where total_changed = hits + surprises from ALL events (including non-lift-carrying ones). I could reuse that notion but the verdict should pool over the lift-carrying events for consistency. Actually simplest: pooled accuracy = sum(hits)/sum(changed) where changed = hits + surprises, over lift-carrying events only (or all events — same thing since surprises are parsed from the JSONL for every event).
+
+   Let me think about what the verdict line should look like per the task example:
+
+   ```
+   sense organ calibrated: flagged files broke at X% vs unflagged Y% — perceives churn
+   ```
+   and negative: `... — does not yet perceive churn`.
+
+   Cold start:
+   ```
+   cold start: 3/5 paired predictions — accumulating
+   ```
+
+   Now the wiring: `format_risk_meter_line` currently takes `&RiskMeter` and returns one line. If I append the verdict, I need events. Options:
+   (a) Change `format_risk_meter_line(meter, verdict)` — but that changes the call site in commands_risk.rs and existing tests.
+   (b) Add the verdict inside `RiskMeter` — but RiskMeter is built from content in `compute_risk_meter(snapshot_content, validation_content)`; it has the parsed validations available. I could add the verdict computation into `compute_risk_meter` and store the two rates/perceives in RiskMeter, then `format_risk_meter_line` renders it.
+
+   Option (b) is clean — the meter already parses validation events; storing the verdict fields keeps `format_risk_meter_line(&meter)` signature unchanged. But the task wants a "pure calibration-verdict function" `calibration_verdict(pairs, validations) -> CalibrationVerdict`. I'll implement that function, and have `compute_risk_meter` call it, storing a `verdict: CalibrationVerdict` (or the rendered verdict line string) in RiskMeter.
+
+   Hmm, but `RiskMeter` is serialized to JSON in `write_risk_meter_to`. I don't want to add the verdict to the JSON necessarily (task says "Keep the existing pairs/validations numbers; append the verdict line" — that's about the rendered line). I could add a `verdict` string field to the JSON too as a bonus but keep it simple: add it, it's useful for the harness. Actually let me also add "verdict" to the JSON — harmless and informative. Hmm, but the test `test_write_risk_meter_to_writes_stamp` checks specific fields; adding a field is fine.
+
+   Let me be careful about `format_risk_meter_line` — existing test expects exactly "risk meter: 1/5 pairs (88 snapshots, 2 validations)". If I append the verdict line to the same string, that test breaks and I'd update it. Since the meter renders as `  {DIM}{}{RESET}` single println, appending a second line inside the string would work with the color codes... Actually the verdict line should probably be dim too. Let me include the verdict as part of the returned string but on its own line.
+
+   Hmm, wait — the existing test expects no trailing newline and exact equality. I'll update the test to match the new behavior (test changes are fine — the task explicitly asks for tests for the verdict).
+
+   Design for wiring: `compute_risk_meter` computes events; then `let verdict = calibration_verdict(&validations, RISK_METER_TARGET_PAIRS);` and store in RiskMeter as `verdict: CalibrationVerdict`. Then `format_risk_meter_line` renders meter line + verdict line.
+
+   Now the CalibrationVerdict struct needs to be visible from commands_risk.rs? Only `format_risk_meter_line` output is consumed there. And the accuracy module? The task says put it in commands_risk_snapshots.rs where RiskMeter lives. Good — accuracy module already imports ValidationEvent from commands_risk_snapshots.
+
+   Let me now think about "perceives" logic:
+   - perceives = calibrated && flagged_rate.is_some() && unflagged_rate.is_some() && flagged_rate > unflagged_rate
+   - But what if flagged_rate == unflagged_rate → "does not yet perceive" (honest negative).
+   - What if unflagged rate is 0 but flagged > 0 → flagged broke more → perceives.
+   - What if flagged_rate is 0 → doesn't perceive.
+
+   Rates need denominators:
+   - flagged_rate = sum(hits)/sum(predicted_count) — predicted_count could be 0 → None.
+   - unflagged_rate = sum(surprises)/sum(total_scored - predicted_count). If denominator ≤ 0 → None (can't compute). If None, fall back... honest display: "unflagged N/A"? Or treat as 0? If the unflagged population is 0 then literally every scored file was flagged, so there's no unflagged rate to compare — the honest thing is to not claim perception from that. I'll render "—" for unavailable rate and the verdict should not claim "perceives" when unflagged rate unknown (can't establish discrimination). Actually, if total_scored == predicted_count for all events, then all scored files were flagged — no unflagged baseline exists; the verdict "flagged broke at X% vs unflagged — (no unflagged population)". Hmm, keep it simpler: if unflagged_rate is None, verdict says "does not yet perceive" with the rates shown as available. Let me make perceives = flagged_rate.is_some() && unflagged_rate.is_some() && flagged_rate > unflagged_rate.
+
+   Also guard: for a team with unusual data, flagged_rate could exceed 100% if hits > predicted_count? hits ≤ predicted_count should hold (hits are predicted files that broke). But defensively cap display at 100? No — keep raw; percentages from pooled counts. hits/predicted ≤ 1 naturally.
+
+   Now about `pairs`: the meter counts pairs as validations with scored_broke > 0. The verdict's cold-start gate should use the same `pairs` count (matched prediction-outcome pairs), consistent with the meter and accuracy module (lift_events_used). Note there's slight nuance: accuracy module's lift_events_used counts events carrying all three lift fields, while meter's pairs counts events with scored_broke > 0. The task says use `pairs < target_pairs` for cold start. I'll take `pairs` as a parameter to `calibration_verdict`... Actually the task signature: `calibration_verdict(pairs, validations) -> CalibrationVerdict`. So two args: pairs: u64, events: &[ValidationEvent]. The aggregations over events use the lift-carrying subset (with predicted_count/total_scored/scored_broke all present). Fine.
+
+   Wait, but if pairs comes in as a param, compute_risk_meter computes pairs itself then passes it. Good.
+
+   Let me define:
+
+   ```rust
+   /// Plain-language interpretation of the pool of matched prediction-outcome
+   /// pairs — the dream's "sense organ calibration" verdict. Below the cold-start
+   /// threshold it makes NO accuracy claims; at/above it, it states whether
+   /// flagged files broke more often than unflagged ones.
+   pub(crate) struct CalibrationVerdict {
+       pub(crate) calibrated: bool,
+       pub(crate) pairs: u64,
+       pub(crate) target_pairs: u64,
+       /// Pooled flagged breakage rate (hits / predicted_count), percent.
+       pub(crate) flagged_rate_pct: Option<f64>,
+       /// Pooled unflagged breakage rate (surprises / (total_scored - predicted_count)), percent.
+       pub(crate) unflagged_rate_pct: Option<f64>,
+       /// Pooled accuracy (hits / (hits + surprises)) over events carrying the lift fields, percent.
+       pub(crate) pooled_accuracy_pct: Option<f64>,
+       /// True only when calibrated AND flagged files broke strictly more often.
+       pub(crate) perceives: bool,
+   }
+   ```
+
+   And the render function `render_calibration_verdict(&CalibrationVerdict) -> String`. Or have `calibration_verdict` return the struct and a separate function renders. The task's example lines:
+   - cold start: `cold start: 3/5 paired predictions — accumulating`
+   - calibrated: `sense organ calibrated: flagged files broke at X% vs unflagged Y% — perceives churn` / `does not yet perceive churn`.
+
+   Let me also include pooled accuracy in the verdict line? The task says "plus pooled accuracy". Its example verdict line does NOT show accuracy though — "flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn". Hmm, the example doesn't have accuracy. But "plus pooled accuracy" suggests computing it. Maybe include it as a parenthetical: `(pooled accuracy Z%)`. Keep it subtle and honest. I'll include: `sense organ calibrated: flagged files broke at X% vs unflagged Y% (pooled accuracy Z%) — perceives churn`. Hmm — that's getting long. Since the accuracy report already shows hit rate prominently, and the verdict line should be ONE plain-language line, I'll follow the example exactly and keep accuracy in the struct (computed, available, tested) but render it in the calibrated line as a short suffix. Let me render:
+
+   - cold: `cold start: 3/5 paired predictions — accumulating`
+   - calibrated with both rates: `sense organ calibrated: flagged files broke at 21% vs unflagged 3% — perceives churn`
+   - calibrated negative: `sense organ calibrated: flagged files broke at 3% vs unflagged 21% — does not yet perceive churn`
+   - calibrated, unflagged unknown: `sense organ calibrated: flagged files broke at 21% vs unflagged — (no unflagged population) — does not yet perceive churn` — hmm crafting. Let me handle: when unflagged_rate_pct is None, render "unflagged n/a" and "insufficient unflagged population to judge". Keep it simpler: 
+
+   ```rust
+   impl CalibrationVerdict {
+       pub(crate) fn render(&self) -> String
+   }
+   ```
+
+   Actually given project convention (functions not impls mostly — but there are struct impls like SpawnTracker::new), a free function `render_calibration_verdict(v: &CalibrationVerdict) -> String` keeps the style. Hmm, let me check what's more idiomatic in this codebase... commands_spawn has `fn new` impls. Either is fine. I'll use an impl method `render()` for cohesion.
+
+   Number formatting: use one decimal? Examples "X%". I'll use `{:.0}%` rounded — actually "21% vs 3%" integer percent is fine, but for tiny pools 0% vs 4% loses resolution. Use one decimal like the accuracy report (`{:.1}%`). Hmm, the accuracy report uses `{:.0}%` for hit rate (`{hit_rate_rounded:.0}%`). I'll round with one decimal but trailing `.0` looks odd for 100.0%. The accuracy module rounds to 1 decimal then formats with .0 — e.g. `21.0%`. To keep tone, use `{:.0}%`? For small pools (5 events, few files) sub-1% resolution rarely matters — differences are usually big. I'll use `{:.0}%` to match the report.
+
+   Hmm wait — actually for pooled rates over a handful of files, e.g. 3/77 = 3.9%, 1/500 = 0.2% → both render 4% and 0%. That's fine for a verdict line; the accuracy report has detail. OK `{:.0}%`.
+
+   Now `perceives` when rates are 0 vs 0: neither perceives. If flagged 0%, unflagged 0% → "does not yet perceive". Good, honest.
+
+   Edge: what if flagged_rate_pct is None (no predicted population)? Then calibrated but rates unavailable. Render: "sense organ calibrated: no usable flagged population yet — cannot judge". Hmm, when would this happen? pairs >= 5 requires events with scored_broke > 0, which requires predicted_count and total_scored present (scored_broke is only written alongside those). hits could be 0 → flagged rate 0, that's fine (denominator predicted_count > 0). predicted_count could theoretically be 0? If snapshot had empty top_10... but then no validation could be recorded (replay_validate_core returns None if predicted empty). In auto_validate_after_failure, predicted = last.predicted.len() too. So predicted_count > 0 whenever an event is recorded. Defensive `sum_predicted == 0 → None` guard anyway.
+
+   total_scored - predicted_count could be 0 → unflagged None. Fine, handled.
+
+   Now, the JSON in write_risk_meter_to — should I add the verdict? Let me add a `"verdict"` string field (rendered) — useful for humans/agents reading risk_meter.json directly, no downside. Actually wait, the harness reads risk_meter.json? Only the grep showed nothing in scripts/ or .github/. The task says "so every `arc risk` / `arc risk snapshot` surfaces the milestone state" — the render is what matters. Adding verdict to JSON is a small bonus. I'll add it — but careful: test_write_risk_meter_to_writes_stamp asserts specific fields; I'll add verdict assertion.
+
+   Wait, also `RiskMeter` gets a new field `verdict: CalibrationVerdict` — the test `test_format_risk_meter_line` constructs RiskMeter literally, and `test_compute_risk_meter_counts_from_fixtures` compares fields. Adding a field means the literal construction in test_format_risk_meter_line must be updated. That's fine.
+
+   Hmm, actually — do I want to store the full CalibrationVerdict in RiskMeter, or store the rendered String? Storing the struct is cleaner for tests; render in format. Let me store `pub(crate) verdict: CalibrationVerdict`.
+
+   Wait, but there's `test_compute_risk_meter_counts_from_fixtures` with 4 validations: 2 matched pairs (< 5) → verdict cold start. Fine.
+
+   Let me also double check: does `commands_risk_accuracy.rs`'s AccuracyStats/format_accuracy_report need the verdict? Task says don't duplicate; the verdict lives in the meter line. But should the accuracy report also show the verdict line? The task step 3 says wire into meter line ("format_risk_meter_line / write_risk_meter or wherever the meter renders"). Keep scope: meter line only. The accuracy report already has the lift and cold-start gates.
+
+   2. **Wire into format_risk_meter_line** — append verdict as second line:
+
+   ```rust
+   pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+       format!(
+           "risk meter: {}/{} pairs ({} snapshots, {} validations)\n{}",
+           meter.pairs, meter.target_pairs, meter.snapshots, meter.validations,
+           meter.verdict.render()
+       )
+   }
+   ```
+
+   Hmm — the call site prefixes `{DIM}` and suffixes `{RESET}` around the whole thing. Two lines in one println with dim wrapping — both lines dim. OK.
+
+   But wait — the existing test expects exact "risk meter: 1/5 pairs (88 snapshots, 2 validations)". After change it'd be that + "\n" + verdict. With pairs=1 → cold start: "cold start: 1/5 paired predictions — accumulating". I'll update the test.
+
+   Also — should the verdict render include the color codes? The call site applies DIM around the entire string; embedding colors inside would conflict. Keep plain text. Good.
+
+   3. **Tests** in commands_risk_snapshots tests module:
+   - cold-start: 3 pairs → "cold start" no accuracy number. I'll create events (3 with scored_broke>0, carrying lift fields) and assert render contains "cold start" and "3/5" and does NOT contain "perceives" nor a "%".
+   
+   Hmm wait — "no accuracy number": the cold start render must not contain "%". Let me make sure the cold-start render has no percent.
+
+   - calibrated perceives: 5 events where flagged broke more (e.g., predicted_count=10, total_scored=100, hits=6, scored_broke=10, surprises=4 — wait surprises would be parsed from surprises array; hit_count from hits array). Let me construct ValidationEvent structs directly with fields: day, hit_count, total_changed, accuracy_pct, predicted_count Some(10), total_scored Some(100), scored_broke Some(n). For perceived: hits 6, surprises 4 → scored_broke = 10 (6+4) consistent. flagged rate = 60% (6/10), unflagged = 4/(100-10)=4.4% → perceives. assert render contains "perceives".
+   - calibrated negative: 5 events where flagged did NOT break more: hits 1, surprises 20 over predicted 10, total 100 → flagged 10%, unflagged 20/90=22% → "does not yet perceive".
+
+   Assertion detail: render contains "flagged files broke at 60% vs unflagged 4%" — rounding: 4/90 = 4.44 → {:.0} → 4%. And 6/10=60%. Let me be careful with {:.0} rounding — 4.44 rounds to 4. OK. And negative: 1/10=10%, 20/90=22.2→22%.
+
+   For constructing events directly — that's allowed ("or construct ValidationEvent structs directly"). But ValidationEvent fields are pub(crate) within the module, tests are in same module → fine. But hit_count is a single usize (parsed from hits array length) — the struct only has hit_count, not a hits Vec. And surprises count is folded into total_changed = hits + surprises. Hmm! ValidationEvent has: day, hit_count, total_changed, accuracy_pct, predicted_count, total_scored, scored_broke. It does NOT store surprises separately!
+
+   PROBLEM: My verdict needs surprises count to compute unflagged rate = surprises/(total_scored - predicted_count). ValidationEvent only has total_changed = hits + surprises. So surprises = total_changed - hit_count. That works if I trust total_changed ≥ hit_count. Parse: total_changed = hits + surprises always. In test fixtures, I can construct with total_changed = hits + surprises.
+
+   So unflagged numerator = total_changed - hit_count. Good — derivable from ValidationEvent. Let me define:
+   - flagged numerator: hit_count, denominator: predicted_count (sum over lift-carrying events)
+   - unflagged numerator: total_changed - hit_count (≥ 0), denominator: total_scored - predicted_count
+   - pooled accuracy: hits / total_changed (this equals the accuracy module's hit rate over events) — but gated to lift-carrying events? The task says "plus pooled accuracy" — compute over the same lift-carrying pool for consistency: sum(hits)/sum(total_changed).
+   - scored_broke check for "pairs": pairs is passed in from compute_risk_meter (count of events with scored_broke > 0).
+
+   Wait, one more consideration on the flagged rate. In the accuracy module, lift uses flagged_rate = sum(hit_count)/sum(predicted_count) and baseline = sum(scored_broke)/sum(total_scored). My unflagged rate denominator (total_scored - predicted_count) — is the unflagged population. Hmm, but there's subtlety: surprises are scored files that broke but weren't predicted. total_scored - predicted_count = scored files not in predicted. Are surprises ⊆ flagged-unflagged population? In compute_validation's surprise filtering, surprises are limited to scored files (all_ranked). And predicted ⊆ all_ranked. So yes, surprises ⊆ (all_ranked \ predicted) — the unflagged scored population. 
+
+   Edge: what if total_scored < predicted_count (shouldn't happen but defensive)? Denominator saturates at 0 → None. Use `total_scored.saturating_sub(predicted)` — careful: if it underflows mathematically, saturating gives 0 → denominator 0 → None. Good.
+
+   Now `pairs` semantics — "matched prediction-outcome pairs". The meter counts scored_broke>0 events. The condition for lift-carrying events: all three fields Some. An event with scored_broke = Some(0) has all three and would be lift-carrying but contributes 0 pairs. If I pool over all lift-carrying events (including scored_broke=0 ones), the rates are still fine (0 breaks adds nothing to numerators). But should those count toward "calibrated"? The task threshold is pairs ≥ 5 where pairs = matched pairs (scored_broke > 0). A scored_broke=0 event means "no scored file broke" — it's still a valid prediction-outcome observation... The meter's existing pairs semantics (scored_broke > 0) — the DREAM milestone counts "≥5 matched prediction-outcome pairs" where a "matched pair" = "the loop observed at least one scored file breaking" per the RiskMeter doc comment. I'll keep pairs as passed by compute_risk_meter (scored_broke > 0). The pooling denominator for "pooled accuracy" should then only cover events where something scored broke? Hmm — the accuracy report's hit rate pools total_hits/total_changed over ALL events (including day 174's empty event which adds 0/0). Including zero-broke events dilutes nothing (0 numerators); it does add to counts. But if total_changed = 0 for such events they contribute 0/0. Fine.
+
+   Let me now write the code. Also need to update:
+   - `RiskMeter` struct: add `verdict: CalibrationVerdict`.
+   - `compute_risk_meter`: build verdict.
+   - `write_risk_meter_to`: add "verdict" to JSON.
+   - `format_risk_meter_line`: append verdict render.
+   - tests: update test_format_risk_meter_line, add 3 new tests.
+   - Docs: add "Calibration status" subsection.
+
+   One more check: does the JSON "pairs" in risk_meter.json currently say 3 with target 5 — cold start. Good.
+
+   Let me also check the accuracy report's "Pairs: 1/5" string uses the same threshold constant — `format!("Pairs: {pairs}/5")` hardcoded /5. There's RISK_METER_TARGET_PAIRS in snapshots module. Not my concern.
+
+   Also need to check imports: commands_risk_snapshots.rs uses serde_json — write_risk_meter_to already uses serde_json::json!. Good.
+
+   Now, where does CalibrationVerdict live — commands_risk_snapshots.rs. The accuracy module could later reuse it; it already imports ValidationEvent from here. Good.
+
+   Let me also add a `render` for cold start: `cold start: {pairs}/{target} paired predictions — accumulating`.
+
+   Let me write the implementation now. First the struct + function, placed right after format_risk_meter_line (or before it — verdict function near the meter code). I'll put the CalibrationVerdict + calibration_verdict + render after format_risk_meter_line, before the tests module.
+
+   Let me write tests first (write a test first if possible — the task says write a test first). Let me do the test-first approach: add the tests, run them (they fail), then implement. Actually, per project convention "Write a test first if possible". Let me do tests first, confirm they fail, then implement, then run full checks.
+
+   Let me draft the tests:
+
+   ```rust
+   #[test]
+   fn test_calibration_verdict_cold_start_renders_no_accuracy() {
+       // 3 matched pairs (< 5 target): render the cold-start status, never a %.
+       let events = vec![
+           lift_event(170, 1, 2, 10, 100, 2),
+           lift_event(171, 2, 3, 10, 100, 3),
+           lift_event(172, 0, 1, 10, 100, 1),
+       ];
+       let pairs = events.iter().filter(|e| e.scored_broke.is_some_and(|n| n > 0)).count() as u64;
+       let verdict = calibration_verdict(pairs, &events, 5);
+       assert!(!verdict.calibrated);
+       assert_eq!(verdict.pairs, 3);
+       let line = verdict.render();
+       assert!(line.contains("cold start") && line.contains("3/5"), "got: {line}");
+       assert!(!line.contains('%'), "cold start must not quote accuracy: {line}");
+       assert!(!line.contains("perceives"), "cold start must not judge: {line}");
+   }
+   ```
+
+   Wait — pairs passed in: with these events all scored_broke > 0 → pairs = 3. Good — matches `verdict.pairs == 3`.
+
+   ```rust
+   #[test]
+   fn test_calibration_verdict_calibrated_perceives_when_flagged_broke_more() {
+       // 5 matched pairs, flagged files broke 60% (6/10 each) vs unflagged ~4%:
+       // the sense organ perceives churn.
+       let events: Vec<ValidationEvent> = (0..5)
+           .map(|d| lift_event(170 + d, 6, 10, 10, 100, 10))
+           .collect();
+       let pairs = events.iter().filter(|e| e.scored_broke.is_some_and(|n| n > 0)).count() as u64;
+       let verdict = calibration_verdict(pairs, &events, 5);
+       assert!(verdict.calibrated);
+       assert!(verdict.perceives);
+       let line = verdict.render();
+       assert!(line.contains("flagged files broke at 60% vs unflagged 4%"), "got: {line}");
+       assert!(line.contains("perceives churn"), "got: {line}");
+   }
+   ```
+
+   With hit=6, changed=10 → surprises = 4. scored_broke = 10? Wait I set scored_broke Some(10) — hits 6 + surprises 4 = 10 consistent. Pooled: hits 30, predicted 50 → 60%. surprises 20, total_scored 500, predicted 50 → unflagged pop 450 → 20/450 = 4.44% → {:.0} → 4%. 
+
+   ```rust
+   #[test]
+   fn test_calibration_verdict_calibrated_honest_negative_when_flags_miss() {
+       // 5 matched pairs, flagged files broke 10% vs unflagged ~22%: the honest
+       // negative verdict — the milestone measures, it does not flatter.
+       let events: Vec<ValidationEvent> = (0..5)
+           .map(|d| lift_event(170 + d, 1, 21, 10, 100, 21))
+           .collect();
+       let pairs = events.iter().filter(...).count() as u64;
+       let verdict = calibration_verdict(pairs, &events, 5);
+       assert!(verdict.calibrated);
+       assert!(!verdict.perceives);
+       let line = verdict.render();
+       assert!(line.contains("flagged files broke at 10% vs unflagged 22%"), "got: {line}");
+       assert!(line.contains("does not yet perceive"), "got: {line}");
+   }
+   ```
+
+   1/10 = 10%, surprises = 21-1=20 per event → 100 surprises / (500-50)=450 → 22.2% → 22%. Good.
+
+   Helper lift_event(day, hit_count, total_changed, predicted, total_scored, scored_broke):
+   ```rust
+   fn lift_event(day: u32, hits: usize, changed: usize, predicted: usize, total_scored: usize, scored_broke: usize) -> ValidationEvent {
+       ValidationEvent {
+           day,
+           hit_count: hits,
+           total_changed: changed,
+           accuracy_pct: if changed > 0 { hits as f64 / changed as f64 * 100.0 } else { 0.0 },
+           predicted_count: Some(predicted),
+           total_scored: Some(total_scored),
+           scored_broke: Some(scored_broke),
+       }
+   }
+   ```
+
+   Implementation of calibration_verdict:
+
+   ```rust
+   pub(crate) fn calibration_verdict(
+       pairs: u64,
+       events: &[ValidationEvent],
+       target_pairs: u64,
+   ) -> CalibrationVerdict {
+       let mut hit_sum = 0usize;
+       let mut predicted_sum = 0usize;
+       let mut total_scored_sum = 0usize;
+       let mut surprises_sum = 0usize;
+       let mut changed_sum = 0usize;
+       for e in events {
+           if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+               (e.predicted_count, e.total_scored, e.scored_broke)
+           {
+               hit_sum += e.hit_count;
+               predicted_sum += pred;
+               total_scored_sum += total_scored;
+               surprises_sum += e.total_changed.saturating_sub(e.hit_count);
+               changed_sum += e.total_changed;
+               let _ = scored_broke; // pairs already counted by the meter
+           }
+       }
+       let flagged_rate = if predicted_sum > 0 {
+           Some(hit_sum as f64 / predicted_sum as f64 * 100.0)
+       } else { None };
+       let unflagged_denom = total_scored_sum.saturating_sub(predicted_sum);
+       let unflagged_rate = if unflagged_denom > 0 {
+           Some(surprises_sum as f64 / unflagged_denom as f64 * 100.0)
+       } else { None };
+       let pooled_accuracy = if changed_sum > 0 {
+           Some(hit_sum as f64 / changed_sum as f64 * 100.0)
+       } else { None };
+       let calibrated = pairs >= target_pairs;
+       let perceives = calibrated
+           && matches!((flagged_rate, unflagged_rate), (Some(f), Some(u)) if f > u);
+       CalibrationVerdict {
+           calibrated: pairs >= target_pairs,  // hmm compute once
+           pairs, target_pairs,
+           flagged_rate_pct: flagged_rate,
+           unflagged_rate_pct: unflagged_rate,
+           pooled_accuracy_pct: pooled_accuracy,
+           perceives,
+       }
+   }
+   ```
+
+   Hmm — `let _ = scored_broke;` is ugly. Just don't destructure scored_broke: use `if let (Some(pred), Some(total_scored)) = (e.predicted_count, e.total_scored)`. But scored_broke presence is the marker of the lift feature... presence of predicted_count & total_scored alone suffices (they're always written together with scored_broke). And events with scored_broke None but predicted/total Some — old format had predicted_count but no total_scored. So requiring all three is the accuracy module's convention. I only need pred and total_scored for the denominators; hit_count/total_changed are always present (not optional). But to be conservative, require all three like the accuracy module (consistency). I'll keep the three-way destructure but not need scored_broke value: capture as `Some(_)` or just (_, ...). Let me write `if let (Some(pred), Some(total_scored), Some(_scored_broke)) = ...`.
+
+   Wait — but should scored_broke Some(0) events count in pooling? Yes — they're lift-carrying and add 0 to numerators. Their hit=0, surprises=0 presumably. Fine.
+
+   Now render:
+
+   ```rust
+   impl CalibrationVerdict {
+       /// Plain-language milestone line. Cold start: honest status, no accuracy
+       /// claims. Calibrated: one discriminating sentence — the negative case
+       /// (flags didn't concentrate breakage) stated just as plainly.
+       pub(crate) fn render(&self) -> String {
+           if !self.calibrated {
+               return format!(
+                   "cold start: {}/{} paired predictions — accumulating",
+                   self.pairs, self.target_pairs
+               );
+           }
+           let flagged = match self.flagged_rate_pct {
+               Some(p) => format!("{p:.0}%"),
+               None => "n/a".to_string(),
+           };
+           let unflagged = match self.unflagged_rate_pct {
+               Some(p) => format!("{p:.0}%"),
+               None => "n/a".to_string(),
+           };
+           let judgement = if self.perceives {
+               "perceives churn"
+           } else {
+               "does not yet perceive churn"
+           };
+           let accuracy = match self.pooled_accuracy_pct {
+               Some(p) => format!(" (pooled accuracy {p:.0}%)"),
+               None => String::new(),
+           };
+           format!(
+               "sense organ calibrated: flagged files broke at {flagged} vs unflagged {unflagged}{accuracy} — {judgement}"
+           )
+       }
+   }
+   ```
+
+   Hmm — the test asserts `line.contains("flagged files broke at 60% vs unflagged 4%")` — with the accuracy suffix it becomes "vs unflagged 4% (pooled accuracy 60%) — perceives churn". Contains "flagged files broke at 60% vs unflagged 4%" ✓ still works.
+
+   Negative: "flagged files broke at 10% vs unflagged 22% (pooled accuracy 5%) — does not yet perceive churn" ✓ contains both substrings. pooled accuracy: hits 5, changed 105 → 4.76% → 5%.
+
+   Perceives test pooled accuracy: hits 30 / changed 50 → 60% → "(pooled accuracy 60%)". OK.
+
+   Wait, the task says "Never quote an accuracy percentage from <5 pairs" — cold start render has no %. ✓
+
+   Now RiskMeter:
+
+   ```rust
+   pub(crate) struct RiskMeter {
+       ...
+       /// The dream-milestone interpretation over the current pool (cold-start
+       /// status or the calibrated verdict), rendered by `format_risk_meter_line`.
+       pub(crate) verdict: CalibrationVerdict,
+   }
+   ```
+
+   compute_risk_meter:
+   ```rust
+   let verdict = calibration_verdict(pairs, &validations, RISK_METER_TARGET_PAIRS);
+   RiskMeter { ..., verdict }
+   ```
+
+   write_risk_meter_to JSON: add `"verdict": meter.verdict.render(),`.
+
+   format_risk_meter_line:
+   ```rust
+   format!(
+       "risk meter: {}/{} pairs ({} snapshots, {} validations)\n{}",
+       meter.pairs, meter.target_pairs, meter.snapshots, meter.validations,
+       meter.verdict.render()
+   )
+   ```
+
+   Now existing test test_format_risk_meter_line needs updating: RiskMeter literal must include verdict. With pairs=1: cold start → "risk meter: 1/5 pairs (88 snapshots, 2 validations)\ncold start: 1/5 paired predictions — accumulating".
+
+   Let me also check for other RiskMeter literal constructions elsewhere (commands_risk.rs?). grep for "RiskMeter {" in src.
+
+   Let me also double-check that compute_risk_meter fixture test has 2 pairs → cold start; no asserts on verdict there, fine.
+
+   Docs: add "Calibration status" subsection after "The risk meter" section in docs/src/features/risk.md.
+
+   Let me start: first add the tests (test-first), run to see them fail, then implement.
+
+   Actually the tests reference calibration_verdict and CalibrationVerdict — they won't compile until implemented. Test-first in Rust means writing tests + minimal stub. I'll write the tests, run cargo test → compile error, then implement. That's acceptable per "Write a test first if possible". To keep momentum, I'll write tests then immediately implement, then run once.
+
+   Let me look at the tests module imports for commands_risk_snapshots (line 574-576: `use super::*;` — good).
+
+   Now write the code.
+────────────────────────────────────────────────────────────────────────────────
+I have the full picture now. Let me check for any other `RiskMeter {` literal constructions before writing code.
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -rn "RiskMeter {" src/ | grep -v "struct RiskMeter"; echo "---"; grep -rn "… ✓ (12ms)
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ grep -n "RISK_VALIDATION_PATH\|RISK_SNAPSHOT_PATH\|RISK_METER_PATH" src/commands… ✓ (4ms)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_risk_snapshots.rs:476..506 ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+I have everything I need. Let me plan the implementation.
+
+**Design:**
+
+1. Add `CalibrationVerdict` struct + `calibration_verdict(events: &[ValidationEvent]) -> CalibrationVerdict` in `commands_risk_snapshots.rs` (where the meter lives).
+   - `pairs` = events with `scored_broke > 0` (consistent with `compute_risk_meter`'s counting).
+   - `cold_start: bool` = `pairs < RISK_METER_TARGET_PAIRS`.
+   - If cold start: text = `cold start: {pairs}/{target} paired predictions — accumulating` and no accuracy claims.
+   - If calibrated: compute pooled rates across events:
+     - `flagged_broke = sum(hits)` — wait, careful. The task says:
+       - flagged breakage rate `sum(scored_broke) / sum(total_scored)`? Hmm wait, re-read the task:
+
+       "**Calibrated path** (`pairs >= target_pairs`): compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+       Hmm, but wait — `scored_broke` = hits + scored surprises (per the writer semantics at line 2393-2397: `scored_broke = hits.len() + surprises.len()`). So `scored_broke` is the count of ALL scored files that broke, not just flagged ones.
+
+       But the task literally says "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)". Hmm. Let me think about this carefully against the existing accuracy module's semantics.
+
+       Looking at `compute_accuracy_stats` (lines 139-179):
+       - `flagged_rate = sum(hit_count) / sum(predicted_count)` — hits are predicted files that broke.
+       - `baseline_rate = sum(scored_broke) / sum(total_scored)` — all scored files that broke / all scored files.
+
+       So in the existing codebase:
+       - `hit_count`/`predicted_count` = flagged (predicted-high-risk) breakage rate.
+       - `scored_broke`/`total_scored` = baseline rate over ALL scored files.
+
+       The task description says "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". That's... a slightly different framing. Let me reconcile.
+
+       Actually — the task's notation is loose. Let me interpret it correctly per the existing semantics:
+       - flagged breakage rate = hits / predicted_count (files flagged high risk that broke, over all flagged)
+       - unflagged breakage rate = surprises / total_scored (files NOT flagged that broke, over all scored)
+
+       Hmm, but the task explicitly gives the formulas. Let me re-read.
+
+       "compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+       Hmm — that reads as if the task author thought `scored_broke` = flagged breakage. But per the code, `scored_broke` = hits + surprises (ALL scored files that broke). If I used `sum(scored_broke) / sum(total_scored)` as "flagged rate", it would literally be the baseline rate, and comparing it against unflagged rate `sum(surprises)/sum(total_scored)` would have flagged ≥ unflagged always (since flagged = all = hits+surprises ≥ surprises... wait no, flagged rate = (hits+surprises)/total vs unflagged = surprises/total, so flagged would always be ≥ unflagged — trivially true, meaningless).
+
+       So the task's literal formulas are wrong relative to the code's semantics. The right discriminative readout given the actual data model:
+       - flagged (predicted high-risk) breakage rate = `sum(hit_count) / sum(predicted_count)` — this is the rate at which flagged files broke.
+       - unflagged breakage rate = files that broke but were not flagged / ... denominator should be the non-flagged population. We don't have the exact non-flagged population count, but we have `total_scored` (all scored files) and `predicted_count` (flagged count). So non-flagged population ≈ `total_scored - predicted_count`. Unflagged broke = surprises (broke but not predicted). So unflagged rate = `sum(surprises) / sum(total_scored - predicted_count)`.
+
+       Hmm, but that's inventing a denominator. Alternatively the simpler honest pooled readout:
+       - flagged rate = hits / predicted (over events carrying the fields)
+       - baseline rate = scored_broke / total_scored (ALL scored files broke at rate X)
+
+       The existing accuracy module already computes exactly this as `overall_lift` (flagged_rate / baseline_rate). The task says "Do NOT duplicate existing computation — extend or reframe it."
+
+       Let me reconcile with what the task is really asking. The task's core goal: when pairs ≥ 5, render ONE plain-language verdict line: `sense organ calibrated: flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn`.
+
+       So I need "flagged files broke at X% vs unflagged Y%". Given the actual data model:
+       - Flagged breakage rate: files the scorer predicted high-risk that broke. `hit_count` per event is exactly that. Denominator `predicted_count` (flagged population).
+       - Unflagged breakage rate: files that broke but were NOT flagged. That's `surprises`. Denominator: the non-flagged scored population = `total_scored - predicted_count`.
+
+       This is the honest discriminative readout: does the flagged population break at a higher rate than the rest?
+
+       The task literally wrote `sum(scored_broke) / sum(total_scored)` for flagged, but that's mathematically the ALL-files rate, which would make the comparison meaningless (flagged ⊆ all). Given the code semantics (scored_broke = hits + scored surprises = ALL scored files that broke), the task's formula is a mislabel. The correct discriminative readout:
+       - flagged_rate = sum(hit_count) / sum(predicted_count)
+       - unflagged_rate = sum(surprises) / sum(total_scored - predicted_count)
+
+       And "pooled accuracy" = overall hit rate = sum(hits) / sum(changed) — already exists as `overall_hit_rate_pct`.
+
+       Hmm. But the task says specifically "`sum(surprises.len()) / sum(total_scored)`" for unflagged. With surprises as numerator — surprises are files that broke but weren't predicted; over ALL scored files as denominator? That under-counts (surprises/total_scored is the rate of "unpredicted breakage among all scored files", not the unflagged breakage rate among unflagged files). It's a defensible "breakage not caught by the flags" rate but it's not the "unflagged breakage rate" per se.
+
+       I want to follow the task's intent (a meaningful discriminative comparison) while being faithful to the actual data. The most honest semantic that matches the codebase's existing lift computation:
+       - flagged_rate = hits / predicted_count
+       - unflagged (baseline) rate = scored_broke / total_scored? No wait — scored_broke includes hits. Baseline over ALL scored files includes flagged files breaking. For "flagged vs unflagged" discrimination we want flagged vs NOT-flagged.
+
+       Let me think about what "unflagged breakage rate" should be: files that broke and were not flagged, divided by files that were not flagged. We know:
+       - Not-flagged broke = surprises (that's what surprises means — broke but not in predictions; and per `compute_validation`, surprises are filtered to scored files).
+       - Not-flagged population = total_scored - predicted_count.
+
+       So unflagged_rate = surprises / (total_scored - predicted_count). Guard against zero denominators.
+
+       That's the truest reading of "flagged files broke at X% vs unflagged Y%".
+
+       Hmm, but wait — the "flagged population" per event is `predicted_count` = `last.predicted.len()` which is ≤ 10 (top-10). The scored population is `all_ranked.len()` (all files the scorer could rank). So predicted ⊆ scored (roughly; predictions come from the top of the ranking). So total_scored - predicted_count = non-flagged scored population. 
+
+       Decision: I'll compute:
+       - `flagged_broke = Σ hit_count`, `flagged_total = Σ predicted_count` → flagged_rate = flagged_broke / flagged_total
+       - `unflagged_broke = Σ surprises.len()`, `unflagged_total = Σ (total_scored - predicted_count)` → unflagged_rate = unflagged_broke / unflagged_total
+       - pooled accuracy = Σ hit_count / Σ (hit_count + surprises.len()) — hmm, or reuse overall_hit_rate semantics = hits/total_changed where total_changed = hits + surprises per event. Same thing.
+
+       Actually — should I reuse `compute_accuracy_stats`? It computes `overall_lift` = flagged_rate / baseline_rate where baseline = scored_broke/total_scored (all-scored rate). That's a different baseline than the task's wanted "unflagged rate". And the task explicitly says flagged vs unflagged. The existing `overall_lift` compares flagged vs ALL-scored (baseline), which is also a meaningful discriminative measure but not exactly "flagged vs unflagged".
+
+       I'll compute the verdict from raw events with the flagged vs unflagged framing per the task, using real fields, without reusing compute_accuracy_stats (which defaults per_signal_hits to None, requiring the full snapshot cross-ref the meter path doesn't do). I'll keep it a pure function over `&[ValidationEvent]`, in the snapshots module, and reuse it in `format_risk_meter_line`.
+
+       But hold on — the task's exact formula for the verdict: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)". Since `scored_broke` per the writer = hits + scored surprises, `sum(scored_broke)` = ALL scored files that broke across events. If I labeled that as "flagged", the verdict line would overstate. But hmm — is there a chance `scored_broke` in some paths means only flagged? Let me check `write_validation_event` callers... In `replay_validate_core`: `scored_broke = Some(hits.len() + surprises.len())`. In `auto_validate_after_failure` (line ~330): it computes within the function — let me check what scored_broke means there. At line 332-344 I saw the call `write_validation_event(...)` passing `None, None` for the last two args (total_scored, scored_broke). So the watch-failure path passes None/None — those fields only come from the replay path.
+
+       OK so `scored_broke` = hits + surprises is confirmed. The task's "flagged breakage rate = sum(scored_broke)/sum(total_scored)" would be the ALL-files breakage rate — NOT the flagged rate. Marking that as "flagged" in the verdict would be wrong and would flatter the sensor. This is exactly the kind of thing the "honest, does not flatter" constraint warns about.
+
+       Wait, actually, let me re-read the task once more:
+
+       "compute the pooled discriminative readout across all validation events: flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`), plus pooled accuracy."
+
+       Hmm, hmm. Maybe the task author intends `scored_broke` to be "scored files the loop observed breaking among flagged ones"? No — the code is unambiguous: `scored_broke = hits.len() + surprises.len()`.
+
+       I think the task author misremembered the field semantics, OR they intend a coarser message: "of the scored population, X% broke and were flagged, Y% broke unflagged" — i.e., both over the total_scored denominator:
+       - flagged share of breakage = hits / total_scored (share of scored files that broke AND were flagged)
+       - unflagged share = surprises / total_scored (share that broke un-flagged)
+
+       With both over total_scored, the comparison "flagged broke at X% vs unflagged Y%" compares two *shares of the whole population*, and flagged > unflagged means the flags caught a bigger share of the broke population than the unflagged share. Hmm, that's a "coverage" framing rather than a "rate" framing. It's meaningful in a weird way but not the standard discriminative readout (rate among flagged vs rate among unflagged).
+
+       The most standard, honest, statistically-sound discriminative measure given the fields:
+       - flagged_rate = hits / predicted_count
+       - unflagged_rate = surprises / (total_scored − predicted_count)
+
+       This directly answers "do flagged files break more often than unflagged ones?" which is precisely what the dream milestone asks: "whether files the scorer flagged as high-risk actually broke more often than unflagged ones."
+
+       I'll go with the standard rates (hits/predicted vs surprises/(total−predicted)). This matches the dream wording exactly. I'll document the choice in code comments and note in the docs.
+
+       Hmm, but there's a wrinkle: is `surprises` ⊆ scored? Per replay_validate_core, `compute_validation` filters surprises to scored files ("surprises are already filtered to scored files by compute_validation"). And `total_scored = all_ranked.len()`. `predicted_count = last.predicted.len()`. Since predictions come from the top-10 of the ranking (which is the scored population), predicted ⊆ scored. So total_scored − predicted_count ≥ 0 as long as predicted ⊆ total_scored. In real data predicted = last.predicted.len() which could theoretically exceed total_scored if the snapshot's top_10 came from a different (larger) run... but the snapshot and the replay happen on the same repo. To be safe, guard with saturating subtraction: `total_scored.saturating_sub(predicted_count)`.
+
+       Now, the "perceives churn" wording. The task example: `sense organ calibrated: flagged files broke at X% vs unflagged Y% — [perceives / does not yet perceive] churn`.
+
+       Verdict logic: perceives if flagged_rate > unflagged_rate (the sensor discriminates). If flagged_rate ≤ unflagged_rate → "does not yet perceive". Maybe require a meaningful margin? The task just says "flagged files did NOT break more often → honest negative verdict". I'll use `flagged_rate > unflagged_rate` → perceives, else → does not yet perceive. Keep it simple; no threshold fudging. Rates are computed on pooled aggregates.
+
+       Edge cases in calibrated path: denominators zero (predicted_count sum = 0, or total_scored − predicted = 0). Guard → return a verdict with `Some(0.0)`/None... Let me define:
+
+       ```rust
+       pub(crate) struct CalibrationVerdict {
+           pub(crate) cold_start: bool,
+           pub(crate) pairs: u64,
+           pub(crate) target_pairs: u64,
+           pub(crate) flagged_rate_pct: Option<f64>,   // hits / predicted_count, pooled
+           pub(crate) unflagged_rate_pct: Option<f64>, // surprises / (total_scored - predicted_count), pooled
+           pub(crate) pooled_accuracy_pct: Option<f64>, // hits / (hits + surprises), pooled
+           pub(crate) perceives: Option<bool>, // None while cold-start
+           pub(crate) line: String, // the rendered one-liner
+       }
+       ```
+
+       And `calibration_verdict(events: &[ValidationEvent]) -> CalibrationVerdict`.
+
+       `line` renders:
+       - cold start: `cold start: 3/5 paired predictions — accumulating`
+       - calibrated: `sense organ calibrated: flagged files broke at X% vs unflagged Y% (pooled accuracy Z%) — perceives churn` / `— does not yet perceive churn`
+
+       Task says "plus pooled accuracy" so include it.
+
+       Then `format_risk_meter_line(meter)` needs the events to compute the verdict. Currently it takes only `&RiskMeter`. Options:
+       a) Change signature to `format_risk_meter_line(meter: &RiskMeter, events: &[ValidationEvent])` — but the meter is computed from content that is discarded. Caller in commands_risk.rs has access to the validation path; could read it. But cleaner: attach the verdict to... hmm.
+       b) Have `write_risk_meter_to` return the meter, and `format_risk_meter_line` re-derive events by reading the validation file. That's duplicating I/O.
+       c) Change `format_risk_meter_line(meter: &RiskMeter, verdict: &CalibrationVerdict)` and compute verdict in the caller... The caller (commands_risk.rs line 1418) only has `meter`.
+       d) Simplest honest approach: `write_risk_meter_to` already parses validation content (via compute_risk_meter). I can have `write_risk_meter_to` ALSO persist the verdict line into the meter JSON (a `"verdict"` field), and `RiskMeter` carries a `verdict_line: String`. Then `format_risk_meter_line` just appends `meter.verdict_line`. The line is computed at parse time from the same validation content — no extra I/O, no signature changes beyond the struct field.
+
+       Wait — but `RiskMeter` is constructed in `compute_risk_meter(snapshot_content, validation_content)` which has the validation events in hand! Perfect: compute verdict there, store `verdict_line` on the meter. And `format_risk_meter_line` appends it. Callers unchanged. Tests construct `RiskMeter` literally at line 1210 — need to add the field there (and check for others... only one literal construction).
+
+       Also persist `"pairs"`, `"verdict"` in the JSON stamp. The task says "Keep the existing pairs/validations numbers; append the verdict line." So `write_risk_meter_to` writes pairs already; adding a `verdict` field to the stamp lets humans/agents reading the file see milestone state too. Good.
+
+       Let me also double check: the task says place the function in `commands_risk_snapshots.rs` (where RiskMeter/compute_risk_meter/format_risk_meter_line live) **or** `commands_risk_accuracy.rs`. I'll put it in `commands_risk_snapshots.rs` since that's where the meter rendering happens; it's also where `ValidationEvent` and `parse_validation_events` live. `commands_risk_accuracy::compute_accuracy_stats` already computes `overall_lift` with flagged vs baseline — I should reference it in a comment to avoid duplication confusion, but the verdict needs the unflagged-population framing which AccuracyStats doesn't provide. I won't call compute_accuracy_stats from the snapshots module (it lives in the accuracy module; using it would create a dependency and its per_signal_hits handling and box formatting aren't needed here). The computation is 12 lines over a slice — acceptable to compute directly, clearly commented as the pooled flagged-vs-unflagged readout.
+
+       Hmm — "Do NOT duplicate existing computation — extend or reframe it." The lift in compute_accuracy_stats compares flagged_rate vs baseline_rate (hits/predicted vs scored_broke/total_scored). My flagged_rate is the same numerator/denominator as theirs (hits/predicted). The difference is the comparison baseline: unflagged rate = surprises/(total_scored−predicted) instead of all-scored baseline. I think the honest move per the task's explicit framing ("flagged vs unflagged") is the unflagged-population baseline, computed directly. I'll add a comment cross-referencing compute_accuracy_stats's lift so future readers see the relationship. That satisfies "extend or reframe" — it's the reframe the dream milestone actually demands (flagged vs NOT-flagged, not flagged vs all).
+
+       Let me be careful about one more thing: `pairs` in the meter counts events with `scored_broke > 0`. But the verdict's calibrated path should use events carrying the lift fields (`predicted_count`, `total_scored`, `scored_broke`) — the same "lift_events_used" counting as `compute_accuracy_stats`. Note: `pairs` (scored_broke>0) ≥ lift_events (all three fields present)? Actually pairs counts scored_broke present AND >0. lift_events counts events with all three Some. An event could have scored_broke Some(>0) but predicted_count None or total_scored None (e.g. old watch-failure events). In that case it counts as a pair but can't feed the verdict rates. The existing accuracy module handles this by `lift_events_used` being separate from pairs display. For the verdict, I'll count pairs for the cold-start gate EXACTLY as the meter does (`scored_broke.is_some_and(|n| n > 0)`) — consistent with the meter line — and use only lift-carrying events for the pooled rates. If pairs ≥ 5 but all rate denominators are zero (degenerate), render the cold-start-ish honest note... I'll handle: if no usable rate events, falls back to `calibrated but no rate data` line. That's defensive and honest.
+
+       Hmm wait, actually let me reconsider — should the cold-start gate use `pairs` (scored_broke>0) or `lift_events_used` (all fields)? The task: "**Cold-start path** (`pairs < target_pairs`, i.e. < 5)". pairs per the meter = scored_broke > 0 events. Use that. Good — consistent with both the meter and the task.
+
+       Now let me also decide rates display: task example shows whole percents "X%". I'll use `{:.0}%` like the surrounding code. Pooled accuracy likewise. Fine.
+
+       Negative case wording: "flagged files broke at X% vs unflagged Y% — does not yet perceive churn". Positive: "— perceives churn".
+
+       Edge: unflagged denominator (total_scored − predicted) could be 0 → unflagged_rate None → verdict line: `flagged files broke at X% — no unflagged files scored — does not yet conclude` hmm. Keep simple: if either rate is None render rates as "—" and choose perceives=None → honest "no conclusion". Actually let me keep the structure: fields are Option; line builder handles.
+
+       Let me now also check the `#![cfg(test)]` guard note — `run_git` destructive guard — not relevant here, my tests are pure.
+
+       Char-boundary: no string slicing — all formatting via format!. Fine.
+
+       Tests needed (in-module):
+       1. Cold-start: 3 events (or fewer) with lift fields → `cold_start == true`, line contains "cold start" and "3/5", line does NOT contain "%" accuracy claim... actually the cold line shouldn't contain any "%-based" verdict. Assert no "perceives" / "calibrated".
+       2. Calibrated perceives: 5+ events where hits/predicted high and surprises/(total−predicted) low → perceives == Some(true), line contains "perceives churn" and "calibrated".
+       3. Calibrated negative: 5+ events where flagged did NOT break more (e.g. surprises rate high, hits rate low) → perceives == Some(false), line contains "does not yet perceive".
+
+       I need to construct ValidationEvent structs with fields: day, hit_count, total_changed, accuracy_pct, predicted_count: Option<usize>, total_scored: Option<usize>, scored_broke: Option<usize>. Derived Default exists — good, I can fill what I need.
+
+       For the perceives test: events with predicted_count=10, total_scored=77, scored_broke=hits+surprises.
+       - Positive case: 5 events each: hit_count=6, surprises=1 → flagged_rate=30/50=60%, unflagged... total−predicted = 67 per event → surprises 5/335 = 1.5%. perceives=true. scored_broke = 7 each > 0 → pairs=5. 
+       - Negative case: 5 events: hit_count=0, surprises=7 → flagged_rate=0, unflagged=35/335 ≈ 10.4%. perceives=false. scored_broke=7>0 → pairs=5. Also accuracy: hits/(hits+surprises) = 0%.
+
+       Also I should add a test that the meter line appends the verdict: extend `test_format_risk_meter_line`? That test constructs RiskMeter literally — I'll add the new field there (verdict_line: "cold start: 1/5 paired predictions — accumulating") and keep the existing assertion. And add a test for the write stamp including "verdict" field maybe. Let me update `test_write_risk_meter_to_writes_stamp` to also assert written["verdict"] exists — the fixture there: 1 snapshot, 1 validation with hits=["src/c.rs"], scored_broke=1 → pairs=1 → cold start verdict. Verdict string = "cold start: 1/5 paired predictions — accumulating".
+
+       JSON stamp: add "verdict": meter.verdict_line.
+
+       Now `commits` — attach verdict_line to RiskMeter struct. Struct literal at line 1210 in tests needs the field too, and compute_risk_meter sets it.
+
+       Let me now also double-check `commands_risk.rs` imports — line 14 imports `format_risk_meter_line` etc. from snapshots module. Since signature of format_risk_meter_line stays `(&RiskMeter) -> String`, no import changes needed.
+
+       One more check — the task's step 2 example: "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`) vs unflagged breakage rate (`sum(surprises.len()) / sum(total_scored)`)". I've decided to deviate to the statistically-true flagged & unflagged *population* rates. Risk: evaluator might echo the task's literal formulas. But the constraints emphasize honesty ("the milestone measures, it does not flatter") and the DREAM explicitly: "whether files the scorer flagged as high-risk actually broke more often than unflagged ones". hits/predicted vs surprises/(total−predicted) is EXACTLY that. The literal formula would mislabel. I'm going with the true discriminative readout and will document the deviation clearly in the code comment + docs. Actually — let me re-read one more time... "flagged breakage rate (`sum(scored_broke) / sum(total_scored)`)". 
+
+       Hmm, wait. Could it be that in the task author's mind, `scored_broke` counts only flagged breakage? The comment in the struct says: "Count of scored source files that actually broke (hits + scored surprises)." and replay_validate_core sets it to `hits.len() + surprises.len()`. So no. The author misremembered. My deviation is correct and I'll note it.
+
+       Actually, hold on. Let me reconsider `sum(surprises.len()) / sum(total_scored)` — "unflagged breakage rate". surprises = files that broke but weren't predicted — that IS unflagged breakage (numerator). Over total_scored as denominator — that's "unflagged breakage as a share of the whole scored population". And `sum(scored_broke)/sum(total_scored)` as "flagged breakage rate" would actually be... the all-scored breakage share. So under the literal formulas, the comparison is "all scored breakage share vs unpredicted breakage share" — which would ALWAYS show flagged ≥ unflagged by construction (all = flagged + unflagged shares), making "perceives" trivially true if ANY flag ever hits. That's exactly the "flatters the sensor" trap. My version avoids it. Decision locked: flagged = hits/predicted_count; unflagged = surprises/(total_scored−predicted_count).
+
+       Let me write the code now.
+
+       Also - should I name it `calibration_verdict`? Yes. Return type `CalibrationVerdict`.
+
+       Plan for the verdict struct fields (keep minimal but complete for rendering & tests):
+       ```rust
+       pub(crate) struct CalibrationVerdict {
+           pub(crate) cold_start: bool,
+           pub(crate) pairs: u64,
+           pub(crate) target_pairs: u64,
+           pub(crate) flagged_rate_pct: Option<f64>,
+           pub(crate) unflagged_rate_pct: Option<f64>,
+           pub(crate) pooled_accuracy_pct: Option<f64>,
+           pub(crate) perceives: Option<bool>,
+           pub(crate) line: String,
+       }
+       ```
+
+       The `line` render:
+       - cold: `cold start: {pairs}/{target} paired predictions — accumulating`
+       - warm: `sense organ calibrated: flagged files broke at {f}% vs unflagged {u}% (pooled accuracy {a}%) — {perceives churn|does not yet perceive churn}`
+       - warm but no rate data: `sense organ calibrated: paired predictions accumulated ({pairs}/5) but no rate data yet`
+
+       Let me write the implementation into commands_risk_snapshots.rs right after `format_risk_meter_line` (or before it, since format uses it). I'll compute the verdict inside `compute_risk_meter` and store `verdict_line` on RiskMeter.
+
+       Implementation of the pooling:
+
+       ```rust
+       /// Compute the plain-language calibration verdict for the risk sense organ.
+       ///
+       /// The dream's milestone: once ≥5 matched prediction-outcome pairs
+       /// accumulate (`pairs` = validations whose `scored_broke` is present and
+       /// > 0, mirroring `compute_risk_meter`), stop quoting cold-start numbers
+       /// and state whether the flags actually discriminate.
+       ///
+       /// Readout (pooled across all lift-carrying events):
+       ///   flagged_rate   = Σ hit_count / Σ predicted_count
+       ///   unflagged_rate = Σ surprises    / Σ (total_scored − predicted_count)
+       ///   accuracy       = Σ hit_count / Σ (hit_count + surprises)
+       ///
+       /// Note the baseline deliberately mirrors the dream's wording — "files
+       /// flagged as high-risk actually broke more often than unflagged ones" —
+       /// comparing the flagged population against the *unflagged* scored
+       /// population, not against all scored files (that all-scored baseline is
+       /// what `commands_risk_accuracy::compute_accuracy_stats.overall_lift`
+       /// already reports; the verdict needs the stricter flagged-vs-unflagged
+       /// discrimination). `surprises` are already filtered to scored files.
+       pub(crate) fn calibration_verdict(events: &[ValidationEvent]) -> CalibrationVerdict {
+           let pairs = events
+               .iter()
+               .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+               .count() as u64;
+           let target = RISK_METER_TARGET_PAIRS;
+           if pairs < target {
+               return CalibrationVerdict {
+                   cold_start: true,
+                   pairs,
+                   target_pairs: target,
+                   flagged_rate_pct: None,
+                   unflagged_rate_pct: None,
+                   pooled_accuracy_pct: None,
+                   perceives: None,
+                   line: format!("cold start: {pairs}/{target} paired predictions — accumulating"),
+               };
+           }
+           // Pooled aggregates over events carrying the lift fields.
+           let mut flagged_broke: u64 = 0;
+           let mut flagged_total: u64 = 0;
+           let mut unflagged_broke: u64 = 0;
+           let mut unflagged_total: u64 = 0;
+           let mut broke_total: u64 = 0;
+           for e in events {
+               if let (Some(pred), Some(total_scored)) = (e.predicted_count, e.total_scored) {
+                   flagged_total += pred as u64;
+                   flagged_broke += e.hit_count as u64;
+                   let scored_broke = e.scored_broke.unwrap_or(0) as u64;
+                   let surprises = scored_broke.saturating_sub(e.hit_count as u64);
+                   unflagged_broke += surprises;
+                   unflagged_total += (total_scored as u64).saturating_sub(pred as u64);
+                   broke_total += (e.hit_count as u64) + surprises;
+               }
+           }
+           let flagged_rate_pct = if flagged_total > 0 {
+               Some(flagged_broke as f64 / flagged_total as f64 * 100.0)
+           } else { None };
+           let unflagged_rate_pct = if unflagged_total > 0 {
+               Some(unflagged_broke as f64 / unflagged_total as f64 * 100.0)
+           } else { None };
+           let pooled_accuracy_pct = if broke_total > 0 {
+               Some(flagged_broke as f64 / broke_total as f64 * 100.0)
+           } else { None };
+           let perceives = match (flagged_rate_pct, unflagged_rate_pct) {
+               (Some(f), Some(u)) => Some(f > u),
+               _ => None,
+           };
+           let line = match (flagged_rate_pct, unflagged_rate_pct, perceives) {
+               (Some(f), Some(u), Some(true)) => format!(
+                   "sense organ calibrated: flagged files broke at {f:.0}% vs unflagged {u:.0}% (pooled accuracy {acc:.0}%) — perceives churn",
+                   acc = pooled_accuracy_pct.unwrap_or(0.0),
+               ),
+               (Some(f), Some(u), Some(false)) => format!(
+                   "sense organ calibrated: flagged files broke at {f:.0}% vs unflagged {u:.0}% (pooled accuracy {acc:.0}%) — does not yet perceive churn",
+                   acc = pooled_accuracy_pct.unwrap_or(0.0),
+               ),
+               _ => format!(
+                   "sense organ calibrated: {pairs}/{target} paired predictions, but no rate data yet"
+               ),
+           };
+           CalibrationVerdict { cold_start: false, pairs, target_pairs: target, flagged_rate_pct, unflagged_rate_pct, pooled_accuracy_pct, perceives, line }
+       }
+       ```
+
+       Wait — the task's formulas mention `sum(surprises.len())`. I derive surprises as scored_broke − hit_count (since scored_broke = hits + scored surprises). That's equivalent to the `surprises.len()` for replay-path events (surprises array length). Good — actually deriving from scored_broke keeps it consistent with the pair counting (scored_broke > 0). But what about watch-failure events that pass None/None for these fields — they don't carry scored_broke, so they're skipped in pooling and only counted... they're not counted as pairs either (scored_broke None). Good, consistent.
+
+       Now — one subtlety: pairs counts events with scored_broke>0. But pooling only uses events with predicted_count AND total_scored Some. In real data, replay events carry all three (when all_ranked is Some). If all_ranked is None, total_scored/scored_broke are None → not pairs. Fine.
+
+       `format_risk_meter_line`:
+       ```rust
+       pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+           format!(
+               "risk meter: {}/{} pairs ({} snapshots, {} validations)",
+               meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
+           )
+       }
+       ```
+       append `meter.verdict_line` on a new line? The call site prints `  {DIM}{}{RESET}` with one line. Task: "Keep the existing pairs/validations numbers; append the verdict line." I'll do:
+       ```rust
+       format!(
+           "risk meter: {}/{target} pairs ({snap} snapshots, {val} validations)\n{verdict}",
+           ...
+       )
+       ```
+       Hmm — the print at commands_risk.rs line 1418 wraps in DIM RESET across the whole string; an embedded `\n` inside DIM still renders, though the verdict would also be dimmed. That's fine (it's a progress note). But maybe cleaner: `"risk meter: ... — {verdict}"`? That's long. A newline keeps the verdict legible. I'll embed newline. Actually the test asserts exact string "risk meter: 1/5 pairs (88 snapshots, 2 validations)" — I'll keep that prefix and append "\n{verdict_line}". Need to decide whether to include the \n in the string — for the test at 1209, I'll update to include `\n` + verdict.
+
+       Since verdict_line is already on the meter, format_risk_meter_line becomes:
+       ```rust
+       format!(
+           "risk meter: {}/{} pairs ({} snapshots, {} validations){}",
+           meter.pairs, meter.target_pairs, meter.snapshots, meter.validations,
+           ... if verdict_line empty "" else format!("\n{}", meter.verdict_line)
+       )
+       ```
+       Simpler: always append; compute_risk_meter always sets a verdict line (even zero pairs → "cold start: 0/5 paired predictions — accumulating"). But the test constructs RiskMeter literally — I'll set the field there. Should the field be Option or String? String, always non-empty from compute_risk_meter; literal constructions must supply it. Keep String for simplicity.
+
+       JSON stamp: add `"verdict": meter.verdict_line,` to the json! block. And update the existing write test to check `written["verdict"]`.
+
+       Now the docs. docs/src/features/risk.md — add "Calibration status" subsection under "The risk meter". Also CLAUDE.md? "If you changed behavior, added features, or modified architecture, update the docs" — CLAUDE.md describes architecture; the risk subsystem is described in the commands_risk_snapshots bullet. I should add a brief mention of the calibration verdict there. Let me keep it minimal and accurate: update the commands_risk_snapshots.rs bullet to mention the verdict line. Also CLAUDE.md mentions `format_risk_meter_line`? No. The bullet says: "`commands_risk_snapshots.rs` — snapshot/validation persistence for /risk: ... `auto_risk_snapshot` (dedups by git hash ...)". I'll add a clause: "the risk meter stamp now carries a `calibration_verdict` line that switches from cold-start progress to a pooled flagged-vs-unflagged discrimination verdict once ≥5 matched pairs accumulate". Keep it short.
+
+       Also `docs/src/usage/commands.md` maybe lists /risk output? Let me check quickly. And there might be a "risk meter: 3/5 pairs (95 snapshots, 4 validations)" example in the docs — I saw it at line 48. That example stays valid (prefix unchanged); I'll add the calibration subsection after the meter section.
+
+       Let me write the changes now.
+
+       First the struct + compute change, then format function, then write stamp, then tests, then docs.
+
+       Let me write the code.
+
+       One more check on `Derive(Default)` — ValidationEvent derives Default, so in tests I can do `ValidationEvent { day: 172, hit_count: 6, total_changed: 7, ..Default::default() }` and set predicted_count etc. 
+
+       Note field name: `hit_count` vs task's "scored_broke". hits = flagged that broke. Correct.
+
+       For the negative test: want flagged NOT more than unflagged. E.g. each event: predicted_count=10, total_scored=77, hit_count=1, scored_broke=9 → surprises=8, unflagged rate = 8/67 = 11.9% vs flagged 1/10=10% → perceives=false. pairs = 5 (scored_broke=9>0). accuracy = 1/9 = 11.1%.
+
+       Positive: hit_count=9, scored_broke=9, surprises=0, flagged=90% vs unflagged 0/67=0% → perceives=true. accuracy 100%.
+
+       Both have 5 events. Good.
+
+       Let me now make the edits.
+────────────────────────────────────────────────────────────────────────────────
+I have everything I need. Key findings:
+
+• `RiskMeter` lives in `commands_risk_snapshots.rs; format_risk_meter_line` renders `risk meter: N/5 pairs (...)` — no verdict.
+• `ValidationEvent has predicted_count` (flagged population), total_scored (scored population), `scored_broke` (= hits + scored surprises, per the writer in `replay_validate_core`).
+• `compute_accuracy_stats already computes overall_lift` (flagged vs all-scored baseline). The verdict needs the stricter flagged-vs-**unflagged** discrimination (`surprises / (total_scored − predicted_count)`), which doesn't exist yet — so this is a reframe, not a duplicate.
+
+Now let me implement. First, the `CalibrationVerdict` + `calibration_verdict` function and wiring into `RiskMeter`:
+
+
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (5 → 9 lines)
+        pub(crate) last_snapshot_day: u64,
+        /// The dream milestone this meter accumulates toward.
+        pub(crate) target_pairs: u64,
+  +     /// The plain-language calibration verdict for this accumulation state
+  +     /// (`calibration_verdict(...).line`), persisted in the meter stamp so the
+  +     /// milestone state is legible without re-reading the ledgers.
+  +     pub(crate) verdict_line: String,
+    }
+ ✓ (375ms)
+        pub(crate) last_snapshot_day: u64,
+        /// The dream milestone this meter accumulates toward.
+        pub(crate) target_pairs: u64,
+  +     /// The plain-language calibration verdict for this accumulation state
+  +     /// (`calibration_verdict(...).line`), persisted in the meter stamp so the
+  +     /// milestone state is legible without re-reading the ledgers.
+  +     pub(crate) verdict_line: String,
+    }
+
+
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (16 → 29 lines)
+            .iter()
+            .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+            .count() as u64;
+  +     into_risk_meter(pairs, &validations, last_snapshot_day)
+  + }
+  + 
+  + /// Assemble a `RiskMeter` from the matched-pair count and the parsed validation
+  + /// events. Shared by `compute_risk_meter` and `write_risk_meter_to` so the
+  + /// meter's verdict never drifts between the in-memory and persisted views.
+  + fn into_risk_meter(
+  +     pairs: u64,
+  +     validations: &[ValidationEvent],
+  +     last_snapshot_day: u64,
+  + ) -> RiskMeter {
+  +     let verdict = calibration_verdict(pairs, validations);
+        RiskMeter {
+  -         snapshots: snapshots.len() as u64,
+  +         snapshots: 0,
+            validations: validations.len() as u64,
+            pairs,
+  ... (5 more lines)
+ ✓ (374ms)
+            .iter()
+            .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+            .count() as u64;
+  +     into_risk_meter(pairs, &validations, last_snapshot_day)
+  + }
+  + 
+  + /// Assemble a `RiskMeter` from the matched-pair count and the parsed validation
+  + /// events. Shared by `compute_risk_meter` and `write_risk_meter_to` so the
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait, I made a bug — in `into_risk_meter` I set `snapshots: 0` but that's wrong. `compute_risk_meter` needs to pass the snapshot count too. Let me fix that.
+────────────────────────────────────────────────────────────────────────────────
+I made an error — `snapshots` should be passed through, not zeroed. Let me fix:
+
+
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (18 → 19 lines)
+    /// meter's verdict never drifts between the in-memory and persisted views.
+    fn into_risk_meter(
+        pairs: u64,
+  +     snapshots: u64,
+        validations: &[ValidationEvent],
+        last_snapshot_day: u64,
+    ) -> RiskMeter {
+        let verdict = calibration_verdict(pairs, validations);
+        RiskMeter {
+  -         snapshots: 0,
+  +         snapshots,
+            validations: validations.len() as u64,
+            pairs,
+            last_snapshot_day,
+ ✓ (374ms)
+    /// meter's verdict never drifts between the in-memory and persisted views.
+    fn into_risk_meter(
+        pairs: u64,
+  +     snapshots: u64,
+        validations: &[ValidationEvent],
+        last_snapshot_day: u64,
+    ) -> RiskMeter {
+        let verdict = calibration_verdict(pairs, validations);
+  ... (6 more lines)
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (6 → 6 lines)
+                .iter()
+                .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+                .count() as u64;
+  -     into_risk_meter(pairs, &validations, last_snapshot_day)
+  +     into_risk_meter(pairs, snapshots.len() as u64, &validations, last_snapshot_day)
+    }
+ ✓ (2ms)
+                .iter()
+                .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+                .count() as u64;
+  -     into_risk_meter(pairs, &validations, last_snapshot_day)
+  +     into_risk_meter(pairs, snapshots.len() as u64, &validations, last_snapshot_day)
+    }
+
+Now update `write_risk_meter_to` to use the shared assembler:
+  ╭─ Turn 21 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (14 → 22 lines)
+    let snapshot_content = std::fs::read_to_string(snapshot_path).unwrap_or_default();
+        let validation_content = std::fs::read_to_string(validation_path).unwrap_or_default();
+  -     let meter = compute_risk_meter(&snapshot_content, &validation_content);
+  +     let snapshots = parse_all_snapshots(&snapshot_content);
+  +     let validations = parse_validation_events(&validation_content);
+  +     let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+  +     let pairs = validations
+  +         .iter()
+  +         .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
+  +         .count() as u64;
+  +     let meter = into_risk_meter(pairs, snapshots.len() as u64, &validations, last_snapshot_day);
+    
+        if let Some(parent) = meter_path.parent() {
+            std::fs::create_dir_all(parent)?;
+  ···
+            "pairs": meter.pairs,
+            "last_snapshot_day": meter.last_snapshot_day,
+            "target_pairs": meter.target_pairs,
+  +         "verdict": meter.verdict_line,
+        });
+ ✓ (374ms)
+    let snapshot_content = std::fs::read_to_string(snapshot_path).unwrap_or_default();
+        let validation_content = std::fs::read_to_string(validation_path).unwrap_or_default();
+  -     let meter = compute_risk_meter(&snapshot_content, &validation_content);
+  +     let snapshots = parse_all_snapshots(&snapshot_content);
+  +     let validations = parse_validation_events(&validation_content);
+  +     let last_snapshot_day = snapshots.last().map(|s| s.day).unwrap_or(0);
+  +     let pairs = validations
+  +         .iter()
+  ... (12 more lines)
+
+Now `format_risk_meter_line` — append the verdict line:
+  ╭─ Turn 22 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (8 → 15 lines)
+    /// One-line progress note for the harness path:
+  - /// `risk meter: N/5 pairs (S snapshots, V validations)`.
+  + /// `risk meter: N/5 pairs (S snapshots, V validations)`, followed by the
+  + /// calibration verdict line once one exists (cold-start status below the
+  + /// milestone; the plain-language verdict once ≥5 matched pairs accumulate).
+    pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+  -     format!(
+  +     let base = format!(
+            "risk meter: {}/{} pairs ({} snapshots, {} validations)",
+            meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
+  -     )
+  +     );
+  +     if meter.verdict_line.is_empty() {
+  +         base
+  +     } else {
+  +         format!("{base}\n{}", meter.verdict_line)
+  +     }
+    }
+ ✓ (374ms)
+    /// One-line progress note for the harness path:
+  - /// `risk meter: N/5 pairs (S snapshots, V validations)`.
+  + /// `risk meter: N/5 pairs (S snapshots, V validations)`, followed by the
+  + /// calibration verdict line once one exists (cold-start status below the
+  + /// milestone; the plain-language verdict once ≥5 matched pairs accumulate).
+    pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
+  -     format!(
+  +     let base = format!(
+  ... (10 more lines)
+
+Now add the `CalibrationVerdict` struct and `calibration_verdict` function, right after `RISK_METER_TARGET_PAIRS`:
+  ╭─ Turn 23 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_risk_snapshots.rs (4 → 110 lines)
+    /// before the lift measurement is trusted. Referenced in the meter file so
+    /// humans/agents reading it see the goal.
+    pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+  + 
+  + /// The plain-language verdict for the calibration milestone (the dream's
+  + /// "does the umwelt correspond to the territory?" test).
+  + ///
+  + /// Two states:
+  + /// - **Cold-start** (`pairs < target`): honest status, no accuracy claims —
+  + ///   a percentage from <5 matched pairs would be noise presented as signal.
+  + /// - **Calibrated** (`pairs >= target`): pooled discriminative readout across
+  + ///   all usable validation events. `flagged_rate` = how often *flagged*
+  + ///   (predicted-high-risk) scored files broke; `unflagged_rate` = how often
+  + ///   *unflagged* scored files broke (surprises over the scored population the
+  + ///   scorer did not flag). The verdict is stated plainly in both directions —
+  + ///   the milestone measures, it does not flatter.
+  + pub(crate) struct CalibrationVerdict {
+  +     pub(crate) line: String,
+  +     pub(crate) perceives: bool,
+  +     pub(crate) flagged_rate_pct: f64,
+  ... (89 more lines)
+ ✓ (374ms)
+    /// before the lift measurement is trusted. Referenced in the meter file so
+    /// humans/agents reading it see the goal.
+    pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
+  + 
+  + /// The plain-language verdict for the calibration milestone (the dream's
+  + /// "does the umwelt correspond to the territory?" test).
+  + ///
+  + /// Two states:
+  ... (13 more lines)
+
+

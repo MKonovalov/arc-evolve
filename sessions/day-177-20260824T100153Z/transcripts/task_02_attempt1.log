@@ -1,0 +1,983 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by reading the current state of `src/commands_git_review.rs` to understand the structure, and also check `src/main.rs` for the module list.
+
+Let me plan:
+1. Read `src/commands_git_review.rs` (1379 lines)
+2. Read `src/main.rs` module list
+3. Restructure `handle_review` into dispatcher with per-effort pure helpers
+4. Extract review-* helpers into `src/commands_review.rs` with public re-exports
+5. Wire module into main.rs
+6. Keep handle_review/handle_blame + git/PR plumbing in commands_git_review.rs (<800 lines)
+7. Add unit tests per-effort prompt-builder + parse_review_effort round-trip
+8. cargo fmt && clippy && build && test
+9. Update CLAUDE.md docs
+10. Commit
+
+Let me start reading files.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ▶ read src/commands_git_review.rs  ▶ search 'commands_git_review' in src ✓ (9ms)
+ ✓ (9ms)
+  2 tools completed in 636ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the full file to understand the current structure. The file is 1379 lines. Let me read the middle section.
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:100..700 ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the rest of the file to understand the full structure.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:200..600 ✓ (3ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:300..740 ✓ (3ms)
+
+
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:740..1140 ✓ (3ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me read the remaining lines to see the middle part (400-650 which contains ReviewComment, parse_review_comments, extract_review_json region) and also the rest of tests.
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:1140..1270  ▶ read src/commands_git_review.rs:400..480 ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 664ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me see the rest of the file — lines 480-829 and the parts I haven't read (the `handle_blame`, `ReviewComment`, `parse_review_comments`, `parse_single_comment`, `build_review_content_pr` etc.) Let me look at the remaining middle section around lines 480-690.
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:479..659  ▶ read src/commands_git_review.rs:1269..1384 ✓ (1ms)
+ ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 874ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now let me look at the rest of the file I haven't seen: lines 599-663 (parse_single_comment), and I've seen up to end. Let me check `dispatch_sub.rs` to understand how `handle_review` is called, and look at `main.rs` module list. Also check `commands.rs` line 515.
+
+Let me now plan the split:
+
+**New module `src/commands_review.rs`** will contain the "review-*" helpers:
+- `ReviewEffort` + `label()` + `parse_review_effort`
+- `build_review_content`, `build_review_content_range`, `build_review_content_pr`
+- `build_review_prompt`
+- `build_review_prompt_structured`
+- `ReviewComment`, `parse_review_comments`, `parse_single_comment`, `extract_json_string_field`, `extract_json_number_field`
+- `extract_review_json`
+- `post_pr_review`
+- Unit tests for these
+
+**Kept in `commands_git_review.rs`**:
+- `handle_review` (CLI-facing dispatcher)
+- `handle_blame`, `BlameArgs`, `parse_blame_args`, `colorize_blame_line`, `colorize_blame`
+- `run_non_interactive_review` (entry point for `arc review`)
+- re-exports: `pub use crate::commands_review::{...}` so call sites unchanged
+
+Wait, the task says:
+- "Restructure handle_review into a dispatcher: parse args → select ReviewEffort → delegate the build-prompt-and-run core to per-effort pure helpers."
+- "Extract the review-* helpers (e.g. build_review_prompt, build_review_content, parse_review_comments, extract_review_json) into src/commands_review.rs, keeping public re-exports from commands_git_review.rs so no call site changes"
+- "Kept in commands_git_review.rs: the CLI-facing handle_review/handle_blame entry points and any git/PR plumbing unique to them. The file should end up smaller than ~800 lines."
+
+So the new file gets the review-* helpers, and commands_git_review.rs keeps handle_review, handle_blame, run_non_interactive_review and re-exports.
+
+But wait — `run_non_interactive_review` uses `parse_review_effort`, `build_review_content`, `build_review_prompt` — those move to the new module. And `handle_review` uses `parse_review_effort`, `build_review_content`, `build_review_prompt`, `run_prompt`, `auto_compact_if_needed`.
+
+Hmm, `RunPrompt` and `auto_compact_if_needed` imports — `commands_git_review.rs` uses `crate::commands_session::auto_compact_if_needed`, `crate::prompt::run_prompt`, `crate::format::*`, `crate::git::*`, `arcagent::agent::Agent`, `arcagent::*`.
+
+The tests: I need to move the tests for the moved functions into the new module, and keep tests for the remaining functions in the old file. Actually the task says "Copy existing tests over, never delete them." So tests for moved functions go to the new module.
+
+Wait — but there's a wrinkle. The test in the old file references `crate::commands::{is_unknown_command, KNOWN_COMMANDS}`. Let me check what test uses that. Let me search.
+
+Let me look at the test module you used:
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::{is_unknown_command, KNOWN_COMMANDS};
+```
+
+Let me search which test uses `is_unknown_command`.
+
+I need to see lines 829-1094 to find tests. Let me also check whether `handle_review` should be restructured into per-effort helpers. The current `handle_review`:
+
+```rust
+pub async fn handle_review(input: &str, agent, session_total, model) -> Option<String> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+    match build_review_content(&remaining) {
+        Some((label, content)) => {
+            if effort != ReviewEffort::Normal {
+                eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+            }
+            let prompt = build_review_prompt(&label, &content, effort);
+            run_prompt(agent, &prompt, session_total, model).await;
+            auto_compact_if_needed(agent);
+            Some(prompt)
+        }
+        None => None,
+    }
+}
+```
+
+Restructure into a dispatcher: parse args → select ReviewEffort → delegate the build-prompt-and-run core to per-effort pure helpers. Hmm, the per-effort prompt building is already in `build_review_prompt` (parameterized by effort). So the "dispatch" could be a small pure function that returns the prompt (or None if nothing to review), and then handle_review just runs the prompt:
+
+```rust
+/// Pure dispatcher: build the review prompt for an input, or None if nothing to review.
+pub fn build_review_prompt_for_input(input: &str) -> Option<(String, String, ReviewEffort)> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+    let (label, content) = build_review_content(&remaining)?;
+    Some((label, content, effort))
+}
+```
+
+Hmm wait, but that adds a new function + restructure. The task's "dispatch to per-effort pure handlers" — mirror the risk pattern. Let me design:
+
+Per-effort prompt builders (pure, individually-testable):
+- `build_review_prompt(label, content, effort)` already exists and is parameterized by effort. Maybe split into `build_review_prompt_quick`, `build_review_prompt_normal`, `build_review_prompt_thorough`? Or keep `build_review_prompt` as the dispatcher that delegates to per-effort criteria builders.
+
+Better: extract per-effort criteria as small pure functions:
+```rust
+fn review_criteria_quick() -> String
+fn review_criteria_normal() -> String
+fn review_criteria_thorough() -> String
+```
+And `build_review_prompt` dispatches to them via `match effort`. That gives individually-testable per-effort handlers. And `handle_review` parses args → selects effort → delegates to build_review_prompt → run.
+
+Also `build_review_prompt_structured` is used by `commands_git_pr.rs` (line 200 references `use crate::commands_git_review::{...}`). Let me check what it imports.
+
+Let me check dispatch_sub.rs and commands.rs imports too.
+
+Let me search for specific identifiers used across the codebase:
+- `parse_review_effort`
+- `ReviewEffort`
+- `build_review_prompt`
+- `build_review_content`
+- `build_review_prompt_structured`
+- `extract_review_json`
+- `parse_review_comments`
+- `post_pr_review`
+- `ReviewComment`
+
+Then re-export from commands_git_review.
+
+Let me do that now.
+────────────────────────────────────────────────────────────────────────────────
+Now let me check all external usages of these identifiers and the module wiring.
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'ReviewEffort|parse_review_effort|build_review_prompt|build_r…' in src  ▶ read src/main.rs:1..71 ✓ (1ms)
+ ✓ (5ms)
+  2 tools completed in 3.1s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The grep search with `|` didn't work as expected — no matches. Let me try individual searches for the identifiers used externally. Actually wait — the search may have failed because the pattern uses regex — `ReviewEffort` alone should match. Let me try again with separate patterns.
+────────────────────────────────────────────────────────────────────────────────
+The combined regex search returned nothing — let me try individual searches:
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'ReviewEffort' in src  ▶ search 'build_review_prompt|build_review_content|extract_review_json…' in src ✓ (8ms)
+ ✓ (10ms)
+  2 tools completed in 2.1s (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — `ReviewEffort` matches only within `commands_git_review.rs`, and the other identifiers have no matches outside. Let me check `commands_git_pr.rs` which uses `crate::commands_git_review::{...}` per earlier search.
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_pr.rs:185..245  ▶ search 'commands_git_review::' in src ✓ (2ms)
+ ✓ (7ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 632ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. Let me plan the extraction:
+
+**`commands_git_review.rs` (1379 lines) contains:**
+1. `build_review_content` (pub) + helpers `build_review_content_range`, `build_review_content_pr` — review-* helper → move to commands_review.rs
+2. `run_non_interactive_review` (pub, async) — uses parse_review_effort, build_review_content, build_review_prompt, side agent. Called from dispatch_sub.rs. This is a "run" entry — it uses the prompt helpers. Task says keep `handle_review`/`handle_blame` entry points in commands_git_review.rs. `run_non_interactive_review` is a CLI-facing entry point (for `arc review`). It mixes build+pipeline. Hmm.
+
+Task says: "**Extract** the review-* helpers (e.g. `build_review_prompt`, `build_review_content`, `parse_review_comments`, `extract_review_json`) into `src/commands_review.rs`". And: "**Kept in `commands_git_review.rs`**: the CLI-facing `handle_review`/`handle_blame` entry points and any git/PR plumbing unique to them."
+
+`run_non_interactive_review` is a CLI-facing entry point (entry for `arc review` subcommand). It uses the prompt helpers. Options:
+- Keep it in commands_git_review.rs, importing from commands_review.rs.
+- Or move it to commands_review.rs.
+
+The task says "the CLI-facing handle_review/handle_blame entry points and any git/PR plumbing unique to them" stay. `run_non_interactive_review` is a CLI entry point. `post_pr_review` is PR plumbing (posts via gh). `BLAME` stuff is git plumbing.
+
+Let me structure:
+
+**`commands_review.rs` (new):** pure-ish helpers + the review-effort domain:
+- `ReviewEffort` enum + `label()`
+- `parse_review_effort`
+- `build_review_prompt`
+- `build_review_content` + `build_review_content_range` + `build_review_content_pr`
+- `build_review_prompt_structured`
+- `ReviewComment`, `parse_review_comments`, `parse_single_comment`, `extract_json_string_field`, `extract_json_number_field`
+- `extract_review_json`
+- `post_pr_review` — PR plumbing... it posts to GitHub. But it's a "review" helper, not git/PR *plumbing unique to handle_review/blame*. Hmm, task example list includes `parse_review_comments`, `extract_review_json` — post_pr_review uses them. I think post_pr_review belongs in commands_review.rs (it's the "post a PR review" helper used by commands_git_pr.rs --post mode). The task says keep "any git/PR plumbing unique to them [handle_review/handle_blame]" — handle_review doesn't do PR stuff at all; handle_blame is git blame. post_pr_review is review plumbing. Move it.
+- `run_non_interactive_review` — CLI entry point; keep in commands_git_review.rs? The task says "Carve review-* helpers out". `run_non_interactive_review` isn't named review-* but is the non-interactive review runner that builds side agent and streams. It's 70 lines. I could keep it in commands_git_review.rs. But then `dispatch_sub.rs` calls `crate::commands_git_review::run_non_interactive_review` unchanged.
+
+Let me minimize risk: keep `run_non_interactive_review` in commands_git_review.rs (imports from commands_review). Actually wait — I need to import the moved items into commands_git_review.rs. Since commands_git_review.rs is a module and commands_review.rs is a sibling module, I need `use crate::commands_review::*;` at top of commands_git_review.rs, and also re-export for external call sites:
+
+```rust
+pub use crate::commands_review::{build_review_content, build_review_prompt, ...};
+```
+
+For `handle_review` and `handle_blame` — they stay in commands_git_review.rs but need `parse_review_effort`, `build_review_content`, `build_review_prompt`, `ReviewEffort` via `use`.
+
+`commands_git_pr.rs` does `use crate::commands_git_review::{build_review_prompt_structured, extract_review_json, parse_review_comments, post_pr_review};` — keep working via re-export.
+
+`commands.rs`: `pub use crate::commands_git_review::{handle_blame, handle_review};` — unchanged.
+
+`dispatch_sub.rs` calls `crate::commands_git_review::handle_blame` and `run_non_interactive_review` — unchanged.
+
+Tests: the whole test module `mod tests` lives in commands_git_review.rs and tests internals: build_review_prompt, build_review_content, parse_review_comments, extract_review_json, build_review_prompt_structured, review_comment_equality, parse_blame_args, colorize_blame_line, colorize_blame, ReviewEffort label/parse, parse_review_effort round-trips. If I move functions, the tests would fail to compile in commands_git_review.rs unless I `use super::*` picks up re-exports. Actually the test module is `mod tests { use super::*; }` — `super` refers to commands_git_review module. If I re-export all moved items via `pub use crate::commands_review::{...}`, then `use super::*` brings them into scope. So tests keep working. But better practice: move the tests for moved functions into commands_review.rs's own test module. The task says "Copy existing tests over, never delete them." So I should move the tests alongside the functions they test, and keep the remaining tests (blame) in commands_git_review.rs.
+
+Which tests test what:
+- `build_review_prompt_contains_label` → build_review_prompt (move)
+- `build_review_content_detects_commit_range` → build_review_content (move)
+- `build_review_content_detects_pr_flag` → build_review_content (move)
+- `build_review_content_pr_invalid_number` → build_review_content (move)
+- `build_review_prompt_with_diff_label` → move
+- `build_review_prompt_with_pr_label` → move
+- `parse_review_comments_basic`, `parse_review_comments_with_markdown_fences`, `parse_review_comments_empty_array`, `parse_review_comments_no_json`, `parse_review_comments_escaped_body` → move
+- `extract_review_json_from_markdown`, `extract_review_json_bare_array`, `extract_review_json_none` → move
+- `build_review_prompt_structured_has_json_format`, `build_review_prompt_structured_empty_pr_info` → move
+- `review_comment_equality` → move
+- `test_parse_review_effort_default`, `default_empty`, `quick`, `quick_no_arg`, `thorough`, `thorough_with_file`, `flag_after_file`, `with_pr_flag`, `test_build_review_prompt_quick`, `test_build_review_prompt_thorough`, `test_build_review_prompt_normal_no_effort_label`, `test_review_effort_label` → move
+- Blame-related tests (test_colorize_blame_line_*, test_colorize_blame_multiple_lines, parse_blame_args tests) → stay
+
+Let me also do the "restructure handle_review into a dispatcher" part:
+
+Current:
+```rust
+pub async fn handle_review(input, agent, session_total, model) -> Option<String> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+    match build_review_content(&remaining) {
+        Some((label, content)) => {
+            if effort != ReviewEffort::Normal { eprintln!(...); }
+            let prompt = build_review_prompt(&label, &content, effort);
+            run_prompt(agent, &prompt, session_total, model).await;
+            auto_compact_if_needed(agent);
+            Some(prompt)
+        }
+        None => None,
+    }
+}
+```
+
+The task wants: "Restructure handle_review into a dispatcher: parse args → select ReviewEffort → delegate the build-prompt-and-run core to per-effort pure helpers. The per-effort prompt-building logic currently in build_review_prompt and build_review_prompt_structured should become small, individually-testable functions parameterized by effort where it isn't already."
+
+So build_review_prompt should be decomposed into per-effort criteria builders:
+
+```rust
+fn review_criteria(effort: ReviewEffort) -> String { ... }  // per-effort
+fn review_effort_label(effort: ReviewEffort) -> String { ... }  
+```
+
+Actually build_review_prompt already has per-effort match inside it. The restructure: extract `review_criteria(effort: ReviewEffort) -> String` and `review_effort_label(effort)` as separate pure functions, and `build_review_prompt` composes them. Then handle_review dispatches: parse → select effort → build prompt via the pure helpers → run.
+
+Let me also consider: "delegate the build-prompt-and-run core to per-effort pure helpers". I'll create:
+
+```rust
+pub fn build_review_prompt(label, content, effort) -> String {
+    let criteria = review_criteria(effort);
+    let effort_label = review_effort_label(effort);
+    ...
+}
+
+pub fn review_criteria(effort: ReviewEffort) -> &'static str { ... }
+fn review_effort_label(effort: ReviewEffort) -> String { ... }
+```
+
+Hmm but `label()` already exists on ReviewEffort and produces "quick"/"normal"/"thorough". review_effort_label is format!(" [{} review]", other.label()). That's already parameterized. The criteria strings are the interesting per-effort pure functions.
+
+I'll add unit tests for `review_criteria` per-effort (at least one per-effort criteria builder test — task wants "at least one per-effort prompt-builder test"). The existing tests already cover quick/thorough/normal prompt building. I'll add explicit `review_criteria` tests to make per-effort pure functions individually tested.
+
+Now main.rs: need `mod commands_review;` added alphabetically: after `mod commands_refactor;`? Let me check the module list order... commands_refactor, commands_rename, commands_retry, commands_revisit, commands_risk... So `commands_review` goes between `commands_retry` and `commands_revisit`? Alphabetical: refactor, rename, retry, review, revisit, risk. Wait "retry" < "review" < "revisit"? r-e-t < r-e-v. "retry" = r,e,t; "review" = r,e,v; t<v yes. "review" vs "revisit": r,e,v,i vs r,e,v... "review" = r,e,v,i,e,w; "revisit" = r,e,v,i,s,i,t. "review" vs "revisit": r,e,v,i match, then 'e' vs 's' — e < s, so review comes before revisit. Correct order: commands_retry, commands_review, commands_revisit, commands_risk.
+
+The task says at most 3 files: commands_git_review.rs, commands_review.rs (new), main.rs. Good.
+
+Now let me check what `run_non_interactive_review` imports: uses MarkdownRenderer from crate::format::*, run_prompt? No — it builds its own side agent with stream. It uses `agent_config.build_side_agent()`, `AgentEvent`, `StreamDelta`, `Usage`, `AgentMessage`, `arcagent::types::Message`. It stays in commands_git_review.rs, importing build_review_content, build_review_prompt, parse_review_effort from commands_review.
+
+Let me now check top of file imports:
+```rust
+use crate::commands_session::auto_compact_if_needed;
+use crate::format::*;
+use crate::git::*;
+use crate::prompt::run_prompt;
+use arcagent::agent::Agent;
+use arcagent::*;
+```
+
+After moving helpers out, commands_git_review.rs still needs:
+- auto_compact_if_needed (handle_review)
+- format::* (blame colorize, markers)
+- git::* (run_git in handle_blame)
+- run_prompt (handle_review)
+- Agent (handle_review)
+- arcagent::* (handle_review signatures — Usage, agent::Agent as arcagent::agent::Agent)
+- commands_review imports
+
+Commands_review.rs needs:
+- crate::format::* (safe_truncate, RED, DIM, etc.)
+- crate::git::* (get_staged_diff, run_git)
+- Maybe crate::commands_session? No.
+
+Let me check `build_review_prompt` uses `safe_truncate` from format. And the PR diff uses Command::new("gh"). post_pr_review uses std::process::Command and io::Write.
+
+Now, is `run_non_interactive_review`'s streaming loop using anything from commands_review? No.
+
+Let me now write the new file. I'll carefully move code:
+
+commands_review.rs contents:
+1. ReviewEffort enum + impl label
+2. parse_review_effort
+3. review_criteria(effort) -> String (per-effort criteria; extracted from build_review_prompt)
+4. review_effort_label(effort) -> String (extracted; private)
+5. build_review_prompt(label, content, effort)
+6. build_review_content(arg) + build_review_content_range + build_review_content_pr
+7. build_review_prompt_structured
+8. ReviewComment + parse_review_comments + parse_single_comment + extract_json_string_field + extract_json_number_field
+9. extract_review_json
+10. post_pr_review
+11. tests module for all moved tests + new per-effort criteria tests
+
+commands_git_review.rs keeps:
+- module doc
+- imports + `use crate::commands_review::{...}` and re-exports
+- run_non_interactive_review
+- handle_review (dispatcher)
+- BlameArgs, parse_blame_args, colorize_blame_line, colorize_blame, handle_blame
+- blame tests
+
+Wait — should run_non_interactive_review move too? Task says keep "the CLI-facing handle_review/handle_blame entry points and any git/PR plumbing unique to them" in commands_git_review.rs. run_non_interactive_review is a CLI-facing entry point (`arc review` subcommand). It's not review-* helper. Keep it. Good — that means dispatch_sub.rs call unchanged, and it's imported via crate::commands_git_review.
+
+Post_pr_review: is it "git/PR plumbing unique to handle_review"? handle_review doesn't post PRs. post_pr_review is used by commands_git_pr.rs --post. The task's example list: "e.g. build_review_prompt, build_review_content, parse_review_comments, extract_review_json" — post_pr_review isn't in the example list. It's PR plumbing. Hmm. The heading says "carve `review-*` helpers out". post_pr_review is not named review-*. It's PR-posting plumbing. I'll keep post_pr_review in commands_git_review.rs. That keeps commands.rs etc. unchanged and matches "any git/PR plumbing unique to them" staying.
+
+But then parse_review_comments / extract_review_json move out while post_pr_review stays — post_pr_review only needs ReviewComment type, which is moved. So commands_git_review.rs imports ReviewComment from commands_review and re-exports it. Fine.
+
+Actually wait, let me reconsider. post_pr_review takes `&[ReviewComment]` — the type moves to commands_review. So commands_git_review.rs does `use crate::commands_review::ReviewComment;` and re-exports `pub use crate::commands_review::ReviewComment;`? commands_git_pr.rs uses `parse_review_comments` and `post_pr_review`, not ReviewComment directly. That's fine.
+
+Hmm, but does keeping post_pr_review in commands_git_review.rs violate "review-* helpers"? post_pr_review is arguably review-* plumbing but the task explicitly lists examples and says "e.g.", not exhaustive. The constraint: "the file should end up smaller than ~800 lines." Let me count what stays:
+
+- module doc + imports: ~15 lines
+- run_non_interactive_review: ~73 lines (140-212)
+- handle_review: ~23 lines (317-340)
+- BlameArgs: 6
+- parse_blame_args: ~43
+- colorize_blame_line: ~73
+- colorize_blame: 8
+- handle_blame: ~38
+- post_pr_review: ~81
+- tests for blame: — let me count blame tests
+
+Blame tests are lines 1045-1104ish? Let me figure out how many. There's test_colorize_blame_line_* and test_colorize_blame_multiple_lines and parse_blame_args tests around 900-1093. Let me count: that section from ~830 to 1093 has: build_review_prompt_contains_label (move), build_review_content_detects_commit_range (move), ... interleaved with blame tests. I need to read the full test section to know which to keep.
+
+Let me read lines 830-1095.
+────────────────────────────────────────────────────────────────────────────────
+Let me read the remaining test section (lines 829–1095) to see which tests belong to blame vs review helpers:
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:829..959 ✓ (1ms)
+
+
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:958..1063 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I have the full picture. Let me identify the exact line ranges:
+
+**`commands_git_review.rs` current structure (1379 lines):**
+- Lines 1–9: module doc + imports
+- Lines 11–67: `build_review_content` (pub)
+- Lines 69–85: `build_review_content_range` (private)
+- Lines 87–125: `build_review_content_pr` (private)
+- Lines 127–212: `run_non_interactive_review` (pub, async — uses build_side_agent, streams, uses ReviewEffort, build_review_content, build_review_prompt)
+- Lines 214–235: `ReviewEffort` enum
+- Lines 236–254: `parse_review_effort`
+- Lines 256–315: `build_review_prompt`
+- Lines 317–340: `handle_review` (async — uses parse_review_effort, build_review_content, build_review_prompt, run_prompt, auto_compact_if_needed)
+- Lines 342–392: `BlameArgs`, `parse_blame_args`
+- Lines 394–477: `colorize_blame_line`
+- Lines 479–486: `colorize_blame`
+- Lines 488–525: `handle_blame`
+- Lines 527–533: `ReviewComment`
+- Lines 535–613: `parse_review_comments`
+- Lines 615–621: `parse_single_comment` (private)
+- Lines 623–661: `extract_json_string_field` (private)
+- Lines 663–676: `extract_json_number_field` (private)
+- Lines 678–718: `build_review_prompt_structured`
+- Lines 720–804: `post_pr_review`
+- Lines 806–827: `extract_review_json`
+- Lines 829–1379: tests
+
+Now the task:
+
+1. **Restructure `handle_review`** into a dispatcher: parse args → select ReviewEffort → delegate the build-prompt-and-run core to per-effort pure helpers. The per-effort prompt-building logic currently in `build_review_prompt` and `build_review_prompt_structured` should become small, individually-testable functions parameterized by effort where it isn't already.
+
+Hmm. The task says "Restructure handle_review into a dispatcher: parse args → select ReviewEffort → delegate the build-prompt-and-run core to per-effort pure helpers." And "The per-effort prompt-building logic currently in build_review_prompt and build_review_prompt_structured should become small, individually-testable functions parameterized by effort where it isn't already."
+
+So I need to parameterize the criteria text per effort. Currently `build_review_prompt` has an inline `match effort` block producing criteria. I could extract a `review_criteria(effort) -> &'static str` (or String) pure function. That's the "per-effort pure handler". Similarly `build_review_prompt_structured` is used for PR posting.
+
+Let me design:
+
+- `review_criteria(effort: ReviewEffort) -> &'static str` — pure, gives the criteria block per effort. `build_review_prompt` uses it.
+- `build_review_prompt` — stays as a wrapper that uses `review_criteria` + effort label.
+- `handle_review` dispatcher: parse args → select effort → build prompt and run.
+
+Wait — what does "dispatch to per-effort pure handlers" mean concretely? Maybe:
+
+```rust
+fn build_review_prompt_for_effort(effort, label, content) -> String {
+    // dispatcher that picks criteria
+}
+```
+
+Actually the natural reading: `build_review_prompt` already is parameterized by effort. The per-effort logic is the criteria match. Extract it into `review_criteria(effort) -> String` (or &'static str). Then `build_review_prompt` = pure composition. And `handle_review` becomes a thin dispatcher: parse → effort → `build_review_prompt` → run_prompt.
+
+Let me make the criteria functions individually testable: `quick_criteria()`, `normal_criteria()`, `thorough_criteria()`? Or one function with match? "small, individually-testable functions parameterized by effort where it isn't already". I'll extract `review_criteria(effort) -> &'static str` — that's individually testable (tests already check per-effort content).
+
+Also handle_review currently:
+```rust
+pub async fn handle_review(input, agent, session_total, model) -> Option<String> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+    match build_review_content(&remaining) {
+        Some((label, content)) => {
+            if effort != ReviewEffort::Normal {
+                eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+            }
+            let prompt = build_review_prompt(&label, &content, effort);
+            run_prompt(agent, &prompt, session_total, model).await;
+            auto_compact_if_needed(agent);
+            Some(prompt)
+        }
+        None => None,
+    }
+}
+```
+
+To make it a dispatcher, I could extract a "review_and_run" core:
+
+```rust
+/// Run a review at the given effort against pre-resolved content.
+fn run_review_at_effort(
+    agent, prompt, session_total, model, effort
+) 
+```
+
+Hmm, that mixes async + run_prompt. The task says "delegate the build-prompt-and-run core to per-effort pure helpers". The pure part is the prompt building. The "run" goes through run_prompt which is an existing shared helper. I think the cleanest mechanical restructure that satisfies the description while staying byte-identical:
+
+```rust
+pub async fn handle_review(input, agent, session_total, model) -> Option<String> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+    match build_review_content(&remaining) {
+        Some((label, content)) => {
+            review_prompt_and_run(agent, &label, &content, effort, session_total, model).await
+        }
+        None => None,
+    }
+}
+
+/// Dispatcher: build the per-effort prompt and run it.
+async fn review_prompt_and_run(
+    agent: &mut Agent,
+    label: &str,
+    content: &str,
+    effort: ReviewEffort,
+    session_total: &mut Usage,
+    model: &str,
+) -> Option<String> {
+    if effort != ReviewEffort::Normal {
+        eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+    }
+    let prompt = build_review_prompt(label, content, effort);
+    run_prompt(agent, &prompt, session_total, model).await;
+    auto_compact_if_needed(agent);
+    Some(prompt)
+}
+```
+
+And per-effort pure handlers: `review_criteria(effort)`.
+
+Actually, to make "per-effort pure handlers" more literally true, I can have a trait-free approach: `ReviewEffort::criteria(&self) -> &'static str`. Let me put:
+
+```rust
+impl ReviewEffort {
+    pub fn label(&self) -> &'static str { ... }
+    /// Per-effort review criteria block.
+    fn criteria(&self) -> &'static str {
+        match self {
+            ReviewEffort::Quick => "...",
+            ReviewEffort::Normal => "...",
+            ReviewEffort::Thorough => "...",
+        }
+    }
+}
+```
+
+But the task explicitly wants these "small, individually-testable functions". Tests for criteria are already covered via build_review_prompt tests. To be safe and to match the task wording ("at least one per-effort prompt-builder test (it is a pure function)"), I'll make criteria a standalone pub(crate) function `review_criteria(effort)` and add a direct round-trip test.
+
+2. **Extract review-* helpers into `src/commands_review.rs`** with public re-exports from `commands_git_review.rs`:
+
+Move to commands_review.rs:
+- `build_review_content`, `build_review_content_range`, `build_review_content_pr` (review content builders)
+- `ReviewEffort`, `parse_review_effort`, `review_criteria`, `build_review_prompt`
+- `ReviewComment`, `parse_review_comments`, `parse_single_comment`, `extract_json_string_field`, `extract_json_number_field`
+- `build_review_prompt_structured`
+- `post_pr_review`
+- `extract_review_json`
+
+Keep in commands_git_review.rs:
+- `run_non_interactive_review` (git/PR plumbing + agent)... hmm, but it uses parse_review_effort, build_review_content, build_review_prompt, build_side_agent. It's the non-interactive CLI entry (`arc review`). The task says keep "the CLI-facing handle_review/handle_blame entry points and any git/PR plumbing unique to them". `run_non_interactive_review` is arguably CLI-facing too (dispatch_sub.rs:553). It builds content and runs — to keep behavior identical and imports simple, I can keep it in commands_git_review.rs and use re-exports. It'll need ReviewEffort etc. via `use crate::commands_review::*`.
+
+Wait — but dispatch_sub.rs calls `crate::commands_git_review::run_non_interactive_review`. So it must remain re-exported from commands_git_review (or kept there). Since it uses agent plumbing (run agent, stream, cost display), keep it in commands_git_review.rs.
+
+- `handle_review`, `BlameArgs`, `parse_blame_args`, `colorize_blame_line`, `colorize_blame`, `handle_blame` — blame stuff + review entry point stays.
+
+Re-exports in commands_git_review.rs:
+```rust
+pub use crate::commands_review::{
+    ReviewComment, ReviewEffort, build_review_content, build_review_prompt,
+    build_review_prompt_structured, extract_review_json, parse_review_comments,
+    parse_review_effort, post_pr_review, review_criteria,
+};
+```
+
+Wait, but the task says "keeping public re-exports from commands_git_review.rs so no call site changes". And commands_git_pr.rs does `use crate::commands_git_review::{build_review_prompt_structured, extract_review_json, parse_review_comments, post_pr_review};` — that will keep working via the re-export. 
+
+Which tests move where? "Copy existing tests over, never delete them." Tests for moved functions must move with the module (they reference super::*). Tests for content builders (build_review_content etc.) reference `super::*` and use ReviewEffort — they can live in commands_review.rs tests. Tests that use `crate::commands::{is_unknown_command, KNOWN_COMMANDS}` — those test /review command recognition; they can stay in commands_git_review.rs tests (they're about the command, and `crate::commands` uses re-export handle_review).
+
+Let me be careful with the test module in commands_review.rs: tests for parse_review_comments, extract_review_json, build_review_prompt*, parse_review_effort, ReviewEffort, ReviewComment equality, build_review_content — these go to commands_review.rs. Tests for blame (parse_blame_args, colorize_blame_*) and command recognition (use crate::commands) stay in commands_git_review.rs.
+
+But wait — the constraint says "At most 3 files are touched in this task: commands_git_review.rs, commands_review.rs (new), main.rs." Good — that matches. dispatch_sub.rs and commands_git_pr.rs call sites unchanged because of re-exports. 
+
+Now — handle_review uses `auto_compact_if_needed` from commands_session, `run_prompt` from prompt, `Usage` — those stay in commands_git_review.rs. But the moved `run_non_interactive_review`... wait, is run_non_interactive_review moved or kept? It's the CLI subcommand entry. Let me re-read the task:
+
+"4. **Kept in `commands_git_review.rs`**: the CLI-facing `handle_review`/`handle_blame` entry points and any git/PR plumbing unique to them."
+
+So handle_review and handle_blame stay. run_non_interactive_review — "CLI-facing entry point" for `arc review` subcommand. It's not strictly handle_review/handle_blame, but it is the CLI-facing entry. Keeping it there makes sense because it uses agent plumbing (build_side_agent, Usage, MarkdownRenderer, AgentEvent...). Actually, all the agent-related stuff can stay in commands_git_review.rs. OK.
+
+So the split:
+
+**commands_review.rs** (new, pure helpers — no Agent, no prompt, no git beyond run_git):
+- `build_review_content` (+ private `build_review_content_range`, `build_review_content_pr`)
+- `ReviewEffort` + `label()` + `criteria()`
+- `parse_review_effort`
+- `review_criteria` — actually I'll put criteria inside ReviewEffort impl as pub fn or standalone. Task wants "per-effort pure handlers". Let me do a standalone `pub fn review_criteria(effort: ReviewEffort) -> &'static str` — cleaner for testability and matches "individually-testable functions".
+
+Hmm wait, "The per-effort prompt-building logic currently in `build_review_prompt` and `build_review_prompt_structured` should become small, individually-testable functions parameterized by effort where it isn't already."
+
+"parameterized by effort where it isn't already" — build_review_prompt IS parameterized by effort already. build_review_prompt_structured is NOT (it's the structured PR one, no effort param). "where it isn't already" suggests adding effort parameterization where missing. Hmm — should build_review_prompt_structured take an effort? That would be a behavior/signature change... but it's internal, only called from commands_git_pr.rs with number, pr_info, diff. If I add an effort param, I'd need to pass one — behavior unchanged if I pass Normal and the structured prompt doesn't use effort anyway. Actually the structured prompt has no per-effort branch at all, so parameterizing it by effort would be a no-op — pointless. 
+
+Better read: "the per-effort prompt-building logic currently in build_review_prompt and build_review_prompt_structured" — i.e., the effort-specific criteria inside build_review_prompt, and the (single-form) structured prompt. "should become small, individually-testable functions parameterized by effort where it isn't already" — extract criteria into per-effort functions. I'll implement:
+
+```rust
+/// Per-effort review criteria block (pure).
+pub fn review_criteria(effort: ReviewEffort) -> &'static str { ... }
+```
+
+And redefine build_review_prompt to use it:
+```rust
+pub fn build_review_prompt(label: &str, content: &str, effort: ReviewEffort) -> String {
+    let max_chars = 30_000;
+    ... content_preview ...
+    let criteria = review_criteria(effort);
+    let effort_label = match effort { Normal => "", other => format!(" [{} review]", other.label()) };
+    format!("Review the following code ({label}){effort_label}. {criteria}\n\n```\n{content_preview}\n```")
+}
+```
+
+Wait — original criteria blocks start with "\n\n 1. **Bugs**..." — actually the blocks are `"Focus on critical issues ONLY:\n\n 1. ..."`. The format string was `"Review the following code ({label}){effort_label}. {criteria}\n\n```\n..."`. Let me look at the exact criteria strings:
+
+Quick: `"Focus on critical issues ONLY:\n\n 1. **Bugs** — logic errors, crashes, data corruption\n 2. **Security** — injection, unsafe operations, credential exposure\n\n Skip style, performance, and minor suggestions. Be terse — one line per finding."`
+
+These contain leading spaces after \n (from the `\n\` line continuation in the original source). I must reproduce them byte-for-byte. Extracting into `review_criteria` — keep the exact strings. Good, zero behavior change.
+
+`build_review_prompt_structured` — keep as is (single per-effort... it's used for PR posting, no effort). "parameterized by effort where it isn't already" — I'll leave it unchanged; it has no effort dimension by design. Actually hmm, let me reconsider: maybe they want `build_review_prompt_structured` also to take effort... No — that would change behavior/signature and call site in commands_git_pr.rs would need updating, which is forbidden ("no call site changes"). I'll leave it.
+
+Wait, but the task says restructure handle_review into a dispatcher with "per-effort pure helpers". My handle_review dispatcher calls `review_prompt_and_run` which uses build_review_prompt(effort) → review_criteria(effort). That satisfies "dispatch to per-effort pure handlers".
+
+Additionally "at least one per-effort prompt-builder test (it is a pure function)" — I'll add a direct test asserting `review_criteria(ReviewEffort::Quick)` returns the quick criteria and contains expected markers, plus round-trip test `parse_review_effort` ("--thorough x" → (Thorough, "x")) which already exists (test_parse_review_effort_thorough_with_file). So add a new direct review_criteria test. Since existing per-effort tests already exist (test_build_review_prompt_quick/thorough), I'll add one focused on review_criteria + maybe an open/closed round-trip test for parse_review_effort.
+
+Also add `flex` — no. Let me also make sure each new file compiles with correct imports.
+
+**commands_review.rs imports:**
+- `use crate::format::*;` (for RED, DIM, RESET, safe_truncate)
+- `use crate::git::*;` (get_staged_diff, run_git)
+- std (path::Path, fs)
+
+Everything else (ReviewEffort, etc.) is self-contained.
+
+Let me now write commands_review.rs. The moved functions:
+
+1. `build_review_content` (lines 11–67)
+2. `build_review_content_range` (69–85)
+3. `build_review_content_pr` (87–125)
+4. `ReviewEffort` (214–235)
+5. `parse_review_effort` (236–254)
+6. `review_criteria` (NEW — extracted from build_review_prompt lines 270–305)
+7. `build_review_prompt` (256–315, restructured to use review_criteria)
+8. `ReviewComment` (527–533)
+9. `parse_review_comments` (535–613)
+10. `parse_single_comment` (615–621)
+11. `extract_json_string_field` (623–661)
+12. `extract_json_number_field` (663–676)
+13. `build_review_prompt_structured` (678–718)
+14. `post_pr_review` (720–804)
+15. `extract_review_json` (806–827)
+
+Tests to move: those testing the above (build_review_prompt*, parse_review_effort, parse_review_comments, extract_review_json, ReviewComment, build_review_content, review_criteria new).
+
+**commands_git_review.rs keeps:**
+- module doc + imports
+- `run_non_interactive_review` (127–212) — uses parse_review_effort, build_review_content, build_review_prompt from commands_review
+- `handle_review` (317–340) — restructured dispatcher
+- `BlameArgs`, `parse_blame_args` (342–392)
+- `colorize_blame_line`, `colorize_blame` (394–486)
+- `handle_blame` (488–525)
+- re-exports
+- tests: blame tests + command-recognition tests + non-interactive (none) 
+
+Now, imports in commands_git_review.rs after split:
+- `use crate::commands_review::*;` — brings build_review_content, build_review_prompt, parse_review_effort, ReviewEffort
+- `use crate::commands_session::auto_compact_if_needed;`
+- `use crate::format::*;`
+- `use crate::git::*;`
+- `use crate::prompt::run_prompt;`
+- arcagent stuff
+
+Wait — `use crate::format::*` and `use crate::git::*` both have DIM/RED etc.? format::* exports RED, DIM, RESET. git::* exports run_git, get_staged_diff. Fine, no conflicts (that's how it is now).
+
+One conflict risk: `use crate::commands_review::*;` glob + `use crate::git::*;` — does commands_review export anything named same as git? commands_review exports build_review_content etc. git exports run_git, get_staged_diff... no clash.
+
+In commands_review.rs, `use crate::git::*` for run_git and get_staged_diff. OK.
+
+Now, careful with the exact `build_review_prompt` string. Let me copy the criteria verbatim from lines 270–305:
+
+Quick:
+```
+"Focus on critical issues ONLY:\n\n\
+ 1. **Bugs** — logic errors, crashes, data corruption\n\
+ 2. **Security** — injection, unsafe operations, credential exposure\n\n\
+ Skip style, performance, and minor suggestions. Be terse — one line per finding."
+```
+
+Note the `\n\` continuation with leading space on the next line — in Rust string continuation `\` at end of line strips the newline AND leading whitespace of next line. So `"\n\n\ 1."` equals `"\n\n1."`? Hmm wait — `"Focus on critical issues ONLY:\n\n\` then newline then ` 1. **Bugs**..."` — the `\` line continuation eats the newline and all leading whitespace on the next line. So the actual string is `"...ONLY:\n\n1. **Bugs**..."`. Wait no — look:
+
+```rust
+"Focus on critical issues ONLY:\n\n\
+ 1. **Bugs** — logic errors, crashes, data corruption\n\
+ 2. **Security** — injection, unsafe operations, credential exposure\n\n\
+ Skip style, performance, and minor suggestions. Be terse — one line per finding."
+```
+
+`\n\n\` — escape newline? No: `\n` is newline escape, then `\` at line end is continuation. So `"\n\n"` followed by continuation → next line's leading whitespace stripped → `1. **Bugs**...`. Then `\n\` → newline char + continuation → next line `2. **Security**...`. Then `\n\n\` → `\n\n` + continuation → `Skip style...`.
+
+So actual: `"Focus on critical issues ONLY:\n\n1. **Bugs** — logic errors, crashes, data corruption\n2. **Security** — injection, unsafe operations, credential exposure\n\nSkip style, performance, and minor suggestions. Be terse — one line per finding."`
+
+Since I'm moving this code verbatim (just relocating the string into review_criteria), the behavior stays identical regardless of my understanding. I'll copy the source lines exactly.
+
+Now, plan the restructure of build_review_prompt. Original:
+
+```rust
+pub fn build_review_prompt(label: &str, content: &str, effort: ReviewEffort) -> String {
+    let max_chars = 30_000;
+    let content_preview = if content.len() > max_chars {
+        let truncated = safe_truncate(content, max_chars);
+        format!("{truncated}\n\n... (truncated, {} more chars)", content.len() - max_chars)
+    } else {
+        content.to_string()
+    };
+
+    let criteria = match effort { ... };
+
+    let effort_label = match effort {
+        ReviewEffort::Normal => String::new(),
+        other => format!(" [{} review]", other.label()),
+    };
+
+    format!("Review the following code ({label}){effort_label}. {criteria}\n\n```\n{content_preview}\n```")
+}
+```
+
+New:
+
+```rust
+/// Per-effort review criteria block (pure, individually testable).
+pub fn review_criteria(effort: ReviewEffort) -> &'static str {
+    match effort {
+        ReviewEffort::Quick => { ...quick string... }
+        ReviewEffort::Normal => { ...normal string... }
+        ReviewEffort::Thorough => { ...thorough string... }
+    }
+}
+
+pub fn build_review_prompt(label: &str, content: &str, effort: ReviewEffort) -> String {
+    let max_chars = 30_000;
+    let content_preview = ...same...;
+    let criteria = review_criteria(effort);
+    let effort_label = ...same...;
+    format!("Review the following code ({label}){effort_label}. {criteria}\n\n```\n{content_preview}\n```")
+}
+```
+
+Byte-identical output. 
+
+Now handle_review restructure — the "dispatcher". New:
+
+```rust
+/// Handle the /review command: review staged changes or a specific file.
+/// Returns the review prompt if sent to AI, None otherwise.
+pub async fn handle_review(
+    input: &str,
+    agent: &mut Agent,
+    session_total: &mut Usage,
+    model: &str,
+) -> Option<String> {
+    let arg = input.strip_prefix("/review").unwrap_or("").trim();
+    let (effort, remaining) = parse_review_effort(arg);
+
+    let (label, content) = build_review_content(&remaining)?;
+    run_review_prompt(agent, &label, &content, effort, session_total, model).await;
+    Some(run_review_prompt(...)) // hmm
+}
+```
+
+Wait, original returns `Some(prompt)` — the prompt string. Let me keep the exact semantics:
+
+```rust
+pub async fn handle_review(...) -> Option<String> {
+    let arg = ...;
+    let (effort, remaining) = parse_review_effort(arg);
+
+    let (label, content) = build_review_content(&remaining)?;
+    review_and_run(agent, &label, &content, effort, session_total, model).await
+}
+
+/// Build the per-effort prompt and run it through the agent (the dispatch core).
+async fn review_and_run(
+    agent: &mut Agent,
+    label: &str,
+    content: &str,
+    effort: ReviewEffort,
+    session_total: &mut Usage,
+    model: &str,
+) -> Option<String> {
+    if effort != ReviewEffort::Normal {
+        eprintln!("{DIM}  effort: {}{RESET}", effort.label());
+    }
+    let prompt = build_review_prompt(label, content, effort);
+    run_prompt(agent, &prompt, session_total, model).await;
+    auto_compact_if_needed(agent);
+    Some(prompt)
+}
+```
+
+Behavior identical: eprintln effort, run_prompt, auto_compact, return Some(prompt). `build_review_content(&remaining)?` — with `?` on Option in a function returning Option<String>. 
+
+Now the actual mechanical extraction. I'll write the new file with write_file (it's a new file), then rewrite commands_git_review.rs to keep only what stays (that's a big rewrite — I'll use write_file for it too, carefully preserving the kept content verbatim).
+
+Since commands_git_review.rs keeps: doc comment, imports, run_non_interactive_review, handle_review (restructured), blame block, re-exports, and tests (blame + command recognition). Let me assemble precisely.
+
+Files/line inventory to keep (verbatim except handle_review restructure):
+
+Lines 1–9: doc + imports (update imports)
+Lines 127–212: run_non_interactive_review (uses parse_review_effort, build_review_content, build_review_prompt, MarkdownRenderer, Usage, AgentEvent, StreamDelta, AgentMessage, build_side_agent, cost stuff — need to check what `cost` is: line 200 `if let Some(c) = cost` — from `agent_config.build_side_agent()`... there's a `cost` variable defined earlier in lines 186-199 region? Let me check lines 197-199: `let total_tokens = usage.input + usage.output; if total_tokens > 0 {` then `if let Some(c) = cost {` — cost must be defined between... let me look again at lines 186-205. Line 187-196 compute usage from messages. `let total_tokens = usage.input + usage.output; if total_tokens > 0 {` — then what's `cost`? It's probably `agent_config.model_config.cost` or from `create_model_config`. Let me look at the full function again — I have lines 140-212 from the second read. Lines 197-205:
+
+```
+197    let total_tokens = usage.input + usage.output;
+198    if total_tokens > 0 {
+...
+200        if let Some(c) = cost {
+```
+
+So `cost` is defined between 197 and 200? No — 198 `if total_tokens > 0 {` then 199 is blank per truncation, 200 `if let Some(c) = cost {`. Hmm, there must be a `let cost = ...` line. Let me re-read that region to be sure.
+
+Actually from my first read of 140-212, I saw up to line 205. The truncated portion showed line 198-199 as `if total_tokens > 0 {` and `{cost}` at 200. But where's `cost` defined? Possibly in a line I missed between 197 and 200 — the read output showed:
+
+```
+197 |     let total_tokens = usage.input + usage.output;
+198 |     if total_tokens > 0 {
+199 |         // Show cost on stderr
+```
+
+wait no. Let me re-read carefully. From read 2 output (lines 200-599), lines 200-205:
+
+```
+200 |         if let Some(c) = cost {
+201 |             eprintln!("{DIM}  review: {} tokens, ${:.4}{RESET}", total_tokens, c);
+202 |         } else {
+203 |             eprintln!("{DIM}  review: {} tokens{RESET}", total_tokens);
+204 |         }
+205 |     }
+```
+
+And from read of 100-699... the earlier part:
+
+```
+186 |     // Show cost on stderr
+187 |     let messages = side_agent.messages();
+188 |     let mut usage = Usage::default();
+189 |     for msg in messages {
+190 |         if let AgentMessage::Llm(arcagent::types::Message::Assistant { usage: u, .. }) = msg {
+...
+196 |         }
+197 |     }
+```
+
+Hmm the 186-205 region from the first read (offset 100, limit 600) was:
+
+```
+186 |     // Show cost on stderr
+187 |     let messages = side_agent.messages();
+188 |     let mut usage = Usage::default();
+189 |     for msg in messages {
+190 |         if let AgentMessage::Llm(arcagent::types::Message::Assistant { usage: u, .. }) = msg {
+191 |             usage.input += u.input;
+192 |             usage.output += u.output;
+193 |             usage.cache_read += u.cache_read;
+194 |             usage.cache_write += u.cache_write;
+195 |         }
+196 |     }
+197 |     let total_tokens = usage.input + usage.output;
+198 |     if total_tokens > 0 {
+```
+
+and then 200 is `if let Some(c) = cost {`. So line 199 must be `let cost = agent_config.cost(...)` or similar — I missed it in the truncation. I need to read lines 196-212 exactly to preserve. Let me read that precise range.
+
+Also I need lines 317-340 verbatim (handle_review) which I have. And tests to keep: which lines? Blame tests 1002-1093ish plus command recognition tests 900-918 and 994-999, and test_build_review_content_existing_file (968-977)? No wait — build_review_content moves to commands_review.rs, so its tests move too (they test build_review_content). Tests that stay in commands_git_review.rs: 
+- test_review_command_recognized (900-907)
+- test_review_command_matching (909-918)
+- test_review_help_text_present (993-999)
+- all parse_blame_args tests (1001-1093) and colorize_blame tests (1090-1104 approx)
+- test_build_review_content_detects_commit_range (1106-1119), detects_pr_flag (1121-1126), pr_invalid_number (1128-1132) — these test build_review_content, which moves. So they move to commands_review.rs tests.
+
+Hmm, wait — but "Copy existing tests over, never delete them." Moving tests to the new module is fine as long as they still exist.
+
+Let me read the exact remaining test ranges I haven't seen to get precise line boundaries: 1062-1095 (colorize tests), and confirm 1090-1104. I saw 1090-1104 partially in an earlier read (lines 1090-1104 from offset 740 read). Let me read 1056-1104 exactly.
+
+Let me read lines 196-210 and 1056-1105 to be precise.
+────────────────────────────────────────────────────────────────────────────────
+I now have the complete picture. Let me read the two remaining precise ranges I need (the `cost` definition inside `run_non_interactive_review` and the blame/colorize test block):
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:196..214  ▶ read src/commands_git_review.rs:1056..1106 ✓ (1ms)
+ ✓ (1ms)
+  2 tools completed in 697ms (2 ✓)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ read src/commands_git_review.rs:1105..1140  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git status --short && git log --on… ✓ (4ms)
+ ✓ (9ms)
+  2 tools completed in 769ms (2 ✓)
+
+Now I have the full picture. The module list lives only in main.rs (no lib.rs). 
+
+**Split plan:**
+• `commands_git_review.rs` keeps: `build_review_content` + its helpers, `run_non_interactive_review, handle_review`, blame cluster, `post_pr_review`; gets re-export `pub use` of the moved review helpers. Blame tests stay.
+• `commands_review.rs` (new): `ReviewEffort, parse_review_effort`, `build_review_prompt, build_review_prompt_structured, ReviewComment, parse_review_comments` + JSON helpers + moved review tests.
+
+Let me create the new file first:
+
+
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ write src/commands_review.rs (687 lines) ✓ (0ms)
+
+Now rewrite `commands_git_review.rs` — remove the moved definitions and tests, keep content-builder/blame/entry points, add re-exports:
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ write src/commands_git_review.rs (733 lines)
+  + //! Code review command handlers: /review, /blame, and non-interactive review.
+  + //!
+  + //! The pure prompt-building / comment-parsing helpers live in
+  + //! `commands_review` (per-effort handlers) — re-exported here so call sites
+  + //! through `commands_git_review` are unchanged.
+  + 
+  + pub use crate::commands_review::{
+  +     build_review_prompt, build_review_prompt_structured, extract_review_json, parse_review_comments,
+  +     parse_review_effort, post_pr_review, ReviewComment, ReviewEffort,
+  + };
+  + 
+  + use crate::commands_session::auto_compact_if_needed;
+  + use crate::format::*;
+  + use crate::git::*;
+  + use crate::prompt::run_prompt;
+  + 
+  + use arcagent::agent::Agent;
+  + use arcagent::*;
+  + 
+  + /// Build a review prompt for either staged changes or a specific file.
+  ... (713 more lines)
+ ✓ (0ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — I included `post_pr_review` in the re-export list but `post_pr_review` now lives in `commands_git_review.rs`, not `commands_review.rs`. I need to fix that re-export: `post_pr_review` must NOT be re-exported from `commands_review` (it's defined here in `commands_git_review.rs`). Let me remove it from the `pub use` list.
+
+Also I need to add `mod commands_review;` to main.rs.
+────────────────────────────────────────────────────────────────────────────────
+I made an error — `post_pr_review` stays in `commands_git_review.rs` (it's git/PR plumbing), so it shouldn't be in the re-export. Let me fix:
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/commands_git_review.rs (4 → 4 lines)
+    pub use crate::commands_review::{
+        build_review_prompt, build_review_prompt_structured, extract_review_json, parse_review_comments,
+  -     parse_review_effort, post_pr_review, ReviewComment, ReviewEffort,
+  +     parse_review_effort, ReviewComment, ReviewEffort,
+    };
+ ✓ (381ms)
+    pub use crate::commands_review::{
+        build_review_prompt, build_review_prompt_structured, extract_review_json, parse_review_comments,
+  -     parse_review_effort, post_pr_review, ReviewComment, ReviewEffort,
+  +     parse_review_effort, ReviewComment, ReviewEffort,
+    };
+
+Now register the new module in main.rs:
+  ╭─ Turn 18 ────────────────────────────────────────────────────────────╮
+  ▶ edit src/main.rs (3 → 4 lines)
+    mod commands_retry;
+    mod commands_revisit;
+  + mod commands_review;
+    mod commands_risk;
+ ✓ (382ms)
+    mod commands_retry;
+    mod commands_revisit;
+  + mod commands_review;
+    mod commands_risk;
+
+Now build:
+  ╭─ Turn 19 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -30 ✓ (8.9s)
+
+Build passes. Now run the tests:
+
+
+  ╭─ Turn 20 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test 2>&1 | tail -25 ✓ (1m 15s)
+
+

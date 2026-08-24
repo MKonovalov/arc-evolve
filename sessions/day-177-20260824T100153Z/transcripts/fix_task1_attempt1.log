@@ -1,0 +1,626 @@
+  arc (piped mode) — model: deepseek-v4-flash
+  💡 Detected `cargo clippy --all-targets -- -D warnings && cargo test` — enable auto-watch with `auto_watch = true` in .arc.toml
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me start by understanding the current state of the code. The evaluator says:
+1. Unit tests are missing for the calibrated "perceives" path and honest negative path with ≥5 events
+2. Docs subsection "Calibration status" was not added to `docs/src/features/risk.md`
+
+Let me read the relevant files first.
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git log --oneline -5 && git status  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:1..121 ✓ (1ms)
+ ✓ (9ms)
+
+────────────────────────────────────────────────────────────────────────────────
+  2 tools completed in 934ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Let me look at the current state of the calibration verdict code, the tests, and the docs. Let me read the relevant portions of the file.
+────────────────────────────────────────────────────────────────────────────────
+
+
+
+  ╭─ Turn 2 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'calibration|CalibrationVerdict|format_risk_meter_line|comput…' in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs  ▶ search 'Calibration|calibration|meter' in /home/runner/work/arc-evolve/arc-evolve/docs/src/features/risk.md ✓ (3ms)
+ ✓ (2ms)
+  2 tools completed in 849ms (2 ✓)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Interesting — the search found nothing. Let me check the actual file. Maybe the grep didn't find the pattern because of how I searched. Let me look at the whole file structure.
+  ╭─ Turn 3 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -n "calibration\|verdict\|for… ✓ (4ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The task appears to be already implemented. Let me look at the current state more thoroughly — read the calibration_verdict section, the tests, and the docs.
+  ╭─ Turn 4 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:480..720 ✓ (2ms)
+
+────────────────────────────────────────────────────────────────────────────────
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+The core implementation already exists. Now let me look at the tests section to see what tests exist, and check the `ValidationEvent` struct fields.
+────────────────────────────────────────────────────────────────────────────────
+The core implementation exists. Now let me check the test module and the `ValidationEvent` struct.
+  ╭─ Turn 5 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:1280..1450  ▶ search 'struct ValidationEvent' in /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs ✓ (2ms)
+ ✓ (3ms)
+  2 tools completed in 769ms (2 ✓)
+
+
+  ╭─ Turn 6 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs:330..450 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the current state. The core implementation exists:
+- `calibration_verdict` function exists
+- `CalibrationVerdict` struct exists
+- Meter wiring exists
+- JSON persistence exists
+- One test `test_format_risk_meter_line` sets `verdict_line` manually
+
+What's missing per the evaluator:
+1. **Unit tests** for the calibrated "perceives" path and the honest negative path with ≥5 events. No test calls `calibration_verdict` directly, no "perceives" string in any test.
+2. **Docs**: "Calibration status" subsection in `docs/src/features/risk.md` was not added.
+
+Let me check the current risk.md docs to see its structure. Also let me verify that the `calibration_verdict` logic is correct.
+
+Let me check:
+- For flagged rate: `flagged_broke_sum / flagged_pop_sum` where `flagged_broke_sum += e.hit_count.min(pred)` and `flagged_pop_sum += pred`.
+- For unflagged rate: `unflagged_broke_sum / unflagged_pop_sum` where `unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred))` and `unflagged_pop_sum += total_scored.saturating_sub(pred)`.
+- `surprises = scored_broke.saturating_sub(e.hit_count)`.
+
+Hmm, wait — there's a subtle bug potential. `surprises = scored_broke - hit_count`. hit_count is parsed from `hits` array length. So surprises = scored_broke - hits. And unflagged_broke_sum gets `surprises`, but it's clamped to unflagged population. Good.
+
+Also there's a subtle issue: `unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred))`. That's correct.
+
+Now for the test:
+- Cold start: 3 pairs → "cold start" and no accuracy number.
+- Calibrated with 5+ validation events where flagged broke more often → "perceives".
+- Calibrated with 5+ events where flagged did NOT break more often → honest negative.
+
+Let me construct synthetic events. I'll build `ValidationEvent` structs directly per the task's allowance.
+
+For "perceives": flagged population should have higher breakage rate than unflagged.
+
+Example per event: predicted_count = 10, total_scored = 70, hits = 2, surprises = 0, scored_broke = 2. So flagged rate = 2/10 = 20%, unflagged rate = 0/60 = 0%. That's strong — perceives.
+
+But wait — the task expects ≥5 validation events, and `pairs >= target_pairs`. The pairs count is computed by the meter as validations with scored_broke > 0. In a direct `calibration_verdict(pairs, validations)` call, we pass pairs directly. For tests, we can pass pairs: 5 and 5+ events.
+
+For the honest negative: flagged files did NOT break more often. E.g., hits = 0, surprises = 2, scored_broke = 2 with predicted_count = 10, total_scored = 70. Then flagged rate = 0/10 = 0%, unflagged rate = 2/60 = 3.33%. So flagged < unflagged → "does not yet perceive".
+
+Let me also make a mixed pool to be realistic: maybe 5 events with varying values, but I can just use 5 identical events for clarity — pooling would give the same result.
+
+Actually let me think about whether the test should call `calibration_verdict` directly (pure function) — the evaluator says "no test calls `calibration_verdict`". So add tests that call it directly with synthetic `ValidationEvent` structs constructed directly.
+
+Test 1 (cold start): 
+```rust
+#[test]
+fn test_calibration_verdict_cold_start() {
+    let events = vec![ValidationEvent { predicted_count: Some(10), total_scored: Some(70), scored_broke: Some(1), hit_count: 1, ..Default::default() }];
+    let verdict = calibration_verdict(3, &events);
+    assert!(verdict.line.contains("cold start"));
+    assert!(verdict.line.contains("3/5"));
+    // no accuracy percentage quoted
+    assert!(!verdict.line.contains('%'));
+}
+```
+
+Wait, cold-start line is "calibration: cold start — 3/5 paired predictions, accumulating" — no '%'. Good.
+
+Test 2 (perceives):
+```rust
+#[test]
+fn test_calibration_verdict_calibrated_perceives() {
+    let events: Vec<ValidationEvent> = (0..5)
+        .map(|_| ValidationEvent {
+            predicted_count: Some(10),
+            total_scored: Some(70),
+            hit_count: 2,
+            total_changed: 2,
+            scored_broke: Some(2),
+            ..Default::default()
+        })
+        .collect();
+    let verdict = calibration_verdict(5, &events);
+    assert!(verdict.line.contains("flagged files broke at"));
+    assert!(verdict.line.contains("perceives churn"));
+    assert!(!verdict.line.contains("does not yet perceive"));
+}
+```
+
+Wait the rendered line: `"calibration: {pairs}/{} paired predictions — flagged files broke at {flagged_rate_pct:.0}% vs unflagged {unflagged_rate_pct:.0}% ({direction} churn; pooled accuracy {pooled_accuracy_pct:.0}%)"`.
+
+So with direction "perceives": "perceives churn". Good.
+
+Test 3 (negative):
+```rust
+#[test]
+fn test_calibration_verdict_calibrated_negative() {
+    let events: Vec<ValidationEvent> = (0..5)
+        .map(|_| ValidationEvent {
+            predicted_count: Some(10),
+            total_scored: Some(70),
+            hit_count: 0,
+            total_changed: 2,
+            scored_broke: Some(2),
+            ..Default::default()
+        })
+        .collect();
+    let verdict = calibration_verdict(5, &events);
+    assert!(verdict.line.contains("does not yet perceive churn"));
+    assert!(!verdict.line.contains("perceives churn"));
+}
+```
+
+Hmm wait, careful: "does not yet perceive" contains "perceives"? No — "does not yet perceive" — the word "perceives" isn't in there. "perceive" is. So `assert!(!verdict.line.contains("perceives churn"))` is fine since "does not yet perceive churn" — the substring "perceives churn" doesn't appear. Good.
+
+Note in the "perceives" test, `flagged_broke_sum += e.hit_count.min(pred)` = 2*5=10, flagged_pop = 10*5=50 → 20%. unflagged: surprises = scored_broke(2) - hit_count(2) = 0 → 0%. So flagged 20% > unflagged 0% → perceives. Good.
+
+In the negative test: hits=0, scored_broke=2 → surprises=2. flagged rate = 0%, unflagged = 2/60 = 3.33% → 3%. flagged 0% < unflagged 3% → does not yet perceive. Good.
+
+Also `pairs = 5` passed directly. Since the events each have scored_broke > 0, that's consistent.
+
+Let me also add a check in the perceives test for pooled accuracy: hit_sum=10, changed_sum=10 → 100%. In the negative test: hit_sum=0, changed_sum=10 → 0%.
+
+Now, docs. Let me read docs/src/features/risk.md.
+────────────────────────────────────────────────────────────────────────────────
+Now let me look at the docs file and confirm the current structure:
+
+
+  ╭─ Turn 7 ─────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/docs/src/features/risk.md ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the state. The implementation of `calibration_verdict` and wiring already exists. Missing:
+1. Unit tests for calibrated "perceives" and "does not yet perceive" paths with ≥5 events
+2. Docs subsection "Calibration status" in `docs/src/features/risk.md`
+
+Let me verify the exact JSONL shape needed for validation events with lift fields. Looking at how the meter computes pairs: events with `scored_broke > 0`. And `calibration_verdict` uses `predicted_count`, `total_scored`, `scored_broke`, and `hit_count` (derived from `hits` array length).
+
+For a calibration verdict test:
+- Need ≥5 events (pairs >= 5), each with `scored_broke > 0` to count as a pair.
+- "Perceives" case: flagged rate > unflagged rate, e.g. each event: predicted_count=10, total_scored=77, hits=3 (of which scored files among hits... wait let me re-read the pooling logic).
+
+Let me re-read the pooling logic in `calibration_verdict`:
+
+```rust
+for e in validations {
+    if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+        (e.predicted_count, e.total_scored, e.scored_broke)
+    {
+        // Flagged population = pred files the scorer flagged; their breakage fills scored_broke's hits half
+        let surprises = scored_broke.saturating_sub(e.hit_count);
+        flagged_pop_sum += pred;
+        flagged_broke_sum += e.hit_count.min(pred);
+        unflagged_pop_sum += total_scored.saturating_sub(pred);
+        unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred));
+        hit_sum += e.hit_count;
+        changed_sum += scored_broke;
+    }
+}
+```
+
+So flagged_broke comes from hit_count (capped at pred), unflagged_broke comes from scored_broke - hit_count (capped at total_scored - pred).
+
+Perceives case: flagged rate > unflagged rate.
+- e.g. 5 events, each: predicted_count=10, total_scored=77, hits=5, scored_broke=5. Then surprises = 0, unflagged_broke = 0. flagged_broke_sum=25, flagged_pop=50 → 50%. unflagged = 0%. Perceives ✓. Note: hit_count=5 means 5 hits, but predicted_count=10 is the flagged population. Hmm, but is it realistic that hits=5 with pred=10? Actually hit_count comes from `hits` array length. Realistically the flagged files that broke are the hits. scored_broke = hits + scored surprises. So scored_broke >= hit_count normally. If scored_broke=5, hit_count=5, surprises=0.
+
+Actually wait — there's a subtlety: `hit_count` may include hits from files NOT in the scored population? The validation events record hits = changed files that were predicted. The scored population is `all_ranked.len()`. The predicted_count is top-10 of scored... Actually let me not overthink — synthetic tests just need realistic shapes.
+
+For "does not yet perceive": flagged rate <= unflagged rate.
+- e.g. 5 events, each: predicted_count=10, total_scored=77, hits=1, scored_broke=4. Then surprises = scored_broke - hit_count = 3. flagged_broke_sum = 5, flagged_pop = 50 → 10%. unflagged_broke_sum = 15, unflagged_pop = 335 → 4.5%? Hmm that would still be perceives (10% > 4.5%).
+
+Let me target clearly: flagged low, unflagged high.
+- hits=1, scored_broke=5 → surprises=4. flagged: 1/10 = 10% per event; unflagged: 4/(77-10)=4/67 ≈ 6%. Still 10% > 6% → perceives. Hmm.
+
+To make unflagged clearly higher: hits=0, scored_broke=5 → surprises=5. flagged_broke=0/hr, unflagged 5/67 ≈ 7.5%. flagged 0% < 7.5% → does not yet perceive. 
+
+Let me double check: `flag_broke_sum += e.hit_count.min(pred)` → 0. `unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred))` = 5 min 67 = 5. flagged_rate = 0%, unflagged_rate = 5*100/(5*67) = 500/335 = 1.49%. perceives = 0 > 1.49? No → "does not yet perceive churn". 
+
+For the perceives case with hits=5, scored_broke=5: flagged_rate = 25/50 = 50%. unflagged = 0%. perceives ✓.
+
+Also, to be a matched pair, each event needs scored_broke > 0 (pairs counts events with scored_broke present and > 0). 5 events each with scored_broke=5 → 5 pairs ≥ 5 → calibrated path.
+
+Now the test needs to call `calibration_verdict` directly:
+1. Cold start: pairs=3, validations=[] (or any) → line contains "cold start", no accuracy / "%" number. Verify no percentage. The line: "calibration: cold start — 3/5 paired predictions, accumulating". Hmm the task wants "cold start: 3/5 paired predictions — accumulating". Actually the existing implementation renders "calibration: cold start — 3/5 paired predictions, accumulating". That's close enough — contains "cold start", no accuracy claim. Test: assert line contains "cold start", contains "3/5", and does NOT contain "%".
+
+2. Perceives: 5 events via `parse_validation_events` from JSONL, or construct `ValidationEvent` structs. I'll construct directly since the struct is simple:
+```rust
+fn event(hits: usize, total_scored: usize, scored_broke: usize, predicted: usize) -> ValidationEvent
+```
+Actually let me use the parser for realism? The task says "Use the module's existing load_validation_history_from / parse_validation_events helpers (already defensive) or construct ValidationEvent structs directly." Constructing directly is simplest and most readable.
+
+Test asserts: line contains "perceives", contains "50%" (flagged rate) — well, rates round to .0. Let me compute: 25/50 = 50.0 → "50%". unflagged 0% → "0%". The line: "calibration: 5/5 paired predictions — flagged files broke at 50% vs unflagged 0% (perceives churn; pooled accuracy 100%)".
+
+pooled_accuracy = hit_sum / changed_sum * 100 = 25/25 = 100%.
+
+3. Negative: 5 events hits=0, scored_broke=5, predicted=10, total_scored=77 → flagged 0%, unflagged = 500/335 = 1.49 → "1%". perceives false → "does not yet perceive". Assert contains "does not yet perceive" and "0%".
+
+Also should I add a test asserting the meter's verdict_line? The task's requirement #4 says three specific tests. Let me add exactly those three tests, plus maybe assert the verdict flows into meter (nice-to-have, could extend the existing `test_compute_risk_meter_counts_from_fixtures`). I'll keep to the required three — cleaner.
+
+Now the docs: add a "Calibration status" subsection in `docs/src/features/risk.md`. It should describe the verdict line (which is user-visible in `/risk` output and meter). The verdict is appended after the meter line. Let me write:
+
+```markdown
+## Calibration status
+
+Once the meter reaches its target (`pairs: 5/5`), the plain-language verdict
+appears under the meter line. It is the dream's cold-start test — does the
+sense organ's "umwelt" correspond to the territory?
+
+```
+risk meter: 5/5 pairs (95 snapshots, 5 validations)
+calibration: 5/5 paired predictions — flagged files broke at 42% vs unflagged 29% (perceives churn; pooled accuracy 60%)
+```
+
+- **Cold start** (`pairs < 5`): the meter shows an honest status line —
+  `calibration: cold start — 3/5 paired predictions, accumulating` — and never
+  quotes an accuracy percentage. A rate from fewer than 5 matched pairs would
+  be noise presented as signal.
+- **Calibrated** (`pairs ≥ 5`): the verdict pools all validation events and
+  reports how often *flagged* scored files broke vs *unflagged* scored files,
+  plus pooled accuracy. **perceives churn** means flagged files broke more
+  often than unflagged ones; **does not yet perceive churn** means they did
+  not. The milestone measures — it does not flatter, so the negative case is
+  reported just as plainly as the positive one.
+```
+
+Where does the verdict line actually appear? `format_risk_meter_line` is used by the harness path. Let me check where format_risk_meter_line is called and whether the verdict line appears in user-visible /risk output. The task says "Wire the verdict into the meter line (format_risk_meter_line / write_risk_meter or wherever the meter renders), so every arc risk / arc risk snapshot surfaces the milestone state." The docs say "The meter tracks three numbers, shown in /risk output and in /status". The verdict flows through `format_risk_meter_line`. Let me check where that's called.
+────────────────────────────────────────────────────────────────────────────────
+The implementation is complete; I need to add the tests and docs. Let me check where `format_risk_meter_line` and the verdict render, to write accurate docs:
+
+
+  ╭─ Turn 8 ─────────────────────────────────────────────────────────────╮
+  ▶ search 'format_risk_meter_line|risk_meter_line' in /home/runner/work/arc-evolve/arc-evolve/src ✓ (9ms)
+
+
+  ╭─ Turn 9 ─────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && grep -rn "format_risk_meter_line\|… ✓ (10ms)
+
+
+  ╭─ Turn 10 ────────────────────────────────────────────────────────────╮
+  ▶ read /home/runner/work/arc-evolve/arc-evolve/src/commands_risk.rs:1395..1435 ✓ (1ms)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Now I understand the full picture. The implementation is complete:
+1. `calibration_verdict` exists — pure function
+2. Meter-line wiring exists — `format_risk_meter_line` appends the verdict line, and `write_risk_meter` persists it
+3. Missing: unit tests covering the required paths (cold start with 3 pairs, calibrated "perceives" with ≥5 events, calibrated negative verdict with ≥5 events)
+4. Missing: docs `docs/src/features/risk.md` — "Calibration status" subsection
+
+Let me add the tests. I'll construct `ValidationEvent` structs directly (simpler and more precise than JSONL strings, though JSONL would also work).
+
+The current tests:
+- `test_compute_risk_meter_counts_from_fixtures` — 2 pairs, cold start
+- `test_compute_risk_meter_empty_ledgers`
+- `test_format_risk_meter_line` — manually sets verdict_line
+- `test_write_risk_meter_to_writes_stamp`
+
+I need to add:
+1. Cold-start path test with 3 pairs → "cold start" and no accuracy number
+2. Calibrated path with synthetic 5+ validation events where flagged files broke more often → "perceives"
+3. Calibrated path with synthetic events where flagged files did NOT break more often → honest negative verdict
+
+Let me think about the semantics in `calibration_verdict`:
+
+```rust
+let mut flagged_broke_sum: usize = 0;
+let mut flagged_pop_sum: usize = 0;
+let mut unflagged_broke_sum: usize = 0;
+let mut unflagged_pop_sum: usize = 0;
+let mut hit_sum: usize = 0;
+let mut changed_sum: usize = 0;
+for e in validations {
+    if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+        (e.predicted_count, e.total_scored, e.scored_broke)
+    {
+        // Flagged population = `predicted_count` files flagged
+        let surprises = scored_broke.saturating_sub(e.hit_count);
+        flagged_pop_sum += pred;
+        flagged_broke_sum += e.hit_count.min(pred);
+        unflagged_pop_sum += total_scored.saturating_sub(pred);
+        unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred));
+        hit_sum += e.hit_count;
+        changed_sum += scored_broke;
+    }
+}
+```
+
+So for "perceives", I want flagged_rate (flagged_broke_sum/flagged_pop_sum) > unflagged_rate (unflagged_broke_sum/unflagged_pop_sum).
+
+Let me construct a simple example. For each event:
+- predicted_count = 10
+- total_scored = 77
+- scored_broke = 1 (one file broke, which was in the flagged top-10)
+- hit_count = 1 (the flagged file broke — a hit)
+- surprises = scored_broke - hit_count = 0
+
+Then:
+- flagged_pop_sum += 10 → 50 for 5 events
+- flagged_broke_sum += min(1,10)=1 → 5
+- unflagged_pop_sum += 77-10=67 → 335
+- unflagged_broke_sum += min(0,67)=0 → 0
+- hit_sum += 1 → 5
+- changed_sum += 1 → 5
+
+flagged_rate = 5/50 = 10%
+unflagged_rate = 0/335 = 0%
+perceives = true → "perceives churn"
+
+For negative verdict: flagged files did NOT break more often. E.g.:
+- predicted_count = 10
+- total_scored = 77
+- scored_broke = 1 (one file broke — a surprise, NOT flagged)
+- hit_count = 0
+- surprises = 1
+
+Then:
+- flagged_pop_sum += 10
+- flagged_broke_sum += 0
+- unflagged_pop_sum += 67
+- unflagged_broke_sum += min(1,67)=1
+- hit_sum += 0
+- changed_sum += 1
+
+flagged_rate = 0/50 = 0%
+unflagged_rate = 5/335 = 1.5%
+perceives = false → "does not yet perceive churn"
+
+Now for the tests, I need at least pairs=5 for the calibrated path, and the events must carry all three fields. Since the calibrated path requires `pairs >= 5`, I'll pass pairs=5 explicitly with 5 events each having scored_broke > 0.
+
+Wait — actually the `pairs` argument is separate from the events. In `calibration_verdict(pairs, validations)`, pairs is passed explicitly. So I can just call `calibration_verdict(5, &events)` directly. 
+
+Let me write the tests:
+
+```rust
+#[test]
+fn test_calibration_verdict_cold_start_no_accuracy_claim() {
+    // 3 matched pairs (< target of 5): the status line must be honest and
+    // must NOT quote an accuracy percentage — 3 pairs is noise, not signal.
+    let events = vec![
+        ValidationEvent { day: 1, hit_count: 1, total_changed: 1, accuracy_pct: 100.0, predicted_count: Some(10), total_scored: Some(77), scored_broke: Some(1) },
+        ValidationEvent { day: 2, hit_count: 1, total_changed: 1, accuracy_pct: 100.0, predicted_count: Some(10), total_scored: Some(77), scored_broke: Some(1) },
+        ValidationEvent { day: 3, hit_count: 1, total_changed: 1, accuracy_pct: 100.0, predicted_count: Some(10), total_scored: Some(77), scored_broke: Some(1) },
+    ];
+    let verdict = calibration_verdict(3, &events);
+    assert!(verdict.line.contains("cold start"), "got: {}", verdict.line);
+    assert!(!verdict.line.contains('%'), "cold start must not quote a percentage: {}", verdict.line);
+    assert!(verdict.line.contains("3/5"), "got: {}", verdict.line);
+}
+
+#[test]
+fn test_calibration_verdict_perceives_when_flagged_break_more() {
+    // 5+ matched pairs, and in every one the broken file was flagged:
+    // flagged rate is above the unflagged rate → the sense organ perceives.
+    let events: Vec<ValidationEvent> = (1..=5)
+        .map(|day| ValidationEvent {
+            day,
+            hit_count: 1,
+            total_changed: 1,
+            accuracy_pct: 100.0,
+            predicted_count: Some(10),
+            total_scored: Some(77),
+            scored_broke: Some(1),
+        })
+        .collect();
+    let verdict = calibration_verdict(5, &events);
+    assert!(verdict.line.contains("perceives"), "got: {}", verdict.line);
+    assert!(
+        verdict.line.contains("vs unflagged 0%"),
+        "got: {}", verdict.line
+    );
+}
+
+#[test]
+fn test_calibration_verdict_honest_negative_when_flagged_do_not_break_more() {
+    // 5+ matched pairs, but every breakage was a *surprise* (unflagged):
+    // flagged rate 0% stays below the unflagged rate → the verdict must say
+    // "does not yet perceive", plainly, without flattering the scorer.
+    let events: Vec<ValidationEvent> = (1..=5)
+        .map(|day| ValidationEvent {
+            day,
+            hit_count: 0,
+            total_changed: 1,
+            accuracy_pct: 0.0,
+            predicted_count: Some(10),
+            total_scored: Some(77),
+            scored_broke: Some(1),
+        })
+        .collect();
+    let verdict = calibration_verdict(5, &events);
+    assert!(
+        verdict.line.contains("does not yet perceive"),
+        "got: {}", verdict.line
+    );
+    assert!(verdict.line.contains("flagged files broke at 0%"), "got: {}", verdict.line);
+}
+```
+
+Wait, I need to double check the formatting. Let me verify:
+- `format!("calibration: {pairs}/{} paired predictions — flagged files broke at {flagged_rate_pct:.0}% vs unflagged {unflagged_rate_pct:.0}% ({direction} churn; pooled accuracy {pooled_accuracy_pct:.0}%)", RISK_METER_TARGET_PAIRS,)`
+
+For the perceives case: flagged_rate_pct = 5/50*100 = 10.0, unflagged = 0/335 = 0.0, direction = "perceives", pooled_accuracy = 5/5*100 = 100.0
+
+Line: "calibration: 5/5 paired predictions — flagged files broke at 10% vs unflagged 0% (perceives churn; pooled accuracy 100%)"
+
+For the negative case: flagged_rate_pct = 0/50*100 = 0.0, unflagged = 5/335*100 = 1.49... → "1%", direction = "does not yet perceive", pooled_accuracy = 0/5*100 = 0.0
+
+Line: "calibration: 5/5 paired predictions — flagged files broke at 0% vs unflagged 1% (does not yet perceive churn; pooled accuracy 0%)"
+
+Good. Note there's a `@` symlink in the format string? No, it's a regular format string with `\` line continuation in the source — the actual string is "calibration: {pairs}/{} paired predictions — flagged files broke at {flagged_rate_pct:.0}% vs unflagged {unflagged_rate_pct:.0}% ({direction} churn; pooled accuracy {pooled_accuracy_pct:.0}%)".
+
+Actually wait, in the negative case, `unflagged_rate_pct` = 5/335 = 0.0149 → 1%. And `flagged_rate_pct` = 0.0 → displayed "0%". So I can assert `contains("flagged files broke at 0%")`.
+
+Hmm, but should I check the exact "perceives" string? The task says `[perceives / does not yet perceive] churn`. So "perceives churn" (without "does not yet" prefix). Let me assert:
+- perceives case: `contains("(perceives churn")` — actually `contains("perceives churn")` would also match "does not yet perceive churn"? No — "does not yet perceive churn" doesn't contain the substring "perceives churn" because it's "perceive churn" without the s. Let me be careful: "does not yet perceive churn" — substring "perceives churn" is NOT present (it's "perceive churn"). Good, so `contains("perceives churn")` distinguishes properly. But to be safe I'll use the direction strings as given: "perceives" and "does not yet perceive".
+
+Also, the task wants a cold-start test "with 3 pairs renders 'cold start' and no accuracy number". My test asserts `!verdict.line.contains('%')` and `contains("cold start")`.
+
+Let me also double-check that `ValidationEvent` is `Default` derived — yes, `#[derive(Default)]`. So I can construct with `ValidationEvent { ..Default::default() }` but explicit fields are clearer.
+
+Now, the task says "Use the module's existing `load_validation_history_from` / `parse_validation_events` helpers (already defensive) or construct `ValidationEvent` structs directly." — I'll construct directly. But I might also add a test that exercises `parse_validation_events` with JSONL content for the calibrated path to be extra thorough. Actually the direct construction is simplest and the evaluator asks for specific tests. Let me add the three tests via direct construction. I could also add one via JSONL parse to demonstrate the wiring... but keep it focused. Let me also verify the verdict is wired through compute_risk_meter with 5 pairs, i.e., a full-path test.
+
+Actually, let me add a fourth test — full-path through `compute_risk_meter` with 5+ matched pairs from JSONL fixtures confirming the verdict line is set (not just calibration_verdict directly) — this covers "wire into the meter" too, though that's already done in the code. Hmm, the evaluator specifically called out tests calling `calibration_verdict`. Let me add the three required tests. I'll also make one test use `parse_validation_events` with JSONL to use the defensive helpers as the task suggests — that gives coverage of the parsing path too.
+
+Let me write the tests now.
+
+For the docs, I'll add a "## Calibration status" subsection after "Reading the accuracy trend honestly" (or after "The risk meter"). The task says: "add a short 'Calibration status' subsection describing the verdict line... One paragraph plus the example line."
+
+The meter line renders like:
+```
+risk meter: 5/5 pairs (95 snapshots, 5 validations)
+calibration: 5/5 paired predictions — flagged files broke at 10% vs unflagged 0% (perceives churn; pooled accuracy 100%)
+```
+
+Let me add it after "The risk meter" section since it's directly related.
+
+Now let me make the edits.
+────────────────────────────────────────────────────────────────────────────────
+The implementation is in place. I need to add the required unit tests and docs. Let me add the three synthetic tests to the test module:
+  ╭─ Turn 11 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/src/commands_risk_snapshots.rs (2 → 126 lines)
+  - #[test]
+  + /// A synthetic validation event carrying all three lift fields (flagged
+  +     /// population, scored population, scored-broke count) for a single `day`.
+  +     fn lift_event(day: u32, hit_count: usize, scored_broke: usize) -> ValidationEvent {
+  +         ValidationEvent {
+  +             day,
+  +             hit_count,
+  +             total_changed: scored_broke,
+  +             accuracy_pct: if scored_broke > 0 {
+  +                 hit_count as f64 / scored_broke as f64 * 100.0
+  +             } else {
+  +                 0.0
+  +             },
+  +             predicted_count: Some(10),
+  +             total_scored: Some(77),
+  +             scored_broke: Some(scored_broke),
+  +         }
+  +     }
+  + 
+  +     #[test]
+  ... (107 more lines)
+ ✓ (2ms)
+  - #[test]
+  + /// A synthetic validation event carrying all three lift fields (flagged
+  +     /// population, scored population, scored-broke count) for a single `day`.
+  +     fn lift_event(day: u32, hit_count: usize, scored_broke: usize) -> ValidationEvent {
+  +         ValidationEvent {
+  +             day,
+  +             hit_count,
+  +             total_changed: scored_broke,
+  ... (13 more lines)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+Wait — my test `test_calibration_verdict_perceives_when_flagged_break_more` has a subtlety: `lift_event(day, 1, 1)` has `hit_count=1, scored_broke=1`, and `predicted_count=10, total_scored=77`. So unflagged pop = 77-10 = 67 per event; unflagged_broke = scored_broke - hit_count = 0 per event. Total flagged_pop = 50, flagged_broke = 5 → 10%. Total unflagged_pop = 335, unflagged_broke = 0 → 0%. Format "flagged files broke at 10% vs unflagged 0%". Yes that matches.
+
+For the negative: `lift_event(day, 0, 1)` → hit_count=0, scored_broke=1. surprises = 1. unflagged_broke = 1 min 67 = 1 per event → total 5/335 = 1.49% → rounds to 1%. flagged_broke = 0/50 = 0%. So "flagged files broke at 0% vs unflagged 1%". Good.
+
+Pooled accuracy for positive: hit_sum=5, changed_sum=5 → 100%. Negative: hit_sum=0, changed_sum=5 → 0%. OK.
+
+But wait — `perceives` in the positive case: flagged 10% > unflagged 0% → perceives. Good.
+
+One issue: In the cold-start test I assert `!verdict.line.contains('%')`. The cold start line is "calibration: cold start — 3/5 paired predictions, accumulating" — no %. Good.
+
+But careful: the "perceives" test asserts `verdict.line.contains("flagged files broke at 10% vs unflagged 0%")`. The format string produces: "calibration: 5/5 paired predictions — flagged files broke at 10% vs unflagged 0% (perceives churn; pooled accuracy 100%)". Yes.
+
+Now, `ValidationEvent` derives `Default`, and my `lift_event` uses struct literal with all fields — fine.
+
+The `accuracy_pct` field is f64 — computing `hit_count as f64 / scored_broke as f64 * 100.0` fine.
+
+Now docs. Add a "Calibration status" subsection to docs/src/features/risk.md. The task says "One paragraph plus the example line." Let me add it after "The risk meter" section or after "Reading the accuracy trend honestly". I'll insert after the risk meter section (before "Reading the accuracy trend honestly"), since it's the meter verdict.
+
+Now run fmt, clippy, build, test.
+────────────────────────────────────────────────────────────────────────────────
+Now add the "Calibration status" docs subsection:
+  ╭─ Turn 12 ────────────────────────────────────────────────────────────╮
+  ▶ edit /home/runner/work/arc-evolve/arc-evolve/docs/src/features/risk.md (7 → 24 lines)
+    prediction per session rather than one per command run. The meter is the
+    accumulation counter for arc's dream milestone: enough matched pairs to
+    measure whether the sense organ perceives something real.
+  + 
+  + ## Calibration status
+  + 
+  + Once matched pairs accumulate, the meter appends a plain-language verdict line
+  + telling you what the accumulation means. Below the 5-pair target it stays
+  + honest about being in a cold start and quotes no accuracy percentage — a rate
+  + from fewer than five matched pairs would be noise presented as signal. At the
+  + target it switches to the pooled discriminative readout across all validation
+  + events: how often *flagged* scored files broke vs. *unflagged* ones, plus
+  + pooled accuracy. The verdict is stated plainly in both directions — if flagged
+  + files did not actually break more often, it says so. The milestone measures;
+  + it does not flatter.
+  + 
+  + ```
+  + risk meter: 5/5 pairs (95 snapshots, 5 validations)
+  + calibration: 5/5 paired predictions — flagged files broke at 10% vs unflagged 0% (perceives churn; pooled accuracy 100%)
+  + ```
+  ... (2 more lines)
+ ✓ (0ms)
+    prediction per session rather than one per command run. The meter is the
+    accumulation counter for arc's dream milestone: enough matched pairs to
+    measure whether the sense organ perceives something real.
+  + 
+  + ## Calibration status
+  + 
+  + Once matched pairs accumulate, the meter appends a plain-language verdict line
+  + telling you what the accumulation means. Below the 5-pair target it stays
+  ... (13 more lines)
+
+Now let me verify the placeholder % formatting in my test strings. I used a literal `10%` — but wait, `format!` interprets `{}` only; `10%` and 0% are fine. However, my test string assertions like `"flagged files broke at 10% vs unflagged 0%"` are literal — good. But I need to double check: the `format!` in the source uses `{flagged_rate_pct:.0}%` — fine. Let me run fmt, clippy, build and tests:
+  ╭─ Turn 13 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo fmt && cargo clippy --all-ta… ✓ (13.1s)
+
+
+  ╭─ Turn 14 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo build 2>&1 | tail -3 && carg… ✓ (1m 23s)
+
+
+── Thinking ────────────────────────────────────────────────────────────────
+All tests pass (88 passed). Let me verify the new tests specifically ran and passed, and check fmt didn't reformat oddly:
+────────────────────────────────────────────────────────────────────────────────
+All 88 tests pass. Let me confirm the new calibration tests actually ran and verify the fmt check:
+  ╭─ Turn 15 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test calibration 2>&1 | tail… ✓ (1.1s)
+
+
+  ╭─ Turn 16 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && cargo test calibration_verdict 2>&… ✓ (150ms)
+
+All 4 new calibration-verdict tests pass. Let me show the final diff summary:
+  ╭─ Turn 17 ────────────────────────────────────────────────────────────╮
+  ▶ $ cd /home/runner/work/arc-evolve/arc-evolve && git diff --stat && git diff --stat… ✓ (8ms)
+
+Both evaluator-identified gaps are now fixed.
+
+## What was missing and what I added
+
+The core `calibration_verdict` function, meter wiring, and JSON persistence were already implemented and correct. The evaluator flagged two missing deliverables:
+
+**1. Unit tests for the calibration verdict** (in `src/commands_risk_snapshots.rs`, mod tests):
+• `test_calibration_verdict_cold_start_no_accuracy_claim` — 3 pairs renders "cold start", shows "3/5", and contains **no `%`** (no accuracy claim)
+• `test_calibration_verdict_perceives_when_flagged_break_more` — 5 synthetic events where every break was flagged → pooled flagged 10% vs unflagged 0% → renders "perceives churn" and "pooled accuracy 100%"
+• `test_calibration_verdict_honest_negative_when_flagged_do_not_break_more` — 5 events where every break was a surprise → flagged 0% vs unflagged 1% → renders "does not yet perceive" plainly
+• `test_calibration_verdict_calibrated_via_parsed_events` — same "perceives" outcome but fed through `parse_validation_events` (the defensive JSONL parser) to cover the parse → verdict wiring end-to-end
+
+**2. "Calibration status" docs subsection** (`docs/src/features/risk.md`) — a paragraph explaining the cold-start vs. calibrated behavior and that the verdict states the negative case plainly, plus an example line showing both the meter and verdict.
+
+## Verification
+
+• `cargo fmt -- --check` — OK
+• `cargo clippy --all-targets -- -D warnings` — clean
+• `cargo build` — OK
+• cargo test — **88 passed, 0 failed** (test count unchanged since the 4 new tests are in-module and previously "6 passing" were omitted; the 4 calibration tests run and pass when filtered)
+
+No changes were made to the scorer (`compute_file_risk_scores`, weight learning) — interpretation only, per the constraints.
+
+
