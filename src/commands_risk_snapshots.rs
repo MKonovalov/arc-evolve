@@ -482,6 +482,100 @@ pub(crate) const RISK_METER_PATH: &str = ".arc/risk_meter.json";
 /// humans/agents reading it see the goal.
 pub(crate) const RISK_METER_TARGET_PAIRS: u64 = 5;
 
+/// The plain-language verdict for the calibration milestone (the dream's
+/// "does the umwelt correspond to the territory?" test).
+///
+/// Two states:
+/// - **Cold-start** (`pairs < target`): honest status, no accuracy claims —
+///   a percentage from <5 matched pairs would be noise presented as signal.
+/// - **Calibrated** (`pairs >= target`): pooled discriminative readout across
+///   all usable validation events. `flagged_rate` = how often *flagged*
+///   (predicted-high-risk) scored files broke; `unflagged_rate` = how often
+///   *unflagged* scored files broke (surprises over the scored population the
+///   scorer did not flag). The verdict is stated plainly in both directions —
+///   the milestone measures, it does not flatter.
+pub(crate) struct CalibrationVerdict {
+    /// The fully rendered plain-language line; persists into the meter stamp.
+    pub(crate) line: String,
+}
+
+/// Compute the calibration verdict from the matched-pair count and validation
+/// events. Pure and I/O-free so it is unit-testable with synthetic data.
+///
+/// Uses the same defensive "usable event" rule as the accuracy readers: an
+/// event must carry `predicted_count` (flagged population), `total_scored`
+/// (scored population), and `scored_broke` (flagged + scored surprises that
+/// broke) to feed the pooled readout; older events without the lift fields are
+/// skipped without panic. Pooled rate numerators are clamped to their
+/// denominators (a scored_broke larger than total_scored would be a ledger
+/// anomaly), so the rendered verdict can never claim a rate above 100%.
+pub(crate) fn calibration_verdict(pairs: u64, validations: &[ValidationEvent]) -> CalibrationVerdict {
+    if pairs < RISK_METER_TARGET_PAIRS {
+        return CalibrationVerdict {
+            line: format!(
+                "calibration: cold start — {pairs}/{} paired predictions, accumulating",
+                RISK_METER_TARGET_PAIRS
+            ),
+        };
+    }
+
+    // Pooled discriminative readout across events that carry all three lift
+    // fields (flagged population, scored population, scored-broke count).
+    let mut flagged_broke_sum: usize = 0;
+    let mut flagged_pop_sum: usize = 0;
+    let mut unflagged_broke_sum: usize = 0;
+    let mut unflagged_pop_sum: usize = 0;
+    let mut hit_sum: usize = 0;
+    let mut changed_sum: usize = 0;
+    for e in validations {
+        if let (Some(pred), Some(total_scored), Some(scored_broke)) =
+            (e.predicted_count, e.total_scored, e.scored_broke)
+        {
+            // Flagged population = the `predicted_count` files the scorer
+            // flagged; their breakage fills `scored_broke`'s hits half
+            // (`hit_count`), the surprises half belongs to the unflagged
+            // scored population. Pooled surprise count = scored_broke − hits.
+            let surprises = scored_broke.saturating_sub(e.hit_count);
+            flagged_pop_sum += pred;
+            flagged_broke_sum += e.hit_count.min(pred);
+            unflagged_pop_sum += total_scored.saturating_sub(pred);
+            unflagged_broke_sum += surprises.min(total_scored.saturating_sub(pred));
+            hit_sum += e.hit_count;
+            changed_sum += scored_broke;
+        }
+    }
+
+    if flagged_pop_sum == 0 || unflagged_pop_sum == 0 {
+        return CalibrationVerdict {
+            line: format!(
+                "calibration: {pairs}/{} paired predictions — no usable scored population yet",
+                RISK_METER_TARGET_PAIRS
+            ),
+        };
+    }
+
+    let flagged_rate_pct = flagged_broke_sum as f64 / flagged_pop_sum as f64 * 100.0;
+    let unflagged_rate_pct = unflagged_broke_sum as f64 / unflagged_pop_sum as f64 * 100.0;
+    let perceives = flagged_rate_pct > unflagged_rate_pct;
+
+    // Pooled accuracy: share of all scored files that broke which the scorer
+    // had flagged (`hits / scored_broke`). Only quoted once calibrated.
+    let pooled_accuracy_pct = if changed_sum > 0 {
+        hit_sum as f64 / changed_sum as f64 * 100.0
+    } else {
+        0.0
+    };
+
+    let direction = if perceives { "perceives" } else { "does not yet perceive" };
+    CalibrationVerdict {
+        line: format!(
+            "calibration: {pairs}/{} paired predictions — flagged files broke at {flagged_rate_pct:.0}% \
+             vs unflagged {unflagged_rate_pct:.0}% ({direction} churn; pooled accuracy {pooled_accuracy_pct:.0}%)",
+            RISK_METER_TARGET_PAIRS,
+        ),
+    }
+}
+
 /// Computed cadence stamp for the risk prediction meter — a run-counted
 /// summary of the two JSONL ledger files, written alongside each snapshot so
 /// the accumulation state stays legible session-to-session (and we can tell
@@ -499,6 +593,10 @@ pub(crate) struct RiskMeter {
     pub(crate) last_snapshot_day: u64,
     /// The dream milestone this meter accumulates toward.
     pub(crate) target_pairs: u64,
+    /// The plain-language calibration verdict for this accumulation state
+    /// (`calibration_verdict(...).line`), persisted in the meter stamp so the
+    /// milestone state is legible without re-reading the ledgers.
+    pub(crate) verdict_line: String,
 }
 
 /// Compute the risk meter from snapshot + validation JSONL content.
@@ -514,12 +612,26 @@ pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &st
         .iter()
         .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
         .count() as u64;
+    into_risk_meter(pairs, snapshots.len() as u64, &validations, last_snapshot_day)
+}
+
+/// Assemble a `RiskMeter` from the matched-pair count and the parsed validation
+/// events. Shared by `compute_risk_meter` and `write_risk_meter_to` so the
+/// meter's verdict never drifts between the in-memory and persisted views.
+fn into_risk_meter(
+    pairs: u64,
+    snapshots: u64,
+    validations: &[ValidationEvent],
+    last_snapshot_day: u64,
+) -> RiskMeter {
+    let verdict = calibration_verdict(pairs, validations);
     RiskMeter {
-        snapshots: snapshots.len() as u64,
+        snapshots,
         validations: validations.len() as u64,
         pairs,
         last_snapshot_day,
         target_pairs: RISK_METER_TARGET_PAIRS,
+        verdict_line: verdict.line,
     }
 }
 
@@ -544,6 +656,7 @@ pub(crate) fn write_risk_meter_to(
         "pairs": meter.pairs,
         "last_snapshot_day": meter.last_snapshot_day,
         "target_pairs": meter.target_pairs,
+        "verdict": meter.verdict_line,
     });
     let json_str = serde_json::to_string_pretty(&json).map_err(std::io::Error::other)?;
     std::fs::write(meter_path, json_str)?;
@@ -563,12 +676,19 @@ pub(crate) fn write_risk_meter() -> Option<RiskMeter> {
 }
 
 /// One-line progress note for the harness path:
-/// `risk meter: N/5 pairs (S snapshots, V validations)`.
+/// `risk meter: N/5 pairs (S snapshots, V validations)`, followed by the
+/// calibration verdict line once one exists (cold-start status below the
+/// milestone; the plain-language verdict once ≥5 matched pairs accumulate).
 pub(crate) fn format_risk_meter_line(meter: &RiskMeter) -> String {
-    format!(
+    let base = format!(
         "risk meter: {}/{} pairs ({} snapshots, {} validations)",
         meter.pairs, meter.target_pairs, meter.snapshots, meter.validations
-    )
+    );
+    if meter.verdict_line.is_empty() {
+        base
+    } else {
+        format!("{base}\n{}", meter.verdict_line)
+    }
 }
 
 #[cfg(test)]
@@ -1213,10 +1333,13 @@ mod tests {
             pairs: 1,
             last_snapshot_day: 174,
             target_pairs: 5,
+            verdict_line: "calibration: cold start — 1/5 paired predictions, accumulating"
+                .to_string(),
         };
         assert_eq!(
             format_risk_meter_line(&meter),
-            "risk meter: 1/5 pairs (88 snapshots, 2 validations)"
+            "risk meter: 1/5 pairs (88 snapshots, 2 validations)\n\
+             calibration: cold start — 1/5 paired predictions, accumulating"
         );
     }
 
