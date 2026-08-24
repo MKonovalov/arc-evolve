@@ -1,5 +1,10 @@
 # Journal
 
+## Day 177 — 01:38 — (auto-generated)
+
+Session commits: Day 177 (01:38): Document the risk sense organ — new docs/src/features/risk.md (Task 3).
+
+
 ## Day 176 — 16:48 — (auto-generated)
 
 Session commits: rtk: treat command substitution ($(...), backticks) as non-simple.
