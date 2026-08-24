@@ -509,7 +509,10 @@ pub(crate) struct CalibrationVerdict {
 /// skipped without panic. Pooled rate numerators are clamped to their
 /// denominators (a scored_broke larger than total_scored would be a ledger
 /// anomaly), so the rendered verdict can never claim a rate above 100%.
-pub(crate) fn calibration_verdict(pairs: u64, validations: &[ValidationEvent]) -> CalibrationVerdict {
+pub(crate) fn calibration_verdict(
+    pairs: u64,
+    validations: &[ValidationEvent],
+) -> CalibrationVerdict {
     if pairs < RISK_METER_TARGET_PAIRS {
         return CalibrationVerdict {
             line: format!(
@@ -566,7 +569,11 @@ pub(crate) fn calibration_verdict(pairs: u64, validations: &[ValidationEvent]) -
         0.0
     };
 
-    let direction = if perceives { "perceives" } else { "does not yet perceive" };
+    let direction = if perceives {
+        "perceives"
+    } else {
+        "does not yet perceive"
+    };
     CalibrationVerdict {
         line: format!(
             "calibration: {pairs}/{} paired predictions — flagged files broke at {flagged_rate_pct:.0}% \
@@ -612,7 +619,12 @@ pub(crate) fn compute_risk_meter(snapshot_content: &str, validation_content: &st
         .iter()
         .filter(|e| e.scored_broke.is_some_and(|n| n > 0))
         .count() as u64;
-    into_risk_meter(pairs, snapshots.len() as u64, &validations, last_snapshot_day)
+    into_risk_meter(
+        pairs,
+        snapshots.len() as u64,
+        &validations,
+        last_snapshot_day,
+    )
 }
 
 /// Assemble a `RiskMeter` from the matched-pair count and the parsed validation
@@ -1340,6 +1352,134 @@ mod tests {
             format_risk_meter_line(&meter),
             "risk meter: 1/5 pairs (88 snapshots, 2 validations)\n\
              calibration: cold start — 1/5 paired predictions, accumulating"
+        );
+    }
+
+    /// A synthetic validation event carrying all three lift fields (flagged
+    /// population, scored population, scored-broke count) for a single `day`.
+    fn lift_event(day: u32, hit_count: usize, scored_broke: usize) -> ValidationEvent {
+        ValidationEvent {
+            day,
+            hit_count,
+            total_changed: scored_broke,
+            accuracy_pct: if scored_broke > 0 {
+                hit_count as f64 / scored_broke as f64 * 100.0
+            } else {
+                0.0
+            },
+            predicted_count: Some(10),
+            total_scored: Some(77),
+            scored_broke: Some(scored_broke),
+        }
+    }
+
+    #[test]
+    fn test_calibration_verdict_cold_start_no_accuracy_claim() {
+        // 3 matched pairs (< the 5-pair target): the status line must be honest
+        // and must NOT quote an accuracy percentage — 3 pairs is noise, not signal.
+        let events = vec![
+            lift_event(1, 1, 1),
+            lift_event(2, 1, 1),
+            lift_event(3, 1, 1),
+        ];
+        let verdict = calibration_verdict(3, &events);
+        assert!(
+            verdict.line.contains("cold start"),
+            "cold-start path must say 'cold start', got: {}",
+            verdict.line
+        );
+        assert!(
+            verdict.line.contains("3/5"),
+            "must surface 3/5 progress, got: {}",
+            verdict.line
+        );
+        assert!(
+            !verdict.line.contains('%'),
+            "cold start must never quote a percentage, got: {}",
+            verdict.line
+        );
+    }
+
+    #[test]
+    fn test_calibration_verdict_perceives_when_flagged_break_more() {
+        // ≥5 matched pairs, and in every one the broken file was flagged:
+        // the flagged breakage rate must exceed the unflagged rate, so the
+        // verdict says the sense organ perceives churn.
+        let events: Vec<ValidationEvent> = (1..=5).map(|day| lift_event(day, 1, 1)).collect();
+        let verdict = calibration_verdict(5, &events);
+
+        // Pooled: 5 flagged broke of 50 flagged (10%), 0 of 335 unflagged (0%).
+        assert!(
+            verdict.line.contains("perceives churn"),
+            "flagged > unflagged must render 'perceives', got: {}",
+            verdict.line
+        );
+        assert!(
+            verdict
+                .line
+                .contains("flagged files broke at 10% vs unflagged 0%"),
+            "rates must match the pooled readout, got: {}",
+            verdict.line
+        );
+        assert!(
+            verdict.line.contains("pooled accuracy 100%"),
+            "all 5 breaks flagged → 100% pooled accuracy, got: {}",
+            verdict.line
+        );
+    }
+
+    #[test]
+    fn test_calibration_verdict_honest_negative_when_flagged_do_not_break_more() {
+        // ≥5 matched pairs, but every breakage was a *surprise* (unflagged):
+        // the flagged rate (0%) stays below the unflagged rate, and the verdict
+        // must say "does not yet perceive" plainly — the milestone measures,
+        // it does not flatter.
+        let events: Vec<ValidationEvent> = (1..=5).map(|day| lift_event(day, 0, 1)).collect();
+        let verdict = calibration_verdict(5, &events);
+
+        // Pooled: 0 flagged broke of 50 flagged (0%), 5 surprises of 335
+        // unflagged (1%).
+        assert!(
+            verdict.line.contains("does not yet perceive"),
+            "flagged <= unflagged must render the honest negative, got: {}",
+            verdict.line
+        );
+        assert!(
+            verdict
+                .line
+                .contains("flagged files broke at 0% vs unflagged 1%"),
+            "rates must match the pooled readout, got: {}",
+            verdict.line
+        );
+    }
+
+    #[test]
+    fn test_calibration_verdict_calibrated_via_parsed_events() {
+        // Same perceiving outcome, but fed through the defensive JSONL parser
+        // (`parse_validation_events`) instead of struct construction, covering
+        // the parse → verdict wiring end-to-end with ≥5 matched pairs.
+        let content = (1..=5)
+            .map(|day| {
+                format!(
+                    "{{\"day\":{day},\"hits\":[\"src/flagged.rs\"],\"surprises\":[],\
+                     \"accuracy_pct\":100.0,\"predicted_count\":10,\"total_scored\":77,\
+                     \"scored_broke\":1}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let events = parse_validation_events(&content);
+        assert_eq!(events.len(), 5);
+        let verdict = calibration_verdict(5, &events);
+        assert!(
+            verdict.line.contains("perceives churn"),
+            "got: {}",
+            verdict.line
+        );
+        assert!(
+            verdict.line.contains("pooled accuracy 100%"),
+            "got: {}",
+            verdict.line
         );
     }
 

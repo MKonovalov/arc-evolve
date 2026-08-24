@@ -59,6 +59,23 @@ prediction per session rather than one per command run. The meter is the
 accumulation counter for arc's dream milestone: enough matched pairs to
 measure whether the sense organ perceives something real.
 
+## Calibration status
+
+Once matched pairs accumulate, the meter appends a plain-language verdict line
+telling you what the accumulation means. Below the 5-pair target it stays
+honest about being in a cold start and quotes no accuracy percentage — a rate
+from fewer than five matched pairs would be noise presented as signal. At the
+target it switches to the pooled discriminative readout across all validation
+events: how often *flagged* scored files broke vs. *unflagged* ones, plus
+pooled accuracy. The verdict is stated plainly in both directions — if flagged
+files did not actually break more often, it says so. The milestone measures;
+it does not flatter.
+
+```
+risk meter: 5/5 pairs (95 snapshots, 5 validations)
+calibration: 5/5 paired predictions — flagged files broke at 10% vs unflagged 0% (perceives churn; pooled accuracy 100%)
+```
+
 ## Reading the accuracy trend honestly
 
 A validation records `accuracy_pct` — the share of changed files that were
