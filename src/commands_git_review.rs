@@ -5,8 +5,8 @@
 //! through `commands_git_review` are unchanged.
 
 pub use crate::commands_review::{
-    build_review_prompt, build_review_prompt_structured, extract_review_json, parse_review_comments,
-    parse_review_effort, ReviewComment, ReviewEffort,
+    build_review_prompt, build_review_prompt_structured, extract_review_json,
+    parse_review_comments, parse_review_effort, ReviewComment, ReviewEffort,
 };
 
 use crate::commands_session::auto_compact_if_needed;
