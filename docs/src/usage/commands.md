@@ -562,6 +562,9 @@ This is one of the most common workflows for developers using coding agents — 
 | `/risk accuracy` | Show prediction accuracy, per-signal breakdown, and learned weights |
 | `/risk effectiveness` | Measure whether the risk reflex is actually improving over time |
 
+See [Risk Analysis](../features/risk.md) for what the scores mean, how the
+snapshot → validate loop accumulates, and how to read the accuracy trend.
+
 The `/risk` command analyzes source files and ranks them by predicted
 regression risk using weighted signals from git history: change frequency
 (30-day churn), recent fix/bugfix commits, co-change coupling, file size,

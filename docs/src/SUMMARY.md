@@ -28,6 +28,7 @@
 - [Session Persistence](./features/sessions.md)
 - [Context Management](./features/context.md)
 - [Git Integration](./features/git.md)
+- [Risk Analysis](./features/risk.md)
 - [Cost Tracking](./features/cost-tracking.md)
 
 # Architecture
