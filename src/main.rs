@@ -67,6 +67,7 @@ mod commands_refactor;
 mod commands_rename;
 mod commands_retry;
 mod commands_revisit;
+mod commands_review;
 mod commands_risk;
 mod commands_risk_accuracy;
 mod commands_risk_emerging;
