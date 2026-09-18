@@ -115,15 +115,39 @@ fn resolve_path(path: &str) -> String {
         return canonical.to_string_lossy().to_string();
     }
 
-    // Manual normalization for non-existent paths
+    // Manual normalization for non-existent paths — but resolve parent dir symlinks
+    // so deny/allow checks work correctly (e.g. /etc -> /private/etc on macOS).
     let p = std::path::Path::new(path);
-    let absolute = if p.is_absolute() {
-        p.to_path_buf()
+    let (parent, basename) = if let Some(parent) = p.parent() {
+        (parent.to_path_buf(), p.file_name().unwrap_or_default().to_string_lossy().into_owned())
     } else {
+        (std::path::PathBuf::new(), p.to_string_lossy().into_owned())
+    };
+    let parent_resolved = if parent.exists() {
+        std::fs::canonicalize(&parent).unwrap_or(parent)
+    } else {
+        parent
+    };
+    let mut absolute = if parent_resolved.as_os_str().is_empty() {
         std::env::current_dir()
             .unwrap_or_else(|_| std::path::PathBuf::from("/"))
             .join(p)
+    } else {
+        parent_resolved.join(&basename)
     };
+    if !p.is_absolute() {
+        absolute = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+            .join(p);
+        // Re-resolve parent of the absolute path
+        if let Some(abs_parent) = absolute.parent() {
+            if abs_parent.exists() {
+                if let Ok(canonical_parent) = std::fs::canonicalize(abs_parent) {
+                    absolute = canonical_parent.join(absolute.file_name().unwrap_or_default());
+                }
+            }
+        }
+    }
 
     // Normalize components: resolve `.` and `..`
     let mut components = Vec::new();
