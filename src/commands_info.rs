@@ -1510,13 +1510,24 @@ const DISCOVERY_TIPS: &[&str] = &[
 
 /// Generate context-sensitive tips based on the current project and session state.
 pub fn generate_tips() -> Vec<String> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    generate_tips_for(&cwd)
+}
+
+/// Context-sensitive tips computed against an explicit base directory.
+///
+/// `generate_tips()` reads the process CWD, which is process-global mutable
+/// state and therefore races with other tests that call
+/// `std::env::set_current_dir`. Tests should call this with
+/// `CARGO_MANIFEST_DIR` so the detected project type and `.git` presence are
+/// stable regardless of what other tests do to the CWD.
+pub(crate) fn generate_tips_for(cwd: &std::path::Path) -> Vec<String> {
     use crate::commands_goal::load_goal;
     use crate::commands_project::{detect_project_type, ProjectType};
     use crate::watch::get_watch_command;
 
     let mut tips: Vec<String> = Vec::new();
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let project = detect_project_type(&cwd);
+    let project = detect_project_type(cwd);
 
     // --- Project-type tips ---
     match project {
@@ -2712,9 +2723,10 @@ More text.
 
     #[test]
     fn test_generate_tips_includes_rust_hints() {
-        // We're running inside a Rust project (Cargo.toml exists),
-        // so we should see Rust-specific tips.
-        let tips = generate_tips();
+        // The repo root is a Rust project (Cargo.toml exists). Pass the base
+        // dir explicitly: generate_tips() reads the process CWD, which other
+        // tests mutate via set_current_dir (process-global state).
+        let tips = generate_tips_for(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let has_rust_tip = tips
             .iter()
             .any(|t| t.contains("cargo test") || t.contains("clippy"));
@@ -2726,8 +2738,9 @@ More text.
 
     #[test]
     fn test_generate_tips_includes_git_hint() {
-        // We're running in a git repo, so git tip should appear.
-        let tips = generate_tips();
+        // The repo root is a git repo, so the git tip should appear. Pass the
+        // base dir explicitly to avoid the set_current_dir race (see above).
+        let tips = generate_tips_for(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let has_git_tip = tips.iter().any(|t| t.contains("/diff --stat"));
         assert!(
             has_git_tip,

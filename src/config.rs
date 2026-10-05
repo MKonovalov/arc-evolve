@@ -115,53 +115,56 @@ fn resolve_path(path: &str) -> String {
         return canonical.to_string_lossy().to_string();
     }
 
-    // Manual normalization for non-existent paths — but resolve parent dir symlinks
-    // so deny/allow checks work correctly (e.g. /etc -> /private/etc on macOS).
+    // The path doesn't exist (yet): build a lexically-normalized absolute
+    // component list (resolving `.` and `..`), then canonicalize the LONGEST
+    // EXISTING PREFIX so symlinked ancestors are resolved too
+    // (e.g. /etc -> /private/etc, /tmp -> /private/tmp on macOS).
+    //
+    // Resolving only the immediate parent is not enough: for a path like
+    // /tmp/secret/data.txt the immediate parent /tmp/secret doesn't exist,
+    // so the prefix would stay unresolved and deny/allow checks against
+    // the canonicalized directory would silently miss.
     let p = std::path::Path::new(path);
-    let (parent, basename) = if let Some(parent) = p.parent() {
-        (parent.to_path_buf(), p.file_name().unwrap_or_default().to_string_lossy().into_owned())
-    } else {
-        (std::path::PathBuf::new(), p.to_string_lossy().into_owned())
-    };
-    let parent_resolved = if parent.exists() {
-        std::fs::canonicalize(&parent).unwrap_or(parent)
-    } else {
-        parent
-    };
-    let mut absolute = if parent_resolved.as_os_str().is_empty() {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .join(p)
-    } else {
-        parent_resolved.join(&basename)
-    };
+    let mut comps: Vec<std::ffi::OsString> = Vec::new();
+
     if !p.is_absolute() {
-        absolute = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"))
-            .join(p);
-        // Re-resolve parent of the absolute path
-        if let Some(abs_parent) = absolute.parent() {
-            if abs_parent.exists() {
-                if let Ok(canonical_parent) = std::fs::canonicalize(abs_parent) {
-                    absolute = canonical_parent.join(absolute.file_name().unwrap_or_default());
-                }
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        for c in cwd.components() {
+            if let std::path::Component::Normal(n) = c {
+                comps.push(n.to_os_string());
             }
+        }
+    }
+    for c in p.components() {
+        match c {
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => comps.clear(),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                comps.pop();
+            }
+            std::path::Component::Normal(n) => comps.push(n.to_os_string()),
         }
     }
 
-    // Normalize components: resolve `.` and `..`
-    let mut components = Vec::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                components.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => components.push(other),
+    // Find the longest existing prefix and canonicalize it.
+    // `i == 0` (the root) always exists, so this always terminates with a base.
+    let mut base = std::path::PathBuf::from("/");
+    let mut consumed = 0usize;
+    for i in (0..=comps.len()).rev() {
+        let mut candidate = std::path::PathBuf::from("/");
+        for c in &comps[..i] {
+            candidate.push(c);
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&candidate) {
+            base = canonical;
+            consumed = i;
+            break;
         }
     }
-    let normalized: std::path::PathBuf = components.iter().collect();
-    normalized.to_string_lossy().to_string()
+    for c in &comps[consumed..] {
+        base.push(c);
+    }
+    base.to_string_lossy().to_string()
 }
 
 /// Check if `path` is under (or equal to) `dir`.
@@ -1217,7 +1220,18 @@ env = { API_KEY = "secret" }
     #[test]
     fn test_config_module_resolve_path_normalizes_parent_dir() {
         let resolved = resolve_path("/tmp/a/../b");
-        assert_eq!(resolved, "/tmp/b");
+        // `..` must be resolved away (no literal ".." left in the result).
+        assert!(
+            !resolved.contains(".."),
+            "resolved {resolved:?} should have `..` resolved"
+        );
+        // The final component must be `b` under a `tmp` directory. On macOS
+        // /tmp is a symlink to /private/tmp, and we canonicalize the longest
+        // existing prefix, so either form is correct.
+        assert!(
+            resolved.ends_with("/tmp/b") || resolved.ends_with("/private/tmp/b"),
+            "resolved {resolved:?} should end with /tmp/b (or /private/tmp/b on macOS)"
+        );
     }
 
     #[test]

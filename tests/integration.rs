@@ -1457,9 +1457,14 @@ fn empty_piped_stdin_exits_quickly() {
         !output.status.success(),
         "empty piped stdin should exit non-zero"
     );
+    // Hang guard, not a benchmark: the binary itself exits in ~0.01s, but this
+    // assertion runs alongside ~90 other integration tests that spawn the same
+    // binary, so wall-clock time tracks CPU contention rather than startup cost
+    // (observed ~2.7s idle, ~5.9s under full-suite load). A real hang would
+    // exceed this budget by orders of magnitude.
     assert!(
-        elapsed.as_secs_f64() < 5.0,
-        "empty stdin exit took {:.2}s — should complete in under 5 seconds",
+        elapsed.as_secs_f64() < 15.0,
+        "empty stdin exit took {:.2}s — should complete in under 15 seconds",
         elapsed.as_secs_f64()
     );
 }
